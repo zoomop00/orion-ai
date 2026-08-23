@@ -106,7 +106,11 @@ def execute(
 
     Raises PaperExecutionError if `verdict.outcome` is not APPROVED (only
     an approved trade is executable — see the module docstring), if
-    `verdict.decision_ref` does not match `proposal`, if `proposal.
+    `verdict.decision_ref` does not match `proposal`, if `verdict.action`/
+    `verdict.direction` does not match `verdict.decision_ref.action`/
+    `.direction` (an explicit check, not reliance on `Position`'s/`Fill`'s
+    own geometry/NONE-rejection validators happening to catch a
+    `model_copy`-tampered verdict as a side effect), if `proposal.
     evidence_ref` does not match `evidence` (the same "evaluating a
     coincidence" integrity concern enforced at every other layer boundary
     in ORION, mirroring `orion.risk.guardian.EvidenceLinkageError` one
@@ -134,6 +138,25 @@ def execute(
         raise PaperExecutionError(
             "verdict.decision_ref does not match proposal; cannot establish that this "
             "verdict concerns this proposal"
+        )
+    if (
+        verdict.action != verdict.decision_ref.action
+        or verdict.direction != verdict.decision_ref.direction
+    ):
+        # RiskVerdict's own validator already enforces action==decision_ref.
+        # action (and direction==decision_ref.direction) at normal
+        # construction time, but `model_copy` bypasses every validator --
+        # this layer's guarantee must not depend on the verdict having been
+        # constructed normally, the same defense-in-depth reasoning already
+        # applied throughout orion.risk (`proposal_was_not_upgraded`,
+        # `classify_trade_levels`'s NONE-direction branch). Explicit, not
+        # incidental: this does not rely on Position's/Fill's own geometry
+        # or NONE-rejection validators happening to catch a tampered
+        # direction as a side effect.
+        raise PaperExecutionError(
+            "verdict.action/direction does not match verdict.decision_ref.action/direction; "
+            "cannot establish that this verdict's own action/direction reflects what "
+            "orion.risk.guardian.review actually approved"
         )
     if evidence_fingerprint(evidence) != proposal.evidence_ref.content_hash:
         raise PaperExecutionError(

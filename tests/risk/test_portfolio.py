@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,6 +15,7 @@ from orion.risk.portfolio import (
     expected_equity,
     initial_portfolio_state,
     mark_to_market,
+    portfolio_state_fingerprint,
 )
 
 _FINGERPRINT = "a" * 64
@@ -326,3 +329,40 @@ def test_compute_position_size_zero_when_equity_non_positive() -> None:
 
 def test_compute_position_size_zero_when_stop_equals_entry_never_divides_by_zero() -> None:
     assert compute_position_size(100_000.0, 2400.0, 2400.0, risk_per_trade_fraction=0.01) == 0.0
+
+
+# --- portfolio_state_fingerprint ---
+
+
+def test_portfolio_state_fingerprint_is_reproducible() -> None:
+    portfolio = initial_portfolio_state(symbol="XAUUSD", starting_balance=100_000.0, now=BASE_TIME)
+    assert portfolio_state_fingerprint(portfolio) == portfolio_state_fingerprint(portfolio)
+
+
+def test_portfolio_state_fingerprint_matches_independent_recomputation() -> None:
+    portfolio = initial_portfolio_state(symbol="XAUUSD", starting_balance=100_000.0, now=BASE_TIME)
+    payload = json.dumps(portfolio.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    manual = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    assert portfolio_state_fingerprint(portfolio) == manual
+
+
+def test_portfolio_state_fingerprint_changes_when_cash_changes() -> None:
+    a = initial_portfolio_state(symbol="XAUUSD", starting_balance=100_000.0, now=BASE_TIME)
+    b = initial_portfolio_state(symbol="XAUUSD", starting_balance=100_001.0, now=BASE_TIME)
+    assert portfolio_state_fingerprint(a) != portfolio_state_fingerprint(b)
+
+
+def test_portfolio_state_fingerprint_changes_when_open_position_changes() -> None:
+    flat = _portfolio(open_position=None)
+    with_position = _portfolio(open_position=_position())
+    assert portfolio_state_fingerprint(flat) != portfolio_state_fingerprint(with_position)
+
+
+def test_portfolio_state_fingerprint_changes_when_only_as_of_differs() -> None:
+    # Sanity check on the hash mechanism itself: two genuinely different
+    # `as_of` timestamps must still produce two different fingerprints
+    # (the timestamp IS part of the hashed content) -- guards against a
+    # canonicalization bug that accidentally drops a field.
+    a = _portfolio(as_of=BASE_TIME)
+    b = _portfolio(as_of=BASE_TIME + timedelta(microseconds=1))
+    assert portfolio_state_fingerprint(a) != portfolio_state_fingerprint(b)

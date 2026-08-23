@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from orion.provenance import canonical_hash
 from orion.reasoning.schemas import Direction
 
 
@@ -87,8 +88,14 @@ class Position(BaseModel):
 class PortfolioState(BaseModel):
     """A read-only snapshot of the paper account, as of `as_of`.
 
-    `equity` is never independently-settable truth — the only correct way
-    to produce one is `mark_to_market`. `equity_peak`/`daily_opening_equity`/
+    `equity` is a plain frozen field — this model alone never carries a
+    market price, so its own constructor cannot validate `equity` against
+    `cash`/`open_position` the way `mark_to_market` computes it correctly.
+    That does not make `equity` trusted caller-supplied truth:
+    `orion.risk.guardian.review()` independently re-verifies it (via
+    `expected_equity(cash, open_position, evidence.last_price)`, raising
+    `PortfolioIntegrityError` on any mismatch) before any portfolio-
+    dependent control ever reads it. `equity_peak`/`daily_opening_equity`/
     `weekly_opening_equity` are explicit fields (Mission 4 architecture
     decision B3: "the baseline must be explicit portfolio state, not
     guessed or reconstructed from arbitrary fields"), rolled forward only
@@ -255,3 +262,29 @@ def compute_position_size(
         return 0.0
     risk_amount = equity * risk_per_trade_fraction
     return risk_amount / stop_distance
+
+
+def portfolio_state_fingerprint(state: PortfolioState) -> str:
+    """A deterministic fingerprint of `state`'s full content.
+
+    Thin, domain-named wrapper around `orion.provenance.canonical_hash` —
+    mirrors `orion.analysis.evidence.evidence_fingerprint`, `orion.decision.
+    schemas.decision_fingerprint`, and `orion.risk.schemas.
+    risk_verdict_fingerprint` exactly, per this codebase's rule that
+    provenance/identity hashing lives in one shared mechanism, never two
+    independent implementations that might silently drift apart.
+
+    `orion.paper.store.PortfolioStore.save()` uses this as the
+    compare-and-swap token that proves a write is based on the store's
+    actual current snapshot, not a stale one — the mechanism that closes
+    the Mission 4 replay/lost-update gap recorded in `docs/DECISIONS.md`.
+    A fingerprint (not a monotonic version counter) was chosen deliberately:
+    it requires no new field on `PortfolioState`, no bookkeeping in every
+    state-producing function to keep a counter correctly incremented, and
+    it is the same "one shared function" idiom every other identity check
+    in this codebase already uses — a future durable `PortfolioStore`
+    (Mission 2) can implement the same contract atomically with an ordinary
+    `UPDATE ... WHERE fingerprint = ?` (or equivalent transactional
+    compare-and-swap), no schema migration to add a version column needed.
+    """
+    return canonical_hash(state)

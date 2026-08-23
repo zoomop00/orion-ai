@@ -207,6 +207,83 @@ def test_execute_rejects_a_proposal_verdict_mismatch() -> None:
         )
 
 
+def test_execute_rejects_a_verdict_with_tampered_action_or_direction() -> None:
+    # Requirement 10b regression: a model_copy-reconstructed verdict whose
+    # own action/direction disagree with its (untouched) decision_ref must
+    # be caught by execute()'s explicit check -- not merely happen to be
+    # caught as a side effect of Position's/Fill's geometry/NONE-rejection
+    # validators (which the earlier ad-hoc probe relied on incidentally).
+    trade = build_approved_trade(
+        action=Action.BUY,
+        direction=Direction.LONG,
+        entry_price=2400.0,
+        stop_loss=2350.0,
+        take_profit=2500.0,
+    )
+    tampered = trade.verdict.model_copy(
+        update={"action": Action.SELL, "direction": Direction.SHORT}
+    )
+    # decision_ref itself is untouched, so the decision_fingerprint check
+    # alone would not catch this -- confirms the two checks are independent.
+    assert tampered.decision_ref.action == Action.BUY
+    assert tampered.decision_ref.direction == Direction.LONG
+
+    with pytest.raises(PaperExecutionError, match="does not match verdict.decision_ref"):
+        execute(
+            trade.proposal,
+            tampered,
+            trade.evidence,
+            trade.portfolio,
+            quantity=1.0,
+            policy=ZERO_COST_POLICY,
+            now=BASE_TIME,
+        )
+
+
+def test_execute_rejects_a_verdict_tampered_to_none_direction() -> None:
+    trade = build_approved_trade(
+        action=Action.BUY,
+        direction=Direction.LONG,
+        entry_price=2400.0,
+        stop_loss=2350.0,
+        take_profit=2500.0,
+    )
+    tampered = trade.verdict.model_copy(update={"action": Action.WAIT, "direction": Direction.NONE})
+    with pytest.raises(PaperExecutionError, match="does not match verdict.decision_ref"):
+        execute(
+            trade.proposal,
+            tampered,
+            trade.evidence,
+            trade.portfolio,
+            quantity=1.0,
+            policy=ZERO_COST_POLICY,
+            now=BASE_TIME,
+        )
+
+
+def test_execute_accepts_an_untampered_verdict_where_action_matches_decision_ref() -> None:
+    # Positive control: the new check must not false-positive on a
+    # legitimately-constructed, untampered verdict.
+    trade = build_approved_trade(
+        action=Action.SELL,
+        direction=Direction.SHORT,
+        entry_price=2400.0,
+        stop_loss=2450.0,
+        take_profit=2300.0,
+    )
+    result = execute(
+        trade.proposal,
+        trade.verdict,
+        trade.evidence,
+        trade.portfolio,
+        quantity=1.0,
+        policy=ZERO_COST_POLICY,
+        now=BASE_TIME,
+    )
+    assert result.portfolio.open_position is not None
+    assert result.portfolio.open_position.direction is Direction.SHORT
+
+
 def test_execute_rejects_evidence_not_linked_to_the_approved_proposal() -> None:
     # H2 regression: review/approve using Evidence A, then supply a
     # different Evidence B (same symbol, materially different last_price)
