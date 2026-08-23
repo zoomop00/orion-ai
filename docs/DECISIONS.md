@@ -560,3 +560,355 @@ Trading). No calibrated volatility thresholds — `classify_volatility`'s
 0.3%/0.8% cut points remain documented placeholders pending Mission 6. No
 persistence layer — `RiskVerdict` is returned to the caller, not journaled;
 Mission 2 (Decision Memory) is what will store it.
+
+---
+
+## 2026-08-23 — Mission 4 (Paper Trading) architecture approved
+
+**Context:** Mission 3 shipped with `orion.risk.guardian.review()` already
+documenting its own next step: *"Mission 4 adds them by adding a required
+second context object to `review()`"* — referring to the portfolio/account
+state that max risk/trade, max daily/weekly loss, max drawdown, max
+exposure, and position size all require and that Mission 3 explicitly did
+not build (see the entry above, and `docs/DECISIONS.md`'s "No portfolio
+state" precedent throughout the Mission 3 entries). This entry records the
+architecture decided for that work before any of it is implemented. Nothing
+in this entry is implemented yet — this is a decision record, not a status
+report.
+
+**Sequencing note:** the brief's phase order (`ORION_MASTER_ENGINEERING_
+BRIEF_V2.md` §27) is Foundation → Brain → Memory → Risk Guardian → Paper
+Trading. This repository built Risk Guardian (Mission 3) before Memory
+(Mission 2); Mission 2 remains entirely unbuilt. B1 below is the decision
+that lets Mission 4 proceed anyway without waiting on it.
+
+**B1 — No dependency on Mission 2; persistence sits behind an interface.**
+Paper Trading must operate fully in-memory for this milestone — no large
+duplicate journal/database system gets built inside Mission 4 to work
+around Mission 2 not existing yet. Account/position/fill storage is
+accessed only through an abstract interface, mirroring the precedent
+already established twice in this codebase (`orion.data.provider_base.
+MarketDataProvider`, `orion.reasoning.provider_base.ReasoningProvider`): an
+in-memory implementation ships now; Mission 2, whenever it lands, supplies
+a durable implementation behind the same interface without the rest of
+`orion.paper` or `orion.risk` changing. This is the same "swap the
+implementation, not the pipeline" reasoning `docs/DECISIONS.md`'s market-
+data-provider entry already used.
+
+**B2 — Single open position at a time.** No scaling, averaging, pyramiding,
+or multi-position portfolio model for v1. The single-symbol architecture is
+unchanged (ORION trades exactly one instrument; see the Mission 3 entries'
+repeated "correlation needs multiple simultaneously-tracked instruments"
+reasoning, which this decision does not touch).
+
+**B3 — Daily/weekly loss limits are percentage-based against an explicit
+opening-equity baseline.** Daily loss is measured against the UTC day's
+opening equity/balance; weekly loss against the UTC week's opening
+equity/balance. The baseline is an explicit field on portfolio state — not
+guessed, not reconstructed by re-deriving it from fills or any other
+arbitrary source at check time. All bucketing is a pure function of
+caller-supplied `now`, never wall-clock at call time, matching every other
+timestamp-driven control already in `orion.risk` (`evidence_is_fresh`,
+`decision_is_current`).
+
+**B4 — Cash-covered only.** No leverage, margin, borrowing, or liquidation
+model for v1. Position sizing (see requirement 6 below) is bounded entirely
+by cash on hand.
+
+**B5 — `PaperExecutionPolicy` stays separate from `RiskPolicy`.**
+`RiskPolicy` answers *whether* a trade is permitted; `PaperExecutionPolicy`
+controls *how* a permitted trade is simulated — spread, slippage, fees —
+deterministically, with no randomness anywhere in the calculation. Kept
+separate for the same reason `orion.decision`/`orion.risk` are separate
+packages rather than one: each layer owns its own configuration, and
+merging "is this allowed" config with "how is this simulated" config would
+blur a distinction this codebase has drawn everywhere else.
+
+**B6 — Last-price-only resolution for v1.** No intrabar high/low execution,
+no latency realism, no advanced fill simulation — that is Mission 6's
+explicit scope (`ORION_MASTER_ENGINEERING_BRIEF_V2.md` §12 lists slippage
+and latency realism under Backtesting & Validation, not Paper Trading).
+
+**B7 — Portfolio integrity is a raise; portfolio staleness is a veto.** A
+portfolio/evidence linkage mismatch, or any input Risk Guardian cannot
+meaningfully evaluate, raises a specific `RiskGuardianError` subclass — the
+same fail-closed treatment `EvidenceLinkageError` already gives an
+evidence/proposal mismatch one layer up, extended to the new portfolio
+input. Ordinary portfolio *staleness* (old, but not mismatched or
+malformed) is an auditable Risk Guardian control failure — VETOED, not
+raised — matching the precedent `evidence_is_fresh`/`decision_is_current`
+already set: a plausible-but-old input fails closed as a first-class
+audited outcome, not an exception. Missing or stale portfolio state must
+never be silently treated as "flat, no exposure" — that would let a broken
+or absent snapshot pass every portfolio control by accident instead of
+failing one.
+
+**B8 — `risk_verdict_fingerprint()` closes the verdict provenance gap.** A
+new function, using the same shared `orion.provenance.canonical_hash`
+mechanism every other fingerprint in this codebase already uses
+(`evidence_fingerprint`, `decision_fingerprint`), gives `RiskVerdict` a
+content-hash of its own. Paper execution references the exact approved
+`RiskVerdict` that authorized a simulated order by this fingerprint —
+never an ad-hoc composite of `decision_ref`/`policy_ref`/`portfolio_ref`
+fields reassembled at the call site, which would be a second, informal
+identity mechanism competing with the one this codebase has deliberately
+kept singular since the evidence/reasoning linkage entry above ("a single
+shared function is the only way to guarantee they can never silently drift
+apart").
+
+**Additional requirements locked in for the implementation phase:**
+1. `orion.risk` stays pure and side-effect-free — Paper Trading is a
+   separate package that depends on `orion.risk`, never the reverse.
+2. `PortfolioState` is a required parameter of `review()` — never
+   `Optional`, never `None`-defaulted.
+3. Paper Trading is the only layer permitted to mutate account state.
+4. Paper Trading accepts only a `RiskVerdict` with `outcome is
+   RiskOutcome.APPROVED` — never a VETOED or NO_TRADE_PROPOSED verdict.
+5. `ExecutionMode` stays `PAPER`/`NONE` only. No `LIVE` member is added.
+6. The AI does not propose position size; it is computed deterministically
+   by the system from portfolio state and the proposal's own levels — the
+   same "AI proposes, ORION computes and verifies" split already used for
+   risk/reward.
+7. Risk/reward remains independently computed by Risk Guardian, unchanged.
+8. No correlation controls yet (needs multi-symbol tracking; out of scope).
+9. No liquidity/order-book controls yet (needs data this provider tier does
+   not have).
+10. No realistic intrabar/latency simulation yet (Mission 6 scope; see B6).
+11. No reflection-driven policy adaptation (Mission 5 scope — a paper
+    outcome must never automatically rewrite policy or sizing).
+12. The existing provenance chain (`evidence_fingerprint` →
+    `decision_fingerprint` → `canonical_hash` → `RiskPolicyRef` → the new
+    `risk_verdict_fingerprint`) is preserved and extended, never replaced.
+13. Deterministic behavior and caller-supplied timestamps are preserved
+    throughout — no `datetime.now()`, no `uuid4()`, no randomness anywhere
+    in `orion.risk` or the new deterministic parts of `orion.paper`.
+14. Fail-closed behavior is maintained: integrity failures raise, ordinary
+    policy/limit breaches veto — never a silent pass-through.
+
+**Alternatives considered:** waiting for Mission 2 before starting Mission
+4 (rejected — B1; would block Paper Trading on a mission with no committed
+timeline, when a clean storage interface lets both proceed independently).
+A multi-position/scaling model for v1 (rejected — B2; unjustified
+complexity for a single-symbol system with no demonstrated need yet). An
+optional/`None`-defaulted `portfolio` parameter on `review()` for backward
+compatibility (rejected — requirement 2; repeats exactly the unsafe-default
+pattern this project has rejected everywhere else, e.g. the kill switch's
+fail-safe `ENGAGED` default). Folding `PaperExecutionPolicy` into
+`RiskPolicy` (rejected — B5). Randomized slippage "for realism" (rejected —
+B5 and requirement 13; would break the determinism guarantee `review()`'s
+own docstring asserts). Treating a missing/stale portfolio snapshot as a
+flat account by default (rejected — B7; a false-negative risk that would
+let a broken input pass every portfolio control silently).
+
+**Known limitations, deferred by design, not oversight:** correlation
+controls (needs multi-symbol tracking that does not exist), liquidity/
+order-book controls (needs data this provider tier does not offer),
+intrabar/latency-realistic fill simulation (Mission 6), reflection-driven
+policy adaptation (Mission 5), any leverage/margin/liquidation model
+(deferred past v1 by B4), and durable cross-run persistence of account
+state (deferred to Mission 2 by B1, behind the interface boundary that
+makes the deferral safe to make).
+
+---
+
+## 2026-08-23 — Mission 4 (Paper Trading) implemented per the approved
+architecture
+
+**Decision:** Implemented the architecture from the entry above exactly —
+`orion.risk.portfolio` (new: `Position`, `PortfolioState`, `mark_to_market`,
+`compute_position_size`, `initial_portfolio_state`), seven new Risk Guardian
+controls, `review()`'s new required `portfolio` parameter, and a new
+`orion.paper` package (`policy.py`, `schemas.py`, `store.py`,
+`execution.py`) for deterministic simulated execution. No redesign — every
+open question B1–B8 from the architecture entry is resolved exactly as
+decided there.
+
+**`orion.risk.portfolio` (new module, not `orion.paper` — see B1/layering):**
+`Position` and `PortfolioState` are frozen Pydantic models with the same
+validator discipline as every other schema in this codebase (`extra=
+"forbid"`, cross-field invariants enforced on construction, defense-in-depth
+duplicated from `orion.risk.controls.classify_trade_levels` rather than
+imported from it, to avoid a `controls.py` ↔ `portfolio.py` import cycle
+once `controls.py` needed to import `PortfolioState`). `equity_peak`/
+`daily_opening_equity`/`weekly_opening_equity` are explicit fields, never
+recomputed ad hoc (B3). `mark_to_market(state, *, now, last_price)` is the
+one correct way to produce a fresh, self-consistent `PortfolioState`: it
+re-marks equity, rolls `equity_peak` forward (monotonic high-water mark),
+and rolls the daily/weekly opening-equity baselines forward across UTC day/
+week boundaries — advancing in whole-period jumps, since ORION only marks
+state at analysis-cycle granularity, not continuously. `compute_position_
+size` is the single deterministic risk-based sizing formula every consumer
+(the new Risk Guardian controls, and `orion.paper.execution`) shares, so
+they can never disagree about what a proposal's size should be — the same
+"one shared function" principle already used for provenance hashing.
+
+**Seven new Risk Guardian controls, appended to `CONTROLS`** (existing
+seven unchanged): `portfolio_state_is_fresh` (staleness, mirrors `evidence_
+is_fresh`/`decision_is_current` exactly), `no_conflicting_open_position`
+(B2 — single position at a time), `position_size_within_limits` (max
+risk/trade: computes the deterministic size and fails closed if it is
+non-positive or its notional exceeds available cash — cash-covered only,
+B4), `exposure_within_limit` (a distinct bound from position sizing: caps
+notional commitment as a fraction of equity regardless of stop distance),
+`daily_loss_limit_not_breached`, `weekly_loss_limit_not_breached` (both
+percentage-based against the explicit opening-equity baseline fields, B3),
+and `max_drawdown_not_breached` (against `equity_peak`, distinct from the
+daily/weekly baselines — drawdown never resets on a period boundary). Every
+new control follows the identical NOT_APPLICABLE-on-WAIT / PASSED / FAILED
+three-state pattern the existing seven already established, and none of
+them special-cases the "all controls always run, never short-circuit"
+guarantee — `evaluate_all`'s loop is unchanged in shape, only its argument
+list grew.
+
+**`RiskPolicy` gained six new fields**, all with conventional-starting-point
+defaults documented as such (not empirically calibrated to XAUUSD, the same
+transparency this file already applies to `min_risk_reward` and
+`classify_volatility`'s thresholds): `max_risk_per_trade_fraction=0.01`,
+`max_exposure_fraction=1.0`, `max_daily_loss_fraction=0.03`,
+`max_weekly_loss_fraction=0.08`, `max_drawdown_fraction=0.15`,
+`max_portfolio_staleness_bars=3.0` (shares `evidence_is_fresh`'s default
+figure). `Settings`/`.env.example` gained the matching `ORION_MAX_*` fields
+plus a new `PAPER_*` block for `PaperExecutionPolicy.from_settings`.
+
+**`review()`'s new required `portfolio: PortfolioState` parameter** (B7,
+requirement 2 — never `Optional`, never `None`-defaulted) added three new
+integrity checks after the existing evidence-linkage check: `portfolio`
+type/tzinfo checks (mirroring the existing proposal/evidence checks
+exactly), and a new `PortfolioLinkageError(RiskGuardianError)` — raised
+when `portfolio.symbol != evidence.symbol`, the Mission 4 analogue of
+`EvidenceLinkageError`, checked by direct field equality (not a
+fingerprint: `PortfolioState` carries no hash of `Evidence` to check
+against, and symbol identity is the actual coherence question). Ordinary
+portfolio *staleness* stayed a control failure, not a raise, per B7 — the
+same fail-closed split `evidence_is_fresh`/`decision_is_current` already
+established one layer down. `RiskVerdict` gained a required `portfolio_ref:
+PortfolioStateRef` field (mirrors `EvidenceRef`/`RiskPolicyRef` exactly).
+`GUARDIAN_VERSION` bumped to `2026-08-23.2` for the behavior change, per
+the same convention `ENGINE_VERSION`/`PROMPT_VERSION` already follow.
+
+**`risk_verdict_fingerprint(verdict)` (B8)** is a thin wrapper around the
+shared `orion.provenance.canonical_hash`, added to `orion.risk.schemas`
+alongside `RiskVerdict` — computed by the caller after `review()` returns,
+never stored as a field on `RiskVerdict` itself (a self-referencing hash
+field would need to exclude itself from its own input, which
+`canonical_hash` does not special-case). `orion.paper.execution` uses it as
+the sole identity `Fill`/`Position` reference back to the verdict that
+authorized them — never the ad-hoc composite of `decision_ref`/`policy_ref`/
+`portfolio_ref` fields B8 explicitly rejected.
+
+**`orion.paper` (new package) — the only layer permitted to mutate account
+state (requirement 3):** `policy.py` (`PaperExecutionPolicy`, separate from
+`RiskPolicy` per B5 — spread/slippage/fee in basis points, zero randomness
+anywhere in the calculation); `schemas.py` (`Order`, `Fill`,
+`ClosedPosition`, `CloseReason`, `PaperExecutionError`); `store.py`
+(`PortfolioStore` ABC + `InMemoryPortfolioStore`, mirroring `orion.data.
+provider_base.MarketDataProvider`'s existing abstraction pattern exactly —
+B1: Mission 2 can add a durable implementation behind this same interface
+later without touching `orion.paper`'s execution logic or `orion.risk` at
+all); `execution.py` (`execute()` for opening a position, `resolve_stop_
+take_profit()` for last-price-only mechanical closes, B6).
+
+**`execute()` accepts only an APPROVED verdict (requirement 4).** It also
+independently re-checks `decision_fingerprint(proposal) == verdict.
+decision_ref.content_hash` (the same "evaluating a coincidence" integrity
+concern enforced at every other layer boundary in ORION) and that a
+position is not already open, even though `orion.risk.controls.no_
+conflicting_open_position` should already have vetoed that upstream — this
+layer's guarantee must not depend on another layer's diligence, the
+established defense-in-depth precedent. `quantity` is a required,
+caller-supplied parameter, never recomputed internally from `RiskPolicy`
+(which `orion.paper.execution` does not import at all): the caller is
+expected to have used `orion.risk.portfolio.compute_position_size` — the
+same function the Risk Guardian's own `position_size_within_limits` control
+already used to decide the proposal was affordable in the first place
+(requirement 6 — the AI never proposes a size).
+
+**Cash accounting is direction-symmetric, not a real margin/borrow
+model** (B4: cash-covered only). Opening any position (LONG or SHORT)
+reduces cash by `notional + fee`; closing returns `quantity * entry_price +
+realized_pnl` (net of the closing fee only — the opening fee already
+reduced cash directly at open, so `ClosedPosition.realized_pnl` is not
+double-counted). Because `Position.unrealized_pnl`'s sign-aware formula
+already captures LONG/SHORT profit and loss correctly, this bookkeeping
+reduces to a clean, direction-independent identity verified directly in
+`tests/paper/test_execution.py`: `cash_after_close == cash_before_open -
+fill.fee + closed.realized_pnl`. This is a deliberate simplification of
+real short-selling mechanics (which involve genuine borrowing) — modeling
+actual margin/borrow was explicitly out of scope per B4, and this identity
+holds regardless of direction without inventing one.
+
+**Last-price-only stop/take-profit resolution (B6).**
+`resolve_stop_take_profit` is never gated by the Risk Guardian and takes no
+`RiskVerdict` at all — a stop/take-profit level is a pre-committed exit the
+AI already proposed and the Risk Guardian already approved when the
+position was opened, so reaching it mechanically needs no new approval,
+the same way a real broker's resting stop order does not re-ask
+permission to fill. `ClosedPosition.close_reason` is `STOP_LOSS_HIT` or
+`TAKE_PROFIT_HIT` only — v1 has no AI/Guardian-approved close path, so no
+third reason exists yet.
+
+**Test coverage:** `tests/risk/test_portfolio.py` (new, 33 tests:
+`Position`/`PortfolioState` invariants, `mark_to_market`'s UTC day/week
+rollover behavior and determinism, `compute_position_size`'s scaling and
+zero-division safety), `tests/risk/test_controls.py` (extended with the
+seven new controls' NOT_APPLICABLE/PASSED/FAILED/boundary cases),
+`tests/risk/test_guardian.py` (extended with portfolio-integrity raises,
+every new control's veto path, and provenance/determinism assertions
+extended to cover `portfolio_ref`), `tests/paper/` (new package: `test_
+policy.py`, `test_schemas.py`, `test_store.py`, `test_execution.py`,
+`test_import_hygiene.py` — the last mirroring `tests/risk/test_import_
+hygiene.py`'s AST-based static-import check). `tests/paper/test_execution.
+py` includes the full BUY → APPROVED → PAPER FILL → updated `PortfolioState`
+→ next `review()` feedback-loop test the architecture's new state
+dependency introduced (`test_full_buy_approve_fill_feedback_loop_blocks_a_
+second_trade`), plus its mirror proving a closed position frees the account
+for a new trade. `tests/risk/conftest.py`'s `build_proposal` needed one
+fixture change beyond additive builders: its default BUY/SELL trade-level
+auto-fill widened from the pre-existing 2385.0/2430.0 (~0.6% stop distance)
+to a 2%-of-price offset, because the narrower geometry is mathematically
+unaffordable under `RiskPolicy`'s default 1% risk-per-trade with no
+leverage (notional/equity is fixed at `risk_fraction * entry/stop_distance`
+regardless of account size, and 0.6% stop distance against 1% risk implies
+1.6x leverage) — every test that constructed a default-geometry BUY/SELL
+expecting APPROVED needed this fix to keep passing under the new
+cash-covered sizing controls; no test asserting a *specific* level value
+(all pass explicit `stop_loss`/`take_profit`) was affected.
+
+**Verification:** `ruff check .`, `ruff format --check .`, and `mypy .`
+(strict) all pass with zero findings. `pytest` collects 389 tests, all
+passing (up from 268 at the start of this entry: 232 in `tests/risk`+
+`tests/paper` combined are new or touched by this milestone). Manually
+verified beyond the test suite: no network/broker/live-execution imports in
+`orion.risk` or `orion.paper` (the two AST-based hygiene tests); paper
+execution structurally cannot consume a VETOED or NO_TRADE_PROPOSED verdict
+(`execute()` raises `PaperExecutionError` on anything but APPROVED);
+identical inputs produce identical results end-to-end (`review()`,
+`mark_to_market`, and `execute()` each have a dedicated determinism test);
+cash conservation and BUY/SELL P&L sign correctness hold across a full
+open/close round trip in both directions; position sizing is bounded by
+the configured risk fraction and independently re-verified for cash
+feasibility; portfolio limits (daily/weekly loss, drawdown, exposure,
+conflicting position) each correctly veto; stale portfolio state fails
+closed as an auditable VETOED verdict, never silently read as flat;
+provenance hashes (`evidence_fingerprint`, `decision_fingerprint`,
+`canonical_hash`, `risk_verdict_fingerprint`) all independently recompute
+to the values stored in `RiskVerdict`/`Fill`/`Position`.
+
+**Known limitations, unchanged from the architecture entry above:**
+correlation and liquidity controls remain out of scope (need multi-symbol
+tracking and order-book depth data this system does not have);
+intrabar/latency-realistic fill simulation remains Mission 6's scope;
+reflection-driven policy adaptation remains Mission 5's scope; no
+leverage/margin/liquidation model exists past v1's cash-covered design;
+account state does not survive a process restart (`InMemoryPortfolioStore`
+only) until Mission 2 supplies a durable implementation of the same
+`PortfolioStore` interface. One new, narrow limitation surfaced during
+implementation and is recorded here rather than silently left undocumented:
+`orion.paper.execution.execute`'s defensive check for a proposal with no
+`stop_loss`/`take_profit` is provably unreachable through any construction
+path that also satisfies the `decision_fingerprint` linkage check (an
+APPROVED verdict already implies `trade_levels_are_coherent_with_price`
+passed, which requires both levels), so it has no dedicated test — the
+same category of "restated defense-in-depth for a scenario another layer's
+diligence already prevents" this codebase has accepted elsewhere (e.g.
+`proposal_was_not_upgraded`'s docstring), not a gap in coverage.

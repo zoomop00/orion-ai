@@ -52,6 +52,25 @@ class RiskPolicy(BaseModel):
         default=(VolatilityLevel.UNKNOWN,)
     )
 
+    # --- Mission 4: portfolio-state-dependent limits ---
+    # Conventional engineering starting points (1% risk/trade is a widely
+    # cited retail risk-management convention; the loss/drawdown figures are
+    # order-of-magnitude placeholders), not empirically calibrated to
+    # XAUUSD specifically — the same transparency this file already applies
+    # to `min_risk_reward`'s "mathematically justified floor, not a
+    # validated strategy parameter" and to `classify_volatility`'s
+    # documented-placeholder thresholds in `orion.analysis.structure`.
+    max_risk_per_trade_fraction: float = Field(default=0.01, gt=0, le=1.0)
+    max_exposure_fraction: float = Field(default=1.0, gt=0, le=1.0)
+    max_daily_loss_fraction: float = Field(default=0.03, gt=0, le=1.0)
+    max_weekly_loss_fraction: float = Field(default=0.08, gt=0, le=1.0)
+    max_drawdown_fraction: float = Field(default=0.15, gt=0, le=1.0)
+    # Same figure/reasoning as `max_staleness_bars`, applied to portfolio
+    # state instead of evidence: how many bars old a `PortfolioState` may be
+    # before the Risk Guardian treats it as too stale to evaluate a trade
+    # against.
+    max_portfolio_staleness_bars: float = Field(default=DEFAULT_MAX_STALENESS_BARS, gt=0)
+
     @model_validator(mode="after")
     def _canonicalize_blocked_volatility_levels(self) -> RiskPolicy:
         # Sorted and de-duplicated so `policy_ref.content_hash` (orion.risk.
@@ -86,4 +105,10 @@ class RiskPolicy(BaseModel):
             max_decision_age_bars=settings.orion_max_decision_age_bars,
             min_risk_reward=settings.orion_min_risk_reward,
             blocked_volatility_levels=blocked,
+            max_risk_per_trade_fraction=settings.orion_max_risk_per_trade,
+            max_exposure_fraction=settings.orion_max_exposure,
+            max_daily_loss_fraction=settings.orion_max_daily_loss,
+            max_weekly_loss_fraction=settings.orion_max_weekly_loss,
+            max_drawdown_fraction=settings.orion_max_drawdown,
+            max_portfolio_staleness_bars=settings.orion_max_portfolio_staleness_bars,
         )

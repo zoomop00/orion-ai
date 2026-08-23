@@ -34,6 +34,7 @@ from orion.decision.schemas import ProposedDecision, decision_fingerprint
 from orion.provenance import canonical_hash
 from orion.reasoning.schemas import Action, Direction
 from orion.risk.policy import KillSwitchState, RiskPolicy
+from orion.risk.portfolio import PortfolioState
 
 
 class RiskControlName(StrEnum):
@@ -46,6 +47,14 @@ class RiskControlName(StrEnum):
     VOLATILITY_REGIME_PERMITTED = "volatility_regime_permitted"
     TRADE_LEVELS_ARE_COHERENT_WITH_PRICE = "trade_levels_are_coherent_with_price"
     RISK_REWARD_MEETS_MINIMUM = "risk_reward_meets_minimum"
+    # --- Mission 4: portfolio-state-dependent controls ---
+    PORTFOLIO_STATE_IS_FRESH = "portfolio_state_is_fresh"
+    NO_CONFLICTING_OPEN_POSITION = "no_conflicting_open_position"
+    POSITION_SIZE_WITHIN_LIMITS = "position_size_within_limits"
+    EXPOSURE_WITHIN_LIMIT = "exposure_within_limit"
+    DAILY_LOSS_LIMIT_NOT_BREACHED = "daily_loss_limit_not_breached"
+    WEEKLY_LOSS_LIMIT_NOT_BREACHED = "weekly_loss_limit_not_breached"
+    MAX_DRAWDOWN_NOT_BREACHED = "max_drawdown_not_breached"
 
 
 class ControlStatus(StrEnum):
@@ -105,6 +114,16 @@ class RiskReasonCode(StrEnum):
     DEGENERATE_STOP_DISTANCE = "degenerate_stop_distance"
     TRADE_LEVELS_INCOHERENT = "trade_levels_incoherent"
     RISK_REWARD_BELOW_MINIMUM = "risk_reward_below_minimum"
+    # --- Mission 4: portfolio-state-dependent control failures ---
+    PORTFOLIO_STALE = "portfolio_stale"
+    PORTFOLIO_TIMESTAMP_IN_FUTURE = "portfolio_timestamp_in_future"
+    POSITION_ALREADY_OPEN = "position_already_open"
+    POSITION_SIZE_INVALID = "position_size_invalid"
+    POSITION_SIZE_EXCEEDS_AVAILABLE_CASH = "position_size_exceeds_available_cash"
+    EXPOSURE_LIMIT_EXCEEDED = "exposure_limit_exceeded"
+    DAILY_LOSS_LIMIT_BREACHED = "daily_loss_limit_breached"
+    WEEKLY_LOSS_LIMIT_BREACHED = "weekly_loss_limit_breached"
+    DRAWDOWN_LIMIT_BREACHED = "drawdown_limit_breached"
 
 
 class ControlOutcome(BaseModel):
@@ -205,6 +224,37 @@ class RiskPolicyRef(BaseModel):
         )
 
 
+class PortfolioStateRef(BaseModel):
+    """A tamper-evident reference to the `PortfolioState` a verdict was
+    reviewed against.
+
+    Mirrors `EvidenceRef`/`RiskPolicyRef` exactly. Every verdict carries
+    one — approved or not — so "what did the account look like when this
+    was decided?" never requires guessing at what `orion.paper` held at the
+    time.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    content_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    symbol: str
+    as_of: datetime
+    cash: float
+    equity: float
+    has_open_position: bool
+
+    @classmethod
+    def from_portfolio(cls, portfolio: PortfolioState) -> PortfolioStateRef:
+        return cls(
+            content_hash=canonical_hash(portfolio),
+            symbol=portfolio.symbol,
+            as_of=portfolio.as_of,
+            cash=portfolio.cash,
+            equity=portfolio.equity,
+            has_open_position=portfolio.open_position is not None,
+        )
+
+
 class RiskVerdict(BaseModel):
     """The Risk Guardian's output: the final safety authority's answer.
 
@@ -225,6 +275,7 @@ class RiskVerdict(BaseModel):
     control_outcomes: tuple[ControlOutcome, ...] = Field(min_length=1)
     decision_ref: DecisionRef
     policy_ref: RiskPolicyRef
+    portfolio_ref: PortfolioStateRef
     guardian_version: str = Field(min_length=1)
 
     @property
@@ -292,3 +343,22 @@ class RiskVerdict(BaseModel):
                 f"control_outcomes contains a duplicate control: {self.control_outcomes}"
             )
         return self
+
+
+def risk_verdict_fingerprint(verdict: RiskVerdict) -> str:
+    """A deterministic fingerprint of `verdict`'s full content.
+
+    Thin, domain-named wrapper around `orion.provenance.canonical_hash` —
+    mirrors `orion.analysis.evidence.evidence_fingerprint` and
+    `orion.decision.schemas.decision_fingerprint` exactly, per this
+    codebase's rule that provenance hashing lives in one shared mechanism.
+    Computed by the caller after `review()` returns; never stored as a
+    field on `RiskVerdict` itself — a self-referencing hash field would
+    need to exclude itself from its own input, which `canonical_hash` does
+    not special-case for any model. `orion.paper` uses this to record, on
+    every simulated `Order`/`Fill`, exactly which approved `RiskVerdict`
+    authorized it — never an ad-hoc composite of `decision_ref`/
+    `policy_ref`/`portfolio_ref` fields reassembled at the call site
+    (Mission 4 architecture decision B8).
+    """
+    return canonical_hash(verdict)

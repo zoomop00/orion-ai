@@ -91,6 +91,30 @@ class Settings(BaseSettings):
     # on before Mission 6 provides real calibration.
     orion_block_high_volatility: bool = Field(default=False, alias="ORION_BLOCK_HIGH_VOLATILITY")
 
+    # --- Risk Guardian: Mission 4 portfolio-state-dependent limits ---
+    # See docs/DECISIONS.md (Mission 4 architecture entry) and
+    # orion.risk.policy.RiskPolicy for why these are conventional engineering
+    # starting points, not empirically calibrated to XAUUSD.
+    orion_max_risk_per_trade: float = Field(
+        default=0.01, gt=0, le=1.0, alias="ORION_MAX_RISK_PER_TRADE"
+    )
+    orion_max_exposure: float = Field(default=1.0, gt=0, le=1.0, alias="ORION_MAX_EXPOSURE")
+    orion_max_daily_loss: float = Field(default=0.03, gt=0, le=1.0, alias="ORION_MAX_DAILY_LOSS")
+    orion_max_weekly_loss: float = Field(default=0.08, gt=0, le=1.0, alias="ORION_MAX_WEEKLY_LOSS")
+    orion_max_drawdown: float = Field(default=0.15, gt=0, le=1.0, alias="ORION_MAX_DRAWDOWN")
+    orion_max_portfolio_staleness_bars: float = Field(
+        default=DEFAULT_MAX_STALENESS_BARS, gt=0, alias="ORION_MAX_PORTFOLIO_STALENESS_BARS"
+    )
+
+    # --- Paper Trading (Mission 4) ---
+    # Deterministic simulated-execution parameters only — never a risk
+    # limit. See orion.paper.policy.PaperExecutionPolicy for why this is a
+    # separate config object from the Risk Guardian's own settings above.
+    paper_starting_balance: float = Field(default=10_000.0, gt=0, alias="PAPER_STARTING_BALANCE")
+    paper_spread_bps: float = Field(default=2.0, ge=0, alias="PAPER_SPREAD_BPS")
+    paper_slippage_bps: float = Field(default=1.0, ge=0, alias="PAPER_SLIPPAGE_BPS")
+    paper_fee_bps: float = Field(default=1.0, ge=0, alias="PAPER_FEE_BPS")
+
 
 def get_settings() -> Settings:
     """Load settings fresh from the environment.

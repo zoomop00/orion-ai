@@ -9,13 +9,14 @@ from orion.risk.schemas import (
     ControlStatus,
     DecisionRef,
     ExecutionMode,
+    PortfolioStateRef,
     RiskControlName,
     RiskOutcome,
     RiskPolicyRef,
     RiskReasonCode,
     RiskVerdict,
 )
-from tests.risk.conftest import BASE_TIME, build_policy, build_proposal
+from tests.risk.conftest import BASE_TIME, build_policy, build_portfolio, build_proposal
 
 
 def _passed(control: RiskControlName = RiskControlName.EVIDENCE_IS_FRESH) -> ControlOutcome:
@@ -44,6 +45,7 @@ def _verdict(**overrides: object) -> RiskVerdict:
         "control_outcomes": (_passed(),),
         "decision_ref": DecisionRef.from_proposal(proposal),
         "policy_ref": RiskPolicyRef.from_policy(build_policy()),
+        "portfolio_ref": PortfolioStateRef.from_portfolio(build_portfolio()),
         "guardian_version": "test-guardian-1",
     }
     defaults.update(overrides)
