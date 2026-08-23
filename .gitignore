@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# uv
+uv.lock.bak
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Test / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ORION runtime data (local SQLite decision journal, logs)
+*.db
+*.sqlite3
+/data/
+/logs/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
