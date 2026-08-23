@@ -21,13 +21,23 @@ guarantee than building it disabled"), these are not stubbed, not given a
 `None`-defaulted parameter, and not given `RiskControlName` members here —
 Mission 4 adds them by adding a required second context object to `review()`.
 
-The guardian never accepts a `ReasoningOutput` — only a `ProposedDecision`
-(which carries the AI's action/direction/stop_loss/take_profit inside its
-frozen `reasoning_ref`, but never `confidence`, `risk_level`, or
-`rationale`). This is the structural enforcement of "AI confidence must never
-override a failed risk control," "AI risk_level is advisory only," and
-"Claude rationale must not be used as a risk signal": none of it is reachable
-from this function's arguments, no matter what a control's code does.
+The guardian never accepts a `ReasoningOutput` directly — only a
+`ProposedDecision`. Its frozen `reasoning_ref` (a `ReasoningRef`, see
+`orion.decision.schemas`) carries the AI's action/direction/stop_loss/
+take_profit, and — unlike `rationale` — also `confidence` and `risk_level`:
+those two fields are present and directly readable as
+`proposal.reasoning_ref.confidence`/`.risk_level` by any control function,
+not structurally absent. `rationale` is the one field that genuinely has no
+path into `ProposedDecision` at all — `ReasoningRef` never carries it, so
+"Claude rationale must not be used as a risk signal" *is* a structural
+guarantee. "AI confidence must never override a failed risk control" and
+"AI risk_level is advisory only" are not: they hold only because no control
+in `orion.risk.controls` reads either field today, a property enforced by
+`tests/risk/test_guardian.py`'s `test_confidence_cannot_change_the_outcome`/
+`test_risk_level_cannot_change_the_outcome`, not by this module's types. A
+future control could read `proposal.reasoning_ref.confidence` and nothing
+here would stop it at construction time — this remains a behavioral
+invariant of this package's controls, not a structural one of its input.
 """
 
 from __future__ import annotations

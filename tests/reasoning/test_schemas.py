@@ -137,6 +137,23 @@ def test_wait_allows_null_stop_loss_and_take_profit() -> None:
     assert verdict.take_profit is None
 
 
+def test_wait_with_only_stop_loss_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="WAIT requires both to be null"):
+        ReasoningVerdict(**_verdict_kwargs(action=Action.WAIT, stop_loss=2390.0))
+
+
+def test_wait_with_only_take_profit_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="WAIT requires both to be null"):
+        ReasoningVerdict(**_verdict_kwargs(action=Action.WAIT, take_profit=2420.0))
+
+
+def test_wait_with_both_levels_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="WAIT requires both to be null"):
+        ReasoningVerdict(
+            **_verdict_kwargs(action=Action.WAIT, stop_loss=2390.0, take_profit=2420.0)
+        )
+
+
 def test_sell_with_long_is_rejected() -> None:
     with pytest.raises(ValidationError, match="SELL requires SHORT"):
         ReasoningVerdict(**_verdict_kwargs(action=Action.SELL, direction=Direction.LONG))

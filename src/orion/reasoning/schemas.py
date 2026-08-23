@@ -204,6 +204,11 @@ class ReasoningVerdict(BaseModel):
                     f"action is SELL but stop_loss ({self.stop_loss}) is not above "
                     f"take_profit ({self.take_profit})"
                 )
+        elif self.stop_loss is not None or self.take_profit is not None:
+            raise ValueError(
+                f"action is {self.action.value!r} but stop_loss/take_profit are "
+                f"{self.stop_loss!r}/{self.take_profit!r}; WAIT requires both to be null"
+            )
         return self
 
 

@@ -5,11 +5,15 @@ datetime)` — already-validated objects plus operator configuration and the
 wall clock. This argument list is the mechanical test for what belongs here
 versus in `orion.decision.rules`: a Decision Engine rule needs only Evidence
 + ReasoningOutput; a Risk Guardian control needs at least one of the clock,
-policy, or (not yet available) portfolio state. No control reads
-`ProposedDecision.reasoning_ref.confidence`, `.risk_level`, or any rationale
-text — `orion.risk.guardian.review` does not even accept a `ReasoningOutput`
-as an argument, so none of that is reachable here regardless of what a
-control's code does.
+policy, or (not yet available) portfolio state. No control in this module
+reads `ProposedDecision.reasoning_ref.confidence` or `.risk_level` — both
+are present on `reasoning_ref` (a `ReasoningRef`) and could be read by a
+control's code, so this is a property this file's functions maintain, not
+a structural impossibility; `tests/risk/test_guardian.py` enforces it
+behaviorally. Rationale text is the one thing genuinely unreachable here:
+`ReasoningRef` never carries it at all, and `orion.risk.guardian.review`
+does not even accept a `ReasoningOutput` as an argument, so there is no path
+to the model's prose anywhere in this package.
 
 All controls always run; the guardian never short-circuits — a veto record
 showing every check beats one showing only the first failure, and with a
