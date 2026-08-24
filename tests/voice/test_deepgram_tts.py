@@ -11,7 +11,7 @@ from orion.voice.provider_base import SpeechSynthesisProviderError
 
 SPEAK_URL = "https://api.deepgram.com/v1/speak"
 FAKE_SECRET = "dg-live-supersecret-1234567890"
-FAKE_AUDIO = b"\xff\xfbfake-mp3-bytes"
+FAKE_AUDIO = b"RIFF....WAVEfake-pcm-bytes"
 
 
 def _provider(api_key: str = "test-key") -> DeepgramSpeechSynthesisProvider:
@@ -36,7 +36,7 @@ def test_oversized_text_raises_without_a_request() -> None:
 @respx.mock
 def test_synthesize_parses_a_successful_response() -> None:
     respx.post(SPEAK_URL).mock(
-        return_value=httpx.Response(200, content=FAKE_AUDIO, headers={"Content-Type": "audio/mpeg"})
+        return_value=httpx.Response(200, content=FAKE_AUDIO, headers={"Content-Type": "audio/wav"})
     )
 
     speech = _provider().synthesize("hello there")
@@ -44,19 +44,21 @@ def test_synthesize_parses_a_successful_response() -> None:
     assert speech.audio == FAKE_AUDIO
     assert speech.provider == "deepgram"
     assert speech.model == "aura-2-thalia-en"
-    assert speech.format == "mp3"
+    assert speech.format == "wav"
     assert speech.synthesized_at.tzinfo is not None
 
 
 @respx.mock
-def test_synthesize_sends_model_and_encoding_query_params() -> None:
+def test_synthesize_sends_model_encoding_container_and_sample_rate_query_params() -> None:
     route = respx.post(SPEAK_URL).mock(return_value=httpx.Response(200, content=FAKE_AUDIO))
 
     _provider().synthesize("hello there")
 
     request = route.calls.last.request
     assert request.url.params["model"] == "aura-2-thalia-en"
-    assert request.url.params["encoding"] == "mp3"
+    assert request.url.params["encoding"] == "linear16"
+    assert request.url.params["container"] == "wav"
+    assert request.url.params["sample_rate"] == "24000"
 
 
 @respx.mock

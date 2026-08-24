@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.28",
     "sqlalchemy>=2.0.36",
     "pandas-ta-classic>=0.6.52",
+    "sounddevice>=0.5.6",
 ]
 
 [dependency-groups]
@@ -53,6 +54,10 @@ explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 module = ["pandas_ta_classic.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["sounddevice.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

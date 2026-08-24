@@ -8,14 +8,26 @@ unchanged (header-based `Authorization: Token <key>` auth, `orion.
 http_errors` reuse, empirical leakage verification in
 `tests/voice/test_deepgram_tts.py`).
 
-MODEL/ENCODING: fixed constants (`aura-2-thalia-en`, `mp3`), not
-user-configurable -- Settings carries only `DEEPGRAM_API_KEY` per the
-approved Phase 2 scope. Both are sent as explicit request query parameters
-rather than relying on Deepgram's own defaults, so `SynthesizedSpeech.model`/
-`.format` reflect the actual configured/used values by construction: a
-success response (`raise_for_status()` passing) is Deepgram's REST contract
-that the request as specified -- this exact model, this exact encoding --
-was honored, not a guess about what happened.
+MODEL/ENCODING: fixed constants (`aura-2-thalia-en`, `linear16`/`wav`/
+`24000`), not user-configurable -- Settings carries only `DEEPGRAM_API_KEY`
+per the approved Phase 2 scope. All are sent as explicit request query
+parameters rather than relying on Deepgram's own defaults, so
+`SynthesizedSpeech.model`/`.format` reflect the actual configured/used
+values by construction: a success response (`raise_for_status()` passing)
+is Deepgram's REST contract that the request as specified -- this exact
+model, this exact encoding/container/sample rate -- was honored, not a
+guess about what happened.
+
+CHANGED IN MISSION 9 PHASE 3: originally `encoding=mp3` (Phase 2). Changed
+to `encoding=linear16`, `container=wav`, `sample_rate=24000` so
+`orion.voice.audio_output.SpeakerAudioOutput` can play the result with
+Python's stdlib `wave` module alone -- an MP3 decoder is a meaningfully
+larger, unjustified dependency purely to support real local playback of a
+short spoken response. `container=wav` produces a complete, self-describing
+RIFF/WAVE file (sample rate/channels/bit depth all read from the file's own
+header, not out-of-band), so `SynthesizedSpeech.format` stays `"wav"` — a
+plain string, exactly as vendor-agnostic as `"mp3"` was — with no new schema
+field needed on `SynthesizedSpeech` itself. See `docs/DECISIONS.md`.
 
 `text` is ORION-authored output text (never externally-sourced), per
 `SpeechSynthesisProvider.synthesize`'s documented contract -- it does not
@@ -37,7 +49,9 @@ from orion.voice.schemas import SynthesizedSpeech
 
 _SPEAK_URL = "https://api.deepgram.com/v1/speak"
 _MODEL = "aura-2-thalia-en"
-_ENCODING = "mp3"
+_ENCODING = "linear16"
+_CONTAINER = "wav"
+_SAMPLE_RATE = 24_000
 _PROVIDER_NAME = "deepgram"
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 
@@ -67,7 +81,12 @@ class DeepgramSpeechSynthesisProvider(SpeechSynthesisProvider):
         try:
             response = self._client.post(
                 _SPEAK_URL,
-                params={"model": _MODEL, "encoding": _ENCODING},
+                params={
+                    "model": _MODEL,
+                    "encoding": _ENCODING,
+                    "container": _CONTAINER,
+                    "sample_rate": _SAMPLE_RATE,
+                },
                 headers={
                     "Authorization": f"Token {self._api_key}",
                     "Content-Type": "application/json",
@@ -87,7 +106,7 @@ class DeepgramSpeechSynthesisProvider(SpeechSynthesisProvider):
         try:
             return SynthesizedSpeech(
                 audio=audio,
-                format=_ENCODING,
+                format=_CONTAINER,
                 provider=_PROVIDER_NAME,
                 model=_MODEL,
                 synthesized_at=datetime.now(UTC),

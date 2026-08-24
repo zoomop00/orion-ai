@@ -7,29 +7,32 @@ file's own `import`/`from ... import` statements, not inspecting
 `sys.modules` at runtime, so this is a property of the package's source, not
 of whatever else the rest of the test suite happened to already import.
 
-Four directions:
+Five directions:
 
-1. Outbound (vendor/persistence): every file in `orion.voice` except the
-   two concrete Deepgram provider files (`deepgram_stt.py`/`deepgram_tts.py`
-   -- Mission 9 Phase 2's approved, single vendor) must import none of the
-   network/AI-vendor/persistence modules `tests/backtest/test_import_
-   hygiene.py` already disallows for the exact same reasons -- reused here
-   unchanged, per this codebase's own "don't invent a second list"
-   convention. `httpx` is carved out as an exception *only* for those two
-   files (see `VENDOR_PROVIDER_FILES`/`_ALLOWED_EXTRA_FOR_VENDOR_FILES`
-   below): `orion.voice.provider_base`/`orion.voice.schemas`/
-   `orion.voice.__init__` must remain vendor-independent, and even the
-   provider files may not import anything else on the disallowed list
-   (no `sqlalchemy`, no `anthropic`, etc.) -- Deepgram REST access is the
-   only new capability Phase 2 introduces.
+1. Outbound (vendor/hardware/persistence): every file in `orion.voice`
+   except a small, explicit per-file allowlist (`_ALLOWED_EXTRA_IMPORTS_BY_
+   FILE` below) must import none of the network/AI-vendor/hardware-I-O/
+   persistence/randomness modules `DISALLOWED_TOP_LEVEL_MODULES` lists.
+   `httpx` is carved out only for `deepgram_stt.py`/`deepgram_tts.py`
+   (Mission 9 Phase 2's approved, single vendor); `sounddevice` only for
+   `audio_input.py`/`audio_output.py` (Phase 3's real local audio path).
+   Every other file -- `schemas.py`, `provider_base.py`, `response.py`,
+   `state.py`, and, most importantly, `runtime.py` itself -- stays
+   vendor-and-hardware-independent: `test_runtime_does_not_import_concrete_
+   vendor_or_hardware_modules` below proves this for `runtime.py`
+   specifically and by name, not just via the generic sweep, since "the
+   runtime depends only on the Phase 1 ABCs, never a concrete Deepgram
+   class" is an explicit architectural requirement for this phase, not an
+   incidental property.
 2. Outbound (pipeline): `orion.voice` must import no Mission 0-8 pipeline
    package (data/analysis/research/reasoning/analysts/decision/risk/paper/
-   memory/reflection/backtest) -- Phase 2 still has zero pipeline
-   integration, only concrete provider implementations. `orion.provenance`
-   is deliberately NOT in this list: it is a shared, dependency-free
-   top-level utility (not a Mission-specific package) that `orion.voice.
-   schemas` legitimately imports for `canonical_hash`, exactly as
-   `orion.analysts`/`orion.decision`/`orion.risk` already do.
+   memory/reflection/backtest) -- Phase 3 adds a real runtime but still has
+   zero pipeline integration: no memory, no database, no trading, no
+   orchestrator. `orion.provenance` is deliberately NOT in this list: it is
+   a shared, dependency-free top-level utility (not a Mission-specific
+   package) that `orion.voice.schemas` legitimately imports for
+   `canonical_hash`, exactly as `orion.analysts`/`orion.decision`/
+   `orion.risk` already do.
 3. Inbound: no Mission 0-8 package imports `orion.voice` -- especially
    `orion.backtest`, called out with its own dedicated test per the task
    brief: a live voice interaction is inherently non-deterministic
@@ -42,7 +45,12 @@ Four directions:
    take `api_key: str` as a constructor parameter, exactly like
    `FinnhubEconomicCalendarProvider`/`ClaudeReasoningProvider` -- wiring a
    concrete provider to `Settings.deepgram_api_key` is orchestrator work,
-   out of Phase 2's scope, not this file's job.
+   out of scope for both Phase 2 and Phase 3.
+5. Randomness/wall-clock: `uuid`, `random`, and `secrets` are disallowed
+   everywhere in `orion.voice` (no file has a legitimate reason to mint an
+   id or generate randomness -- content-addressed fingerprints and
+   caller/provider-supplied timestamps are this codebase's established
+   alternative, see `docs/DECISIONS.md`'s Phase 1 entry).
 
 Also proves the "transcript text is never consumed as an instruction"
 requirement structurally: no file anywhere in `orion.voice` calls `exec`,
@@ -58,10 +66,8 @@ from pathlib import Path
 import orion.voice
 
 DISALLOWED_TOP_LEVEL_MODULES = {
-    # network / HTTP -- no file in orion.voice may import an HTTP client
-    # except the two concrete Deepgram provider files (see
-    # VENDOR_PROVIDER_FILES/_ALLOWED_EXTRA_FOR_VENDOR_FILES below), which
-    # need httpx to actually reach Deepgram's REST API.
+    # network / HTTP -- carved out only for deepgram_stt.py/deepgram_tts.py
+    # (see _ALLOWED_EXTRA_IMPORTS_BY_FILE).
     "httpx",
     "httpx2",
     "requests",
@@ -81,16 +87,30 @@ DISALLOWED_TOP_LEVEL_MODULES = {
     "MetaTrader5",
     "oandapyV20",
     "deepgram",
-    # persistence -- Mission 9 Phase 2 remains explicitly zero-persistence.
+    # local hardware audio I/O -- carved out only for audio_input.py/
+    # audio_output.py (see _ALLOWED_EXTRA_IMPORTS_BY_FILE).
+    "sounddevice",
+    "pyaudio",
+    "simpleaudio",
+    # persistence -- orion.voice remains explicitly zero-persistence.
     "sqlalchemy",
+    "sqlite3",
+    # randomness / id-minting -- see reason 5 in the module docstring.
+    "uuid",
+    "random",
+    "secrets",
 }
 
-# The only files allowed to import network modules -- Mission 9 Phase 2's
-# two concrete provider implementations. Every other disallowed module
-# above (vendor SDKs, persistence) stays forbidden even in these two files:
-# httpx is the one new capability Phase 2 introduces, nothing else.
-VENDOR_PROVIDER_FILES = {"deepgram_stt.py", "deepgram_tts.py"}
-_ALLOWED_EXTRA_FOR_VENDOR_FILES = {"httpx"}
+# Per-file carve-outs from DISALLOWED_TOP_LEVEL_MODULES above. Every module
+# NOT listed for a given file stays forbidden even there -- e.g. deepgram_
+# stt.py may import httpx but still may not import sounddevice/sqlalchemy/
+# uuid/etc.
+_ALLOWED_EXTRA_IMPORTS_BY_FILE: dict[str, set[str]] = {
+    "deepgram_stt.py": {"httpx"},
+    "deepgram_tts.py": {"httpx"},
+    "audio_input.py": {"sounddevice"},
+    "audio_output.py": {"sounddevice"},
+}
 
 DISALLOWED_ORION_SUBPACKAGES = {
     "orion.data",
@@ -158,44 +178,76 @@ def test_orion_voice_has_no_disallowed_top_level_imports() -> None:
     offenders: dict[str, set[str]] = {}
     for source_path in _voice_source_files():
         modules = {m.split(".")[0] for m in _imported_modules(source_path)}
-        allowed_extra = (
-            _ALLOWED_EXTRA_FOR_VENDOR_FILES if source_path.name in VENDOR_PROVIDER_FILES else set()
-        )
+        allowed_extra = _ALLOWED_EXTRA_IMPORTS_BY_FILE.get(source_path.name, set())
         found = (modules & DISALLOWED_TOP_LEVEL_MODULES) - allowed_extra
         if found:
             offenders[source_path.name] = found
     assert not offenders, f"orion.voice imports disallowed modules: {offenders}"
 
 
-def test_only_vendor_provider_files_import_httpx() -> None:
-    """`orion.voice.provider_base`/`orion.voice.schemas`/`orion.voice.
-    __init__` must remain vendor-independent -- only `deepgram_stt.py`/
-    `deepgram_tts.py` may know an HTTP client exists."""
+def test_only_allowlisted_files_import_their_carved_out_vendor_module() -> None:
+    """The inverse of the test above: every module named as a carve-out for
+    one file must NOT appear in any *other* file -- `httpx` stays confined
+    to the two Deepgram provider files, `sounddevice` to the two audio-I/O
+    files, matching `orion.voice.provider_base`/`orion.voice.schemas`/
+    `orion.voice.runtime`'s documented vendor-independence."""
     offenders: dict[str, set[str]] = {}
+    all_carved_out_modules: set[str] = set()
+    for extra in _ALLOWED_EXTRA_IMPORTS_BY_FILE.values():
+        all_carved_out_modules |= extra
+
     for source_path in _voice_source_files():
-        if source_path.name in VENDOR_PROVIDER_FILES:
-            continue
+        allowed_extra = _ALLOWED_EXTRA_IMPORTS_BY_FILE.get(source_path.name, set())
         modules = {m.split(".")[0] for m in _imported_modules(source_path)}
-        found = modules & _ALLOWED_EXTRA_FOR_VENDOR_FILES
+        found = (modules & all_carved_out_modules) - allowed_extra
         if found:
             offenders[source_path.name] = found
-    assert not offenders, f"a non-provider orion.voice file imports httpx: {offenders}"
+    assert not offenders, f"a non-allowlisted orion.voice file imports a vendor module: {offenders}"
 
 
 def test_deepgram_provider_files_do_not_import_orion_config() -> None:
     """Both concrete Deepgram provider files take `api_key: str` as a
     constructor parameter, exactly like `FinnhubEconomicCalendarProvider`/
     `ClaudeReasoningProvider` -- wiring to `Settings.deepgram_api_key` is
-    orchestrator work, out of Phase 2's scope."""
+    orchestrator work, out of scope."""
     offenders: dict[str, set[str]] = {}
     for source_path in _voice_source_files():
-        if source_path.name not in VENDOR_PROVIDER_FILES:
+        if source_path.name not in {"deepgram_stt.py", "deepgram_tts.py"}:
             continue
         imported = _imported_modules(source_path)
         found = {m for m in imported if m == "orion.config" or m.startswith("orion.config.")}
         if found:
             offenders[source_path.name] = found
     assert not offenders, f"a Deepgram provider file imports orion.config: {offenders}"
+
+
+def test_runtime_does_not_import_concrete_vendor_or_hardware_modules() -> None:
+    """`orion.voice.runtime.VoiceRuntime` depends only on the ABCs
+    (`AudioInput`, `TranscriptionProvider`, `ResponseProvider`,
+    `SpeechSynthesisProvider`, `AudioOutput`) -- never `DeepgramTranscriptionProvider`
+    /`DeepgramSpeechSynthesisProvider`/`MicrophoneAudioInput`/
+    `SpeakerAudioOutput` by name, and never `httpx`/`sounddevice` directly.
+    Swapping a concrete implementation must only ever require constructing
+    `VoiceRuntime` with different arguments."""
+    runtime_path = _voice_package_dir() / "runtime.py"
+    assert runtime_path.is_file()
+    imported = _imported_modules(runtime_path)
+    top_level = {m.split(".")[0] for m in imported}
+
+    forbidden_top_level = top_level & {"httpx", "sounddevice", "deepgram"}
+    forbidden_concrete_modules = {
+        m
+        for m in imported
+        if m in {"orion.voice.deepgram_stt", "orion.voice.deepgram_tts"}
+        or m.startswith("orion.voice.deepgram_stt.")
+        or m.startswith("orion.voice.deepgram_tts.")
+    }
+    assert not forbidden_top_level, (
+        f"runtime.py imports a vendor/hardware module: {forbidden_top_level}"
+    )
+    assert not forbidden_concrete_modules, (
+        f"runtime.py imports a concrete Deepgram module: {forbidden_concrete_modules}"
+    )
 
 
 def test_orion_voice_has_no_pipeline_package_imports() -> None:

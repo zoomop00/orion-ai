@@ -2133,3 +2133,200 @@ zero findings. An independently-written adversarial probe (separate from the
 implementation's own test files) re-verified credential non-leakage,
 malformed/empty-response handling, pre-request size-limit enforcement, and
 import/dangerous-call hygiene — all checks passed.
+
+## 2026-08-24 — Mission 9 (Voice) Phase 3: the first real voice runtime
+(mic → STT → response → TTS → speaker), still no orchestrator
+
+**Decision: five new files complete the physical loop —
+`IDLE → LISTENING → UNDERSTANDING → ANALYZING → SPEAKING → IDLE` — as one
+composable `VoiceRuntime` (`orion.voice.runtime`) built entirely from ABCs.**
+`orion.voice.state.VoiceStateMachine` drives `VoiceState` (unchanged from
+Phase 1 — no second competing enum); `orion.voice.audio_input.AudioInput`/
+`orion.voice.audio_output.AudioOutput` are the two new Phase 3 ABCs for
+local audio I/O; `orion.voice.response.ResponseProvider` is the new
+`Transcript -> str` boundary. `VoiceRuntime.run_turn()` composes exactly
+five injected dependencies (`AudioInput`, `TranscriptionProvider`,
+`ResponseProvider`, `SpeechSynthesisProvider`, `AudioOutput`) and nothing
+else — no memory, no database, no tool invocation, no trading logic, no
+conversation history across turns, matching Mission 5/7/8's identical "no
+proven consumer, no premature integration" precedent extended to voice.
+
+**State machine: a fixed graph, not a general one.**
+`_ALLOWED_TRANSITIONS` (`orion.voice.state`) permits only the brief's
+sequential edges plus one extra edge out of every non-`IDLE` state, straight
+back to `IDLE`. That second edge is the sole, uniform failure-recovery path
+— not a special-cased bypass — which is what makes "no runtime path can
+leave ORION permanently stuck outside `IDLE`" a structural property of the
+graph rather than something every call site has to remember. Any other
+transition (skipping a state, moving backward, `IDLE` jumping straight to
+`SPEAKING`) raises `InvalidVoiceStateTransitionError` and leaves the state
+unchanged — fail-closed, matching every other invariant-violation error in
+this codebase. `VoiceStateMachine` is independently unit-tested
+(`tests/voice/test_state.py`) with zero providers involved.
+
+**`VoiceRuntime.run_turn()`'s one broad `except Exception`.** Deliberately
+wider than this codebase's usual narrow, typed `except` clauses (compare
+`orion.voice.deepgram_stt`'s specific `except httpx.HTTPError`) — the
+requirement here is stronger than "handle known failure modes": *no*
+exception from *any* of the five dependencies, at *any* stage, may leave
+`VoiceState` outside `IDLE`. The original exception is always re-raised
+unchanged after `reset_to_idle()` — a caller still learns exactly what
+failed; only the runtime's own state is protected, never the error
+information. Every one of the five failure points (microphone, STT,
+response provider, TTS, speaker), plus a malformed-provider-response case
+and a reentrancy guard (`VoiceRuntimeBusyError`, raised if `run_turn()` is
+called while not `IDLE`), has a dedicated regression test in
+`tests/voice/test_runtime.py`.
+
+**Audio abstractions, real and in-memory, in the established pattern.**
+`AudioInput.capture() -> bytes` and `AudioOutput.play(speech:
+SynthesizedSpeech) -> None` are new ABCs (Phase 1 defined none — no audio
+I/O existed yet). Each ships two implementations in the same file as its
+ABC, mirroring `InMemoryPortfolioStore`/`InMemoryHistoricalBarSource`'s
+established "real, deterministic in-memory implementation next to the ABC"
+precedent, not a `unittest.mock` stand-in reinvented per test file:
+`InMemoryAudioInput`/`InMemoryAudioOutput` (test/dev doubles) and
+`MicrophoneAudioInput`/`SpeakerAudioOutput` (real local hardware via
+`sounddevice`). `AudioOutput.play` takes the whole `SynthesizedSpeech`
+object, not just `bytes` — `.format` is required to interpret raw PCM at
+all, and passing the validated object matches this codebase's established
+"pass the object, not a raw field" convention
+(`MacroAnalystProvider.analyze(snapshot)`).
+
+**Dependency: `sounddevice` (+ transitively `cffi`/`pycparser`), chosen
+after evaluation.** The smallest mature option for numpy-array-based
+record *and* playback in one library (PortAudio binding, ~3-package
+install, no extra native setup on Windows — its wheel bundles PortAudio).
+Alternatives considered and rejected: `pyaudio` (older, more fragile
+Windows install story for the same capability), `simpleaudio`
+(unmaintained, playback-only — would still need a second library for
+capture). The `sounddevice` import is deferred to inside
+`MicrophoneAudioInput`/`SpeakerAudioOutput`'s methods, not made at module
+level, so merely importing `orion.voice.audio_input`/`audio_output`, or
+using the `InMemory*` classes, never requires a working audio backend —
+relevant for CI/headless environments where PortAudio may not load even
+with the package installed. `pyproject.toml`/`uv.lock` gained exactly this
+one dependency; nothing else changed.
+
+**`orion.voice.deepgram_tts` changed: `mp3` → `linear16`/`container=wav`/
+`sample_rate=24000`.** The one Phase 2 file this phase modifies (Mission 9,
+not Mission 0–8 — in scope). Phase 2's default MP3 output has no
+stdlib-only decoder; adding an MP3-decoding dependency purely to support
+real local playback was judged a worse trade than changing three Deepgram
+TTS request query parameters. `container=wav` produces a complete,
+self-describing RIFF/WAVE file (sample rate/channels/bit depth all read
+from the file's own header), decoded by `SpeakerAudioOutput` with the
+stdlib `wave` module alone — zero new dependency for the container format,
+and `SynthesizedSpeech.format` stays a plain string (`"wav"` instead of
+`"mp3"`), no new schema field needed. `tests/voice/test_deepgram_tts.py`
+was updated to match (`encoding`/`container`/`sample_rate` query-param
+assertions, `format == "wav"`). This is an additive record of a follow-up
+change, not a rewrite of the Phase 2 decision entry above.
+
+**Response provider: `StaticResponseProvider`, deliberately
+content-independent.** Phase 3 does not build the real
+`UNDERSTANDING`/`ANALYZING` reasoning layer — that is explicit future
+orchestrator work (`ORION_MASTER_ENGINEERING_BRIEF_V2.md` §15, matching
+Phase 1's identical deferral). `StaticResponseProvider.respond(transcript)`
+returns a fixed string ("Hello. I'm ORION. I heard you, but full reasoning
+isn't connected in this build yet.") regardless of `transcript.text`'s
+content — never reading it at all, rather than reading it carefully. This
+is the strongest available guarantee that untrusted transcript text
+"travels through the runtime as inert data": the shipped code path cannot
+act on content it never inspects. `tests/voice/test_response.py`
+parametrizes several hostile payloads (prompt-injection phrasing, shell/SQL
+metacharacters, a trading command) and proves every one produces the
+identical response, never echoed. A future transcript-aware provider will
+need its own explicit defense (fencing, bounded output, no tool access) the
+same way `orion.analysts.claude_macro_provider` already does for untrusted
+economic-calendar text — not solved preemptively here.
+
+**Audio limits, enforced before any provider call.**
+`MAX_RECORDING_SECONDS` (30s) / `MAX_AUDIO_INPUT_BYTES` (25 MB, matching
+`orion.voice.deepgram_stt.MAX_AUDIO_BYTES`'s numeric value but declared
+independently — this module has no vendor dependency) on the input side;
+`MicrophoneAudioInput` additionally rejects a non-positive or
+over-ceiling `duration_seconds`/`sample_rate` at construction, before any
+hardware is touched. Oversized/empty audio is rejected outright, never
+silently truncated, one layer earlier than Phase 2 already enforces the
+same discipline at the STT-provider boundary.
+
+**Zero persistence, in-memory throughout, no temp file.**
+`MicrophoneAudioInput` never writes to disk: `sounddevice.rec()` returns a
+numpy array directly, and the WAV container is built in an in-memory
+`io.BytesIO` buffer via the stdlib `wave` module. `SpeakerAudioOutput`
+decodes the same way, in memory, and does not retain played audio after
+`play()` returns. `InMemoryAudioOutput.played` (a plain Python list) is a
+test/dev convenience, garbage-collected with the object — not persistence
+in this codebase's sense of the word (durable storage). No SQLite table, no
+journal method, no file write anywhere in the five new files — confirmed by
+the AST-based hygiene tests plus an independent adversarial probe's
+AST-based scan distinguishing `wave.open(...)` (an `ast.Attribute` call on
+an in-memory buffer) from a bare builtin `open(...)` (which would be
+filesystem access, and does not appear).
+
+**Import boundary: `runtime.py` depends only on ABCs, checked by name.**
+`tests/voice/test_import_hygiene.py` gained
+`test_runtime_does_not_import_concrete_vendor_or_hardware_modules`, which
+parses `runtime.py`'s own imports and asserts neither `httpx`/`sounddevice`
+nor `orion.voice.deepgram_stt`/`orion.voice.deepgram_tts` appear — not
+merely that the file "happens not to" today. `sounddevice` was added to
+`DISALLOWED_TOP_LEVEL_MODULES`, carved out only for `audio_input.py`/
+`audio_output.py`, the same per-file-allowlist mechanism Phase 2 already
+established for `httpx`. `uuid`/`random`/`secrets` were added to the
+disallowed set too (no file in `orion.voice` has a legitimate reason to
+mint an id or generate randomness) — a committed, permanent guarantee,
+not just something the adversarial probe happens to check this once.
+
+**Real hardware, honestly scoped.** `MicrophoneAudioInput`/
+`SpeakerAudioOutput` were smoke-tested against this development machine's
+actual default input/output devices (a 1-second real microphone capture,
+and real speaker playback of a locally-generated test tone — not audio
+from Deepgram) and both completed without error. **No
+`DEEPGRAM_API_KEY` is configured in this environment**, so the full
+mic → Deepgram STT → response → Deepgram TTS → speaker loop was *not*
+exercised against real vendor APIs — only the local audio I/O layer was
+hardware-tested; the vendor-integrated path is verified by mocked/`respx`
+tests only. Nothing captured during the smoke test was saved, logged, or
+retained beyond the single process that ran it.
+
+**Known limitations, deferred by design:** no voice-activity detection —
+`MicrophoneAudioInput` records a fixed `duration_seconds` window and
+returns, no early stop on silence; no streaming, no interruption/barge-in
+(the brief lists these as Mission 9 features, but building even a minimal
+version was judged unnecessary for "prove the physical loop exists," per
+this phase's explicit scope); no orchestrator, no real
+`UNDERSTANDING`/`ANALYZING` reasoning (that is what
+`ResponseProvider`/`StaticResponseProvider` deliberately does not attempt);
+no sensitive-command confirmation protocol (still no real command surface
+to confirm against); no CLI entry point; no wiring into
+Evidence/Decision/Risk/Paper/Memory/Reflection/Backtest. Mission 10's
+interface work can visualize this real runtime's real states and real
+audio once an orchestrator exists to drive it continuously — Phase 3 was
+built specifically so that visualization would have a real state machine
+and real audio path to render, not a mock to later replace.
+
+**Files added:** `src/orion/voice/{state.py, audio_input.py,
+audio_output.py, response.py, runtime.py}`,
+`tests/voice/{test_state.py, test_audio_input.py, test_audio_output.py,
+test_response.py, test_runtime.py}`. **Files modified:**
+`src/orion/voice/deepgram_tts.py` (encoding/container/sample_rate — see
+above), `tests/voice/test_deepgram_tts.py` (matching assertions),
+`tests/voice/test_import_hygiene.py` (per-file vendor/hardware allowlist,
+`runtime.py` boundary test, `uuid`/`random`/`secrets` ban),
+`pyproject.toml`/`uv.lock` (`sounddevice` dependency added). No Mission 0–8
+source touched.
+
+**Verification:** `pytest` collects 923 tests, all passing (up from 852).
+`ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass with
+zero findings (a `[[tool.mypy.overrides]]` entry for `sounddevice.*` was
+added, matching the existing `pandas_ta_classic.*` precedent — no published
+type stubs). An independently-written adversarial probe (separate from the
+implementation's own test files) re-verified hostile-transcript handling,
+control-character rejection, oversized/empty audio at both the input and
+output boundary, malformed-provider-response handling, all five
+failure-recovery paths plus reentrancy, credential non-leakage through the
+runtime's own exception plumbing, real-hardware error wrapping, source-level
+AST hygiene (no `exec`/`eval`/`compile`/`subprocess`, no persistence, no
+randomness, no bare filesystem `open`), and Mission 0–8/backtest isolation
+— all checks passed.
