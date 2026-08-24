@@ -1390,3 +1390,142 @@ tests). No existing source file modified.
 **Verification:** `pytest` collects 528 tests, all passing (up from 511).
 `ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass
 with zero findings.
+
+---
+
+## 2026-08-24 — Mission 6 (Backtesting & Validation) architecture approved and implemented
+
+**Decision: a new package — `src/orion/backtest/` — wiring the existing
+Evidence → Reasoning → Decision → Risk Guardian → Paper Execution chain
+into one deterministic, single-symbol/single-position loop over historical
+bars, with zero modification to any Mission 2–5 contract.** Five open
+questions from the read-only architecture investigation were resolved and
+locked before implementation began:
+
+- **M6-Q1 (historical data):** a new, small `HistoricalBarSource` ABC
+  (`src/orion/backtest/data.py`), not an extension of `orion.data.
+  provider_base.MarketDataProvider` — that interface's `fetch_ohlcv(...,
+  output_size)` is a "most recent N bars" live-fetch contract, structurally
+  different from "every bar between two dates." Two v1 implementations
+  only: `InMemoryHistoricalBarSource` and `CsvHistoricalBarSource` (the
+  latter delegates to the former after eager, fail-closed CSV parsing).
+  No Twelve Data range integration, no new network dependency. Neither
+  implementation ever reorders, deduplicates, or repairs a dataset —
+  `orion.data.validation.validate_snapshot` (called once, up front, by the
+  engine) is what classifies and fails closed on bad data.
+- **M6-Q2 (intrabar ambiguity):** a bar whose `[low, high]` range reaches
+  both the stop-loss and the take-profit resolves **stop-loss first** —
+  documented as a conservative modeling convention, not a fact OHLC data
+  can actually establish. Implemented in a new sibling function,
+  `resolve_stop_take_profit_ohlc` (`src/orion/backtest/execution.py`),
+  never a modification of `orion.paper.execution.resolve_stop_take_profit`
+  (which keeps its documented last-price-only v1 behavior — Mission 4
+  decision B6 — unchanged for live trading).
+- **M6-Q3 (latency):** an engine-level `fill_delay_bars: int = 0`
+  parameter, never a `PaperExecutionPolicy` field. `PaperExecutionPolicy`
+  stays scoped to cost (spread/slippage/fee); timing is an engine concern.
+- **M6-Q4 (persistence):** zero. `BacktestResult` is returned in memory
+  only; `orion.backtest` never imports `orion.memory` or `orion.
+  reflection` (verified by AST-level import inspection, not a docstring
+  grep, in the independent adversarial probe below). A caller wanting
+  Reflection or durability over a backtest journals the result's contents
+  into a disposable journal themselves — mixing simulated and real trade
+  history in the production journal would corrupt Mission 5's "actual
+  outcome" narrative, the sharpest integrity risk identified during the
+  investigation, closed here by prohibition rather than a guard rail.
+- **M6-Q5 (scope):** `run_backtest` is the one reusable primitive; no
+  walk-forward/regime/sensitivity/stress wrapper exists in v1 — those are
+  future callers of the same function with different `start`/`end`/policy
+  arguments, not new subsystems.
+
+**`orion.backtest.engine.run_backtest`** performs one up-front
+`validate_snapshot` call (using the dataset's own last-bar timestamp as
+`now`, so only EMPTY/GAP/NON_MONOTONIC/DUPLICATE_TIMESTAMP findings can
+fire — staleness is checked per-cycle downstream, trivially satisfied by
+construction), then loops bar-by-bar: `_window_for(bars, i, window_bars)`
+builds a rolling lookback that structurally cannot include `bars[j]` for
+`j > i` (no runtime check needed — it is a slice bound, proved directly by
+an adversarial test that runs two datasets sharing an identical bar prefix
+and diverging afterward, asserting the shared-prefix cycles/equity points
+are byte-identical regardless of the diverging future). No warmup-skip
+heuristic was needed: `orion.decision.rules.trade_requires_minimum_history`
+already downgrades a thin-history trade proposal to WAIT, confirmed live
+before writing any code, so the engine evaluates every bar from index 0.
+Exactly one state-producing call happens per bar (`execute`/
+`execute_delayed`/`resolve_stop_take_profit_ohlc`, each already internally
+calling `mark_to_market` once) — an early design sketch that additionally
+called `mark_to_market` a second time after `execute()` was caught and
+corrected before any test was written.
+
+**Two integration bugs found and fixed during implementation, before any
+commit — both would have broken the M6-Q3 latency feature outright:**
+
+1. `orion.paper.execution.execute` (the Mission 4 HIGH-fix from the
+   immediately preceding integration audit) requires the exact
+   `PortfolioState` `verdict.portfolio_ref` recorded — `portfolio_state_
+   fingerprint(portfolio) == verdict.portfolio_ref.content_hash`. The
+   engine's first draft called `mark_to_market` on the pending account
+   every bar while a delayed fill was in flight, which advances `as_of`
+   and therefore silently changes that fingerprint, making every delayed
+   fill fail closed with a `PaperExecutionError` at the fill bar. Fixed by
+   never touching `portfolio` while a fill is pending — it is provably
+   still flat (no open position, so `equity == cash` cannot move with
+   price regardless), so leaving it byte-identical to what `review()`
+   reviewed is both correct and sufficient; only the equity curve's own
+   `as_of` advances.
+2. `execute()` also requires `evidence_fingerprint(evidence) == proposal.
+   evidence_ref.content_hash` — the *same* Evidence the proposal was
+   reviewed against. A delayed fill must price off a *later* bar's
+   Evidence by definition, which can never satisfy that check. Rather than
+   relax an already-audited Mission 4 contract (explicitly out of scope
+   per the user's implementation rules), a new sibling, `execute_delayed`
+   (`orion.backtest.execution`), reimplements every other check `execute()`
+   performs — proposal/verdict linkage, action/direction consistency, and
+   critically the same portfolio-fingerprint check — and deliberately
+   omits only the evidence-linkage check, replaced with a narrower
+   same-symbol check. Verified directly: a test proves `execute()` itself
+   still rejects the later Evidence `execute_delayed` accepts, so the two
+   are not redundant.
+
+A third bug, found only by the independent adversarial probe pass (not the
+pytest suite): `orion.backtest.metrics._period_returns` paired consecutive
+`EquityPoint`s via `zip(equity_curve, equity_curve[1:], strict=True)` —
+`strict=True` demands equal-length iterables, but the second is *always*
+exactly one element shorter than the first by construction (that is what
+pairs each point with its predecessor), so every call with two or more
+points raised `ValueError` unconditionally. `sharpe_ratio`/`sortino_ratio`
+were completely broken for any real input; the pytest suite's own fixtures
+happened not to exercise the failing path directly enough to surface it
+before the probe did. Fixed to `strict=False`, with the reasoning recorded
+inline against a future edit re-adding `strict=True` out of habit.
+
+**`orion.backtest.metrics`** — `expectancy`, `profit_factor`, `exposure`,
+`sharpe_ratio`, `sortino_ratio` — raises `BacktestMetricsError` rather than
+returning `NaN`/`inf`/a fabricated `0.0` for every degenerate input (zero
+trades, zero return variance, a zero-equity base, zero gross loss, zero
+downside deviation), matching the "never silent" discipline already
+applied to `orion.risk.portfolio.compute_position_size` and `orion.
+backtest.data.HistoricalDataError`. `risk_free_rate_per_period`/
+`periods_per_year` are required, no-default parameters, matching `RiskPolicy.
+min_risk_reward`'s "no guessed constants" precedent.
+
+**Adversarial verification, beyond the pytest suite:** a standalone probe
+script independently confirmed — divergent-future-bars no-look-ahead proof
+(two genuinely different `HistoricalBarSource` instances sharing an
+identical 70-bar prefix); a 400-bar choppy-market run producing a real
+trade with a computable, finite Sharpe/Sortino/exposure; every module's
+actual AST-parsed imports (not a docstring substring match, which
+initially false-positived on this entry's own prose) confirming zero
+`orion.memory`/`orion.reflection` imports anywhere in the package; cash
+never negative across a long run; and determinism holding across two
+independently-constructed but value-identical datasets, not merely two
+calls sharing one object.
+
+**Files added:** `src/orion/backtest/{__init__.py, data.py, execution.py,
+schemas.py, metrics.py, engine.py}`, `tests/backtest/{__init__.py,
+conftest.py, test_data.py, test_execution.py, test_metrics.py,
+test_engine.py}` (67 new tests). No existing source file modified.
+
+**Verification:** `pytest` collects 595 tests, all passing (up from 528).
+`ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass
+with zero findings.
