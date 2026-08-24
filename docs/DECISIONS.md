@@ -1529,3 +1529,116 @@ test_engine.py}` (67 new tests). No existing source file modified.
 **Verification:** `pytest` collects 595 tests, all passing (up from 528).
 `ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass
 with zero findings.
+
+---
+
+## 2026-08-24 — Mission 7 (Research) v1: economic calendar data layer only
+
+**Decision: a new package, `src/orion/research/`, implementing exactly the
+first bullet of the brief's four-item Mission 7 list (`ORION_MASTER_
+ENGINEERING_BRIEF_V2.md` §13 — news, economic calendar, macro data,
+sentiment) — the economic calendar — behind a Finnhub-backed
+`EconomicCalendarProvider` ABC, and nothing else.** News, macro data, and
+sentiment are not implemented. No change to `orion.analysis`, `orion.
+reasoning`, `orion.decision`, `orion.risk`, `orion.paper`, `orion.memory`,
+`orion.reflection`, or `orion.backtest` — this is a standalone data layer,
+mirroring exactly where `orion.data` sat before Mission 1 wired it into
+`orion.analysis`. Wiring economic calendar events into Evidence/Reasoning is
+explicitly a future task, not part of this entry.
+
+**Shape mirrors `orion.data` deliberately, one level down:**
+`EconomicCalendarEvent` / `EconomicCalendarSourceMeta` / `EconomicCalendarSnapshot`
+(`orion.research.models`) parallel `OHLCVBar` / `DataSourceMeta` /
+`MarketSnapshot` exactly — frozen, `extra="forbid"` (the newer, stricter
+convention every schema after Mission 1 uses; `orion.data.models` predates it
+and was left unchanged, out of scope here). `EconomicCalendarProvider`
+(`orion.research.provider_base`) mirrors `orion.data.provider_base.
+MarketDataProvider` exactly: one abstract `fetch_calendar(start, end) ->
+EconomicCalendarSnapshot`, and `EconomicCalendarProviderError` that must never
+be caught and downgraded to fabricated/partial data. `FinnhubEconomicCalendarProvider`
+(`orion.research.finnhub_provider`) mirrors `TwelveDataProvider` exactly:
+private pydantic response models for the raw provider payload, `_to_event`
+raising on the first malformed field (never skipping a bad event or
+substituting a guessed default — external research data is untrusted, and a
+partially-fabricated calendar is worse than none), and `retrieved_at =
+datetime.now(UTC)` read exactly once, only at this live I/O boundary — no
+other file in `orion.research` reads the wall clock (verified by an
+AST-based adversarial probe, not just code review).
+
+**No new hashing mechanism.** `orion.provenance.canonical_hash` is not
+wired into `orion.research` yet (no fingerprint field on any of the three new
+models) because nothing downstream consumes one in this milestone —
+adding a fingerprint with no caller would be exactly the "building ahead of
+proven need" this project has repeatedly declined to do at prior mission
+boundaries (Mission 5's deferred-persistence entry is the closest precedent).
+Confirmed by direct probe, not just absence of code, that `canonical_hash`
+already works correctly over `EconomicCalendarSnapshot` with no changes
+needed to either module when a future caller (most likely a Mission 2
+`DecisionJournal` extension, or an Evidence-layer integration) does need one
+— reproducible, and changes when content changes.
+
+**Calendar-specific validation, not a copy of `orion.data.validation`.**
+`orion.research.validation.validate_calendar_snapshot` mirrors
+`validate_snapshot`'s shape (a `CalendarValidationResult` of typed findings,
+`now` a required caller-supplied parameter, never `datetime.now()` read
+internally) but not its content — an economic calendar and a bar series have
+different failure modes. Four issue types: `DUPLICATE_EVENT` (same
+`(event_time, country, event_name)` more than once), `OUT_OF_RANGE` (an
+event outside the provider's own claimed `[query_start, query_end]` window —
+catches a provider silently returning data for the wrong dates), `STALE_
+RETRIEVAL` / `FUTURE_RETRIEVAL` (retrieval timestamp integrity, the calendar
+analogue of `evidence_is_fresh`'s staleness check plus the Risk Guardian's
+existing "future timestamp" checks). **`EMPTY` is deliberately non-blocking**
+— the one real judgment call in this entry, and the reason it's called out
+here rather than left implicit: unlike an OHLCV snapshot (which should never
+legitimately be empty — the market always has a most-recent bar, so `orion.
+data.validation.DataQualityIssue.EMPTY` is correctly always-invalid), a
+narrow economic-calendar query window can be genuinely, correctly empty (a
+quiet day with nothing scheduled). Treating it as blocking would falsely
+invalidate a large fraction of real, correct provider responses; it is still
+recorded as a finding so a caller can distinguish "confirmed quiet" from
+"never checked."
+
+**Fail-closed, verified adversarially beyond the pytest suite:** a
+standalone probe fed the Finnhub provider nine distinct malformed-response
+shapes (null/unparseable/wrong-case fields, a null or non-list
+`economicCalendar`, a missing key entirely) and confirmed every one raises
+`EconomicCalendarProviderError` — none silently drops the bad event or
+substitutes a default. The probe also confirmed: `[query_start, query_end]`
+boundaries are inclusive (an event exactly at either edge is not
+`OUT_OF_RANGE`, matching every other inclusive-range convention already in
+this codebase, e.g. `HistoricalBarSource.fetch_range`); `now == retrieved_at`
+never false-positives `FUTURE_RETRIEVAL`; validation is deterministic for
+identical input; and zero `anthropic`/`sqlalchemy`/downstream-`orion.*`
+imports exist anywhere in the package (AST-parsed, the same static-proof
+technique `tests/risk/test_import_hygiene.py` established).
+
+**Config:** `Settings` gained `finnhub_api_key`/`finnhub_base_url`
+(`FINNHUB_API_KEY`/`FINNHUB_BASE_URL`, matching `TWELVE_DATA_API_KEY`/
+`TWELVE_DATA_BASE_URL`'s pattern exactly), additive to `.env.example`. No
+other `Settings` field touched.
+
+**Known limitations, deferred by design, not oversight:** news, macro data,
+and sentiment (the brief's other three Mission 7 bullets) are entirely
+unbuilt. Zero persistence — a `EconomicCalendarSnapshot` is returned to the
+caller only, never journaled (no `orion.memory` change); revisit once a real
+consumer needs durability, per the same "don't design storage ahead of a
+proven need" precedent Mission 5 already used. No wiring into `orion.
+analysis`/`Evidence` — the AI reasoning layer does not see calendar data yet.
+No source-reliability/cross-provider corroboration model (only one provider
+exists). No data-quality *action* (nothing consumes a `CalendarValidationResult`
+yet to decide WAIT-around-news-events or similar — that is a future
+`orion.risk`/`orion.decision` integration, explicitly out of scope here).
+
+**Files added:** `src/orion/research/{__init__.py, models.py,
+provider_base.py, validation.py, finnhub_provider.py}`,
+`tests/research/{__init__.py, test_models.py, test_validation.py,
+test_finnhub_provider.py, test_import_hygiene.py}` (37 new tests). **Files
+modified (additive only):** `src/orion/config.py`, `.env.example`,
+`docs/DECISIONS.md` (this entry).
+
+**Verification:** `pytest` collects 623 tests, all passing (up from 595).
+`ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass with
+zero findings. `git diff --stat` confirms exactly two pre-existing files
+touched, both additive (`.env.example` +4, `src/orion/config.py` +4), and
+zero changes to any Mission 0–6 source file.

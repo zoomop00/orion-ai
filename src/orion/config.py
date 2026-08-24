@@ -51,6 +51,10 @@ class Settings(BaseSettings):
         default="https://api.twelvedata.com", alias="TWELVE_DATA_BASE_URL"
     )
 
+    # --- Economic calendar provider (Mission 7 research data layer) ---
+    finnhub_api_key: str = Field(default="", alias="FINNHUB_API_KEY")
+    finnhub_base_url: str = Field(default="https://finnhub.io/api/v1", alias="FINNHUB_BASE_URL")
+
     # --- Decision memory ---
     orion_db_path: str = Field(default="./orion.db", alias="ORION_DB_PATH")
 
