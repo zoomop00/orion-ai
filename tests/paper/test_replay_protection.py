@@ -23,7 +23,15 @@ import pytest
 from orion.paper.execution import execute, resolve_stop_take_profit
 from orion.paper.policy import PaperExecutionPolicy
 from orion.paper.store import InMemoryPortfolioStore, PortfolioStoreConcurrencyError
-from tests.paper.conftest import BASE_TIME, build_approved_trade, build_evidence
+from orion.reasoning.schemas import Action, Direction
+from orion.risk.guardian import review
+from tests.paper.conftest import (
+    BASE_TIME,
+    build_approved_trade,
+    build_evidence,
+    build_policy,
+    build_proposal,
+)
 
 ZERO_COST_POLICY = PaperExecutionPolicy(spread_bps=0.0, slippage_bps=0.0, fee_bps=0.0)
 
@@ -205,15 +213,35 @@ def test_replay_after_open_close_reopen_is_still_rejected() -> None:
     r2 = store.save(closed_portfolio, expected_revision=r1.revision)
     assert store.load().state.open_position is None
 
-    # Reopen a second position using the (now-flat) current record.
-    trade_2 = build_approved_trade(
-        cash=store.load().state.cash, entry_price=2400.0, stop_loss=2350.0, take_profit=2500.0
+    # Reopen a second position -- reviewed against the REAL current store
+    # state (not a freshly-built lookalike with merely matching cash),
+    # since execute() now verifies portfolio_state_fingerprint(portfolio)
+    # == verdict.portfolio_ref.content_hash (the HIGH cross-mission
+    # integration fix): a verdict must be executed against the exact
+    # PortfolioState it was reviewed against.
+    current_state = store.load().state
+    evidence_2 = build_evidence(last_price=2400.0)
+    proposal_2 = build_proposal(
+        action=Action.BUY,
+        direction=Direction.LONG,
+        evidence=evidence_2,
+        stop_loss=2350.0,
+        take_profit=2500.0,
+        analysis_id="reopen-analysis",
+        decided_at=BASE_TIME + timedelta(hours=2),
+    )
+    verdict_2 = review(
+        proposal_2,
+        evidence_2,
+        policy=build_policy(),
+        portfolio=current_state,
+        now=BASE_TIME + timedelta(hours=2),
     )
     reopened = execute(
-        trade_2.proposal,
-        trade_2.verdict,
-        trade_2.evidence,
-        store.load().state,
+        proposal_2,
+        verdict_2,
+        evidence_2,
+        current_state,
         quantity=1.0,
         policy=ZERO_COST_POLICY,
         now=BASE_TIME + timedelta(hours=2),

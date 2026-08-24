@@ -19,6 +19,7 @@ from orion.paper.schemas import CloseReason, PaperExecutionError
 from orion.reasoning.schemas import Action, Direction
 from orion.risk.guardian import review
 from orion.risk.policy import KillSwitchState
+from orion.risk.portfolio import mark_to_market, portfolio_state_fingerprint
 from orion.risk.schemas import RiskOutcome, RiskReasonCode, risk_verdict_fingerprint
 from tests.paper.conftest import (
     BASE_TIME,
@@ -321,6 +322,178 @@ def test_execute_rejects_a_portfolio_symbol_mismatch() -> None:
             trade.verdict,
             trade.evidence,
             mismatched_portfolio,
+            quantity=1.0,
+            policy=ZERO_COST_POLICY,
+            now=BASE_TIME,
+        )
+
+
+# --- execute(): portfolio_ref integration check (HIGH cross-mission finding fix) ---
+#
+# A fresh, cross-mission integration audit of the full Evidence -> Reasoning
+# -> ProposedDecision -> RiskVerdict -> Paper Execution chain found that
+# execute() verified every other RiskVerdict reference (decision_ref,
+# evidence_ref transitively via proposal) but never verified portfolio_ref --
+# meaning a caller could substitute a completely different, unreviewed
+# PortfolioState and still have it execute, silently bypassing every
+# portfolio-dependent control review() actually evaluated. Empirically
+# confirmed exploitable before the fix (a $5,000,000 account executed
+# against a verdict approved for a $100,000 one); this section is the
+# regression suite for the fix.
+
+
+def test_execute_accepts_a_portfolio_that_matches_verdict_portfolio_ref() -> None:
+    # Positive control: the fix must not false-positive on the legitimate
+    # case -- the exact portfolio review() was called with.
+    trade = build_approved_trade(cash=100_000.0)
+    assert portfolio_state_fingerprint(trade.portfolio) == trade.verdict.portfolio_ref.content_hash
+    result = execute(
+        trade.proposal,
+        trade.verdict,
+        trade.evidence,
+        trade.portfolio,
+        quantity=1.0,
+        policy=ZERO_COST_POLICY,
+        now=BASE_TIME,
+    )
+    assert result.portfolio.open_position is not None
+
+
+def test_execute_rejects_a_same_symbol_but_entirely_different_portfolio() -> None:
+    # The exact exploit scenario found by the audit: same symbol, no open
+    # position, ample cash -- every *other* check would pass -- but this is
+    # simply not the account the Risk Guardian reviewed.
+    trade = build_approved_trade(cash=100_000.0)
+    unrelated_portfolio = build_portfolio(cash=5_000_000.0, starting_balance=5_000_000.0)
+    assert unrelated_portfolio.symbol == trade.portfolio.symbol
+    assert (
+        portfolio_state_fingerprint(unrelated_portfolio) != trade.verdict.portfolio_ref.content_hash
+    )
+    with pytest.raises(PaperExecutionError, match="does not match verdict.portfolio_ref"):
+        execute(
+            trade.proposal,
+            trade.verdict,
+            trade.evidence,
+            unrelated_portfolio,
+            quantity=1.0,
+            policy=ZERO_COST_POLICY,
+            now=BASE_TIME,
+        )
+
+
+def test_execute_rejects_a_portfolio_with_different_cash_or_equity() -> None:
+    # A more surgical variant than the wholesale-substitution case above:
+    # only cash/equity differ (a plausible "stale reload picked up a
+    # different balance" scenario), everything else about the portfolio is
+    # identical in shape.
+    trade = build_approved_trade(cash=100_000.0)
+    different_cash_portfolio = build_portfolio(cash=99_000.0, starting_balance=100_000.0)
+    with pytest.raises(PaperExecutionError, match="does not match verdict.portfolio_ref"):
+        execute(
+            trade.proposal,
+            trade.verdict,
+            trade.evidence,
+            different_cash_portfolio,
+            quantity=1.0,
+            policy=ZERO_COST_POLICY,
+            now=BASE_TIME,
+        )
+
+
+def test_execute_rejects_a_tampered_portfolio_that_is_otherwise_plausible() -> None:
+    # A model_copy-tampered portfolio that changes a field the other checks
+    # never look at (equity_peak) -- proves the fix catches arbitrary
+    # content drift, not just the fields execute()'s other checks happen to
+    # read (symbol, open_position, cash).
+    trade = build_approved_trade(cash=100_000.0)
+    tampered = trade.portfolio.model_copy(update={"equity_peak": 999_999.0})
+    assert tampered.symbol == trade.portfolio.symbol
+    assert tampered.open_position is None
+    assert tampered.cash == trade.portfolio.cash
+    with pytest.raises(PaperExecutionError, match="does not match verdict.portfolio_ref"):
+        execute(
+            trade.proposal,
+            trade.verdict,
+            trade.evidence,
+            tampered,
+            quantity=1.0,
+            policy=ZERO_COST_POLICY,
+            now=BASE_TIME,
+        )
+
+
+def test_execute_rejects_a_stale_mark_to_market_portfolio() -> None:
+    # A "stale" portfolio in the temporal sense: a legitimately-derived
+    # mark_to_market() step forward in time from the reviewed snapshot
+    # (e.g. a caller that re-marked the account before re-checking whether
+    # the verdict it holds is still current) -- still not what was
+    # reviewed, must still be rejected.
+    trade = build_approved_trade(cash=100_000.0)
+    later = mark_to_market(
+        trade.portfolio, now=BASE_TIME + timedelta(minutes=30), last_price=trade.evidence.last_price
+    )
+    with pytest.raises(PaperExecutionError, match="does not match verdict.portfolio_ref"):
+        execute(
+            trade.proposal,
+            trade.verdict,
+            trade.evidence,
+            later,
+            quantity=1.0,
+            policy=ZERO_COST_POLICY,
+            now=BASE_TIME,
+        )
+
+
+def test_rejected_portfolio_mismatch_causes_zero_state_mutation() -> None:
+    # A rejected execute() call must leave every input untouched -- no
+    # fabricated Fill, no fabricated Position, and (since PortfolioState is
+    # frozen) the caller's own objects provably unchanged after the raise.
+    trade = build_approved_trade(cash=100_000.0)
+    unrelated_portfolio = build_portfolio(cash=5_000_000.0, starting_balance=5_000_000.0)
+    original_snapshot = unrelated_portfolio.model_copy()
+
+    with pytest.raises(PaperExecutionError, match="does not match verdict.portfolio_ref"):
+        execute(
+            trade.proposal,
+            trade.verdict,
+            trade.evidence,
+            unrelated_portfolio,
+            quantity=1.0,
+            policy=ZERO_COST_POLICY,
+            now=BASE_TIME,
+        )
+
+    assert unrelated_portfolio == original_snapshot
+    assert unrelated_portfolio.open_position is None
+    assert unrelated_portfolio.cash == 5_000_000.0
+    # The legitimately-reviewed portfolio is untouched too -- a rejected
+    # call using a *different* object must never leak a side effect back
+    # onto the correct one.
+    assert trade.portfolio.open_position is None
+    assert trade.portfolio.cash == trade.portfolio.starting_balance
+
+
+def test_execute_rejects_portfolio_mismatch_before_the_open_position_check() -> None:
+    # Ordering regression: the fix is the LAST validation gate (after the
+    # symbol and open-position checks, so their own more specific messages
+    # are preserved for the scenarios they were written for -- see
+    # test_execute_rejects_a_portfolio_symbol_mismatch and test_execute_
+    # rejects_opening_while_a_position_is_already_open). This test proves a
+    # portfolio that passes every *other* check (right symbol, flat,
+    # affordable) but is still the wrong account is caught by the new
+    # check specifically, not silently accepted because it "looked fine."
+    trade = build_approved_trade(cash=100_000.0)
+    plausible_but_wrong = build_portfolio(
+        symbol=trade.portfolio.symbol, cash=200_000.0, starting_balance=200_000.0
+    )
+    assert plausible_but_wrong.symbol == trade.evidence.symbol
+    assert plausible_but_wrong.open_position is None
+    with pytest.raises(PaperExecutionError, match="does not match verdict.portfolio_ref"):
+        execute(
+            trade.proposal,
+            trade.verdict,
+            trade.evidence,
+            plausible_but_wrong,
             quantity=1.0,
             policy=ZERO_COST_POLICY,
             now=BASE_TIME,

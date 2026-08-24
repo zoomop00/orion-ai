@@ -34,7 +34,12 @@ from orion.decision.schemas import ProposedDecision, decision_fingerprint
 from orion.paper.policy import PaperExecutionPolicy
 from orion.paper.schemas import ClosedPosition, CloseReason, Fill, PaperExecutionError
 from orion.reasoning.schemas import Direction
-from orion.risk.portfolio import PortfolioState, Position, mark_to_market
+from orion.risk.portfolio import (
+    PortfolioState,
+    Position,
+    mark_to_market,
+    portfolio_state_fingerprint,
+)
 from orion.risk.schemas import RiskOutcome, RiskVerdict, risk_verdict_fingerprint
 
 
@@ -122,12 +127,20 @@ def execute(
     (single-position-at-a-time — `orion.risk.controls.
     no_conflicting_open_position` should already have vetoed this
     upstream, but this layer's guarantee must not depend on another
-    layer's diligence), or if the resulting notional plus fee exceeds
-    available cash (cash-covered only, no leverage — `orion.risk.controls.
-    position_size_within_limits` should already have vetoed this
-    upstream). None of these is an ordinary market condition; there is no
-    such condition in v1 (cash-covered, last-price-only — Mission 4
-    architecture decisions B4/B6).
+    layer's diligence), if `portfolio` is not the exact `PortfolioState`
+    `verdict` was reviewed against (`portfolio_state_fingerprint(portfolio)
+    != verdict.portfolio_ref.content_hash` — a cross-mission integration
+    finding: every other `RiskVerdict` reference (`decision_ref`,
+    `evidence_ref` transitively via `proposal`) was already verified here,
+    but `portfolio_ref` was not, meaning a caller could substitute a
+    different, stale, or otherwise-unreviewed account and still have it
+    execute, silently bypassing every portfolio-dependent control
+    `review()` actually evaluated against the real account), or if the
+    resulting notional plus fee exceeds available cash (cash-covered only,
+    no leverage — `orion.risk.controls.position_size_within_limits` should
+    already have vetoed this upstream). None of these is an ordinary
+    market condition; there is no such condition in v1 (cash-covered,
+    last-price-only — Mission 4 architecture decisions B4/B6).
     """
     if verdict.outcome is not RiskOutcome.APPROVED:
         raise PaperExecutionError(
@@ -181,6 +194,27 @@ def execute(
     if portfolio.open_position is not None:
         raise PaperExecutionError(
             "portfolio already holds an open position; Mission 4 v1 is single-position-at-a-time"
+        )
+    if portfolio_state_fingerprint(portfolio) != verdict.portfolio_ref.content_hash:
+        # Cross-mission integration finding: every other RiskVerdict
+        # reference (decision_ref, evidence_ref transitively via proposal)
+        # was already verified above -- portfolio_ref was not, meaning a
+        # caller could substitute a different, stale, or otherwise-
+        # unreviewed PortfolioState and still have it execute, silently
+        # bypassing every portfolio-dependent control review() actually
+        # evaluated (position_size_within_limits, exposure_within_limit,
+        # daily/weekly_loss_limit, max_drawdown, portfolio_state_is_fresh)
+        # against the real account. This is the final gate, run last and
+        # deliberately after the symbol/open-position checks above, so
+        # those checks' own, more specific error messages are preserved
+        # for the scenarios they were written to catch; this one closes
+        # everything else -- a portfolio that is symbol-correct, flat, and
+        # affordable, but simply is not the account this verdict concerns.
+        raise PaperExecutionError(
+            "portfolio does not match verdict.portfolio_ref; cannot establish that this "
+            "portfolio is the exact PortfolioState orion.risk.guardian.review actually "
+            "reviewed when approving this verdict -- a different, stale, or substituted "
+            "account must never be executed against an approval computed for another one"
         )
 
     fingerprint = risk_verdict_fingerprint(verdict)
