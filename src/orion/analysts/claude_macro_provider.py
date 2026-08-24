@@ -173,6 +173,37 @@ def _validate_snapshot_size(snapshot: EconomicCalendarSnapshot) -> None:
             )
 
 
+def _validate_provider_field(provider: str) -> None:
+    """`snapshot.source.provider` is interpolated into a quoted attribute
+    (`provider="..."`) rather than JSON-serialized like every other
+    dynamic value in the prompt template. `html.escape` neutralizes the
+    character that could otherwise break out of that quoting (`"`), plus
+    `&`/`<`/`>` for good measure — but it does not touch control characters
+    (newline, carriage return, tab, null byte, and the like), which could
+    still visually split the tag across lines or otherwise corrupt the
+    surrounding structure even though they cannot break the quoted-string
+    boundary itself. Rather than silently stripping or re-encoding them
+    (which could change the value in ways a caller does not expect), a
+    control character here is rejected outright, fail-closed, before any
+    API call is made — the same "reject, never silently normalize"
+    discipline `_validate_snapshot_size` already applies to oversized
+    fields.
+
+    `str.isprintable()` is the correct tool for this: it is False for any
+    Unicode "Other"/"Separator" category character except the ASCII space
+    (0x20), which covers every ASCII control character (0x00-0x1F, 0x7F)
+    and their Unicode equivalents, while leaving ordinary printable text —
+    including quotes, `&`, `<`, `>`, and non-ASCII letters — untouched, so
+    legitimate provider names are never rejected.
+    """
+    if not provider.isprintable():
+        raise MacroAnalystProviderError(
+            "snapshot.source.provider contains a non-printable/control character "
+            "(e.g. newline, carriage return, tab, or null byte); rejected rather "
+            "than silently normalized"
+        )
+
+
 def _event_payload(event: EconomicCalendarEvent) -> dict[str, object]:
     return {
         "event_id": canonical_hash(event),
@@ -188,6 +219,15 @@ def _event_payload(event: EconomicCalendarEvent) -> dict[str, object]:
 
 
 def _build_user_content(snapshot: EconomicCalendarSnapshot) -> str:
+    # snapshot.source.provider is a str with no character restriction on
+    # EconomicCalendarSourceMeta (only min_length=1) -- today's only real
+    # caller (FinnhubEconomicCalendarProvider) hardcodes it to the Python
+    # literal "finnhub", never vendor response content, but nothing in the
+    # type system guarantees that stays true for every future caller.
+    # Checked first, before any other work, so a rejection here never
+    # depends on (or is masked by) a later check.
+    _validate_provider_field(snapshot.source.provider)
+
     control = {
         "query_start": snapshot.source.query_start.isoformat(),
         "query_end": snapshot.source.query_end.isoformat(),
@@ -202,16 +242,14 @@ def _build_user_content(snapshot: EconomicCalendarSnapshot) -> str:
             f"{MAX_TOTAL_SERIALIZED_CHARS}-char total limit"
         )
 
-    # snapshot.source.provider is a str with no character restriction on
-    # EconomicCalendarSourceMeta (only min_length=1) -- today's only real
-    # caller (FinnhubEconomicCalendarProvider) hardcodes it to the Python
-    # literal "finnhub", never vendor response content, but nothing in the
-    # type system guarantees that stays true for every future caller. Every
-    # other value interpolated into this tag is either json.dumps-escaped
-    # (the events/control payloads) or structurally incapable of containing
-    # a quote character (an isoformat() datetime, an int) -- provider is the
-    # one exception, so it is explicitly escaped rather than relying on the
-    # "this call site happens to be safe today" assumption.
+    # Every other value interpolated into the tag below is either
+    # json.dumps-escaped (the events/control payloads) or structurally
+    # incapable of containing a quote character (an isoformat() datetime,
+    # an int) -- provider is the one exception, so it is explicitly
+    # escaped rather than relying on the "this call site happens to be
+    # safe today" assumption. _validate_provider_field above has already
+    # rejected any control character; html.escape here handles the
+    # remaining printable characters that need it (`"`, `&`, `<`, `>`).
     safe_provider = html.escape(snapshot.source.provider, quote=True)
 
     return (
@@ -312,6 +350,23 @@ class ClaudeMacroAnalystProvider(MacroAnalystProvider):
             raise MacroAnalystProviderError(
                 "Claude returned no parseable structured output "
                 f"(stop_reason={response.stop_reason!r})"
+            )
+        if not isinstance(verdict, MacroAnalystVerdict):
+            # Defense-in-depth, not a case the real SDK is expected to
+            # produce: `client` is an injectable constructor parameter (the
+            # documented test seam, since respx cannot intercept this SDK),
+            # so a non-conforming caller-supplied client could hand back
+            # anything -- a dict, a string, an unrelated object, or even a
+            # different Pydantic model. Without this check, the attribute
+            # access below would raise an uncaught AttributeError/TypeError
+            # instead of the documented MacroAnalystProviderError every
+            # other failure path in this method honors: analyze() must
+            # always either return a valid MacroAnalystOutput or raise
+            # MacroAnalystProviderError, never anything else. No coercion --
+            # a wrong-shaped object is a hard failure, not a value to adapt.
+            raise MacroAnalystProviderError(
+                f"Claude returned a parsed_output of unexpected type {type(verdict).__name__}, "
+                "not MacroAnalystVerdict"
             )
 
         expected_ids = {canonical_hash(event) for event in snapshot.events}
