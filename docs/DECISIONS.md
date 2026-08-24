@@ -912,3 +912,249 @@ passed, which requires both levels), so it has no dedicated test — the
 same category of "restated defense-in-depth for a scenario another layer's
 diligence already prevents" this codebase has accepted elsewhere (e.g.
 `proposal_was_not_upgraded`'s docstring), not a gap in coverage.
+
+---
+
+## 2026-08-23 — Fix Mission 4 portfolio concurrency (H-NEW1 replay
+protection, H-ABA1 monotonic revision) — backfilled entry
+
+**This entry was written retroactively, during Mission 2 planning, after
+noticing commit `2b3189d` ("Fix Mission 4 portfolio concurrency") shipped
+with no corresponding decision log entry.** The change itself was reviewed
+and committed correctly at the time; only the log entry was missed. Recorded
+now, out of chronological order, rather than edited into the Mission 4
+implementation entry above, per this file's own append-only rule.
+
+**H-NEW1 (found in a skeptical post-implementation review of Mission 4):**
+the original `PortfolioStore` interface had no replay/idempotency
+protection at all — a caller retrying `execute()` + a hypothetical `save()`
+with a stale-but-still-plausible `PortfolioState` could double-apply a
+fill, silently corrupting the account. `orion.paper.execution.execute`
+deliberately stays a pure function with no store dependency (an
+architectural requirement, not an oversight), so the fix had to live at the
+store boundary instead.
+
+**First fix attempt used `orion.risk.portfolio.portfolio_state_fingerprint`
+(a pure content hash, newly added) as the compare-and-swap token for
+`PortfolioStore.save()`.** A second, explicitly-requested skeptical review
+(H-ABA1) found this vulnerable to the classic ABA problem: if account
+content genuinely passes through A → B → C where C happens to be
+byte-identical to A (a legitimate round trip, e.g. a position opened and
+closed such that cash returns to a prior value), a caller still holding
+A's fingerprint from before B ever happened could successfully write
+against C, because C's fingerprint equals A's.
+
+**Final fix: `PortfolioStore` gained a store-minted, monotonically
+increasing `revision: int`, never a content fingerprint, as the CAS token.**
+`load()`/`save()`/`initialize()` all now return a new `PortfolioRecord`
+(`state` + `revision`) atomically in one call, so a caller never needs a
+second round trip to learn the revision to present next.
+`PortfolioStoreConcurrencyError(PortfolioStoreError)` is raised, and the
+stored state/revision left completely unchanged, whenever
+`expected_revision` does not match the store's actual current revision —
+including a revision that is stale only because content coincidentally
+repeated (the exact case a fingerprint-based CAS gets wrong).
+`portfolio_state_fingerprint` itself was kept, unchanged, as a pure
+content-identity/provenance hash (used by `PortfolioStateRef` and
+elsewhere) — concurrency identity and content identity are deliberately
+two different mechanisms answering two different questions, and conflating
+them into one hash is exactly what let the ABA gap in.
+
+`orion.paper.execution.execute` gained one additional integrity check,
+found necessary during the same review: an explicit comparison of
+`verdict.action`/`verdict.direction` against
+`verdict.decision_ref.action`/`.direction`, rather than relying on
+`Position`'s/`Fill`'s own geometry/NONE-rejection validators to incidentally
+catch a `model_copy`-tampered verdict as a side effect — the same
+defense-in-depth discipline already applied to
+`proposal_was_not_upgraded`/`classify_trade_levels`.
+
+**Test coverage added:** `tests/paper/test_store.py` extended with the
+full CAS/ABA suite (stale-write rejection, the constructed ABA scenario,
+sequential-revision chaining, deterministic rejection messages);
+`tests/paper/test_replay_protection.py` (new — end-to-end `execute()` +
+`InMemoryPortfolioStore.save()`, proving a retried/replayed execution never
+lands a second fill regardless of store content coincidentally repeating).
+
+**Verification at the time:** `ruff check .`, `ruff format --check .`,
+`mypy .` (strict) all clean; `pytest` at 389 passing (unchanged count from
+the Mission 4 implementation entry above — this was a fix to already-counted
+tests plus new ones, verified again independently before the Mission 2 work
+below began).
+
+---
+
+## 2026-08-24 — Mission 2 (Decision Memory) architecture approved
+
+**Decision:** Implement Mission 2 as a new `orion.memory` package providing
+two things behind two existing/new interfaces, and nothing else: (1) a
+durable `SqlitePortfolioStore(PortfolioStore)` — the durable implementation
+of the *existing* `orion.paper.store.PortfolioStore` interface Mission 4
+left as an open seam (B1) — and (2) a new, append-only `DecisionJournal`
+interface recording every `Evidence` / `ReasoningOutput` / `ProposedDecision`
+/ `RiskVerdict` / `Fill` / `ClosedPosition` ORION ever produces, with a
+SQLite-backed implementation. Both back onto one SQLite database via
+SQLAlchemy Core, per the storage technology already decided in this file's
+very first Mission 0 entry ("Decision memory: SQLite").
+
+**Why SQLite + SQLAlchemy Core, not the ORM:** every record is already a
+fully-specified Pydantic domain model; mapping each one a second time onto
+an ORM class would create two parallel schemas that can silently drift.
+Core lets every table store the record's own `model_dump_json()` as the
+source of truth, plus a handful of denormalized, indexed columns for what
+is actually queried (fingerprint, `analysis_id`, `symbol`, the record's own
+domain timestamp) — a new field on a domain model needs no migration unless
+it also needs to be queryable.
+
+**M2-Q4 — content fingerprint as primary key, approved.** Every journal
+table's primary key is the record's own content fingerprint
+(`evidence_fingerprint`/`canonical_hash`/`decision_fingerprint`/
+`risk_verdict_fingerprint` — the exact functions already used everywhere
+else in ORION), computed internally by `SqliteDecisionJournal`, never
+accepted as a parameter (a structural anti-forgery property: there is no
+argument through which a caller could supply a fingerprint disagreeing with
+an object's actual content). This is deliberately one mechanism answering
+two questions at once: it is both the provenance-linkage mechanism and the
+idempotency/replay-protection mechanism — a duplicate write of
+byte-identical content is a database-level no-op.
+
+**M2-Q3 — `PortfolioState` history as append-only INSERT with
+`revision` as the table's own primary key, not `UPDATE ... WHERE revision =
+?`, approved.** This revises (for the durable implementation only) the
+`UPDATE`-based sketch in `orion.paper.store`'s own module docstring,
+written before this durable implementation actually existed. Every
+revision this store has ever issued is kept as a permanent row — no
+account-state history is ever destructively overwritten, matching this
+file's immutability convention even for the one entity that is
+conceptually "current value, not append-only fact" — at no extra cost, and
+it is what makes the CAS safe under real concurrent writers: two writers
+racing to insert the same revision number are resolved by the database's
+own `PRIMARY KEY`/`UNIQUE` constraint at the moment of insert, not by
+whatever isolation level happens to govern the preceding read. `PortfolioStore`'s
+public interface (`load`/`save`/`initialize` returning `PortfolioRecord`)
+is completely unchanged; only what backs it durably.
+
+**M2-Q6 — `recorded_at` as a required, caller-supplied parameter on every
+`DecisionJournal.record_*` method, approved** ("when did Memory learn this,"
+distinct from the record's own domain timestamp) — matching the
+determinism discipline every other layer already follows (`decide`,
+`review`, `execute` all take `now` as a required parameter, never read a
+clock themselves). `PortfolioStore.save()`/`initialize()`'s own signature
+was deliberately *not* changed to add an equivalent parameter — that
+interface is Mission 4's, preserved exactly per this approval's own scope
+limit, and `PortfolioState.as_of` (already required, already
+caller-supplied) already serves the equivalent purpose for that table.
+
+**M2-Q7 — "historical search" scoped to mechanical filter/pagination
+only, approved.** `DecisionJournal.list_verdicts_by_symbol` supports a
+`start`/`end`/`limit`-bounded range query; nothing semantic or
+similarity-based. "Semantic validated lessons," "performance memory," and
+"similar-setup retrieval" from the brief's Mission 2 list remain
+out of scope — they require either decision-quality judgment (Mission 5
+Reflection's job, per the brief's own §11) or embedding/similarity search
+(Mission 5/7 territory), neither of which this milestone implements.
+"Short-term session context" is also out of scope: no session/UI concept
+exists anywhere in this codebase to attach it to.
+
+**M2-Q9 — no orchestrator/`pipeline.py`, approved.** `orion.memory` ships
+as a storage layer with no caller wiring it into a live sequence of
+`record_*` calls, the same situation Mission 4 shipped in with zero
+production callers of `PortfolioStore`. Building an orchestrator is its own
+set of decisions (retry policy, scheduling) deliberately not made as a side
+effect of this storage-layer task.
+
+**H (transaction/atomicity boundary):** one `record_*`/`save()`/
+`initialize()` call is one atomic SQLite transaction; there is no
+cross-entity transaction spanning an entire analysis cycle, because no
+orchestrator exists to define one, and because it is the *correct* answer
+regardless — content-addressed writes are individually idempotent and
+safely retryable, so a journal with an `Evidence` row and nothing else
+downstream of it yet (e.g. after a crash) is a legitimate, honest,
+resumable state, not corruption.
+
+**Compatibility with Mission 3/4 — verified, not merely intended:** zero
+changes to any `orion.risk`/`orion.decision`/`orion.reasoning`/`orion.
+analysis`/`orion.paper` source file (confirmed via `git diff --stat`
+against this commit — only new files under `src/orion/memory/` and
+`tests/memory/`). `SqlitePortfolioStore` implements the *existing*
+`PortfolioStore` ABC unchanged; `InMemoryPortfolioStore` is untouched and
+still backs Mission 4's own fast unit tests. Two new AST-based
+import-hygiene tests (`tests/memory/test_import_hygiene.py`) mechanically
+prove `orion.risk` and `orion.paper` do not import `orion.memory` — the
+existing `tests/risk/test_import_hygiene.py`/`tests/paper/test_import_
+hygiene.py` already proved neither imports `sqlalchemy` directly; this
+closes the complementary gap (an indirect persistence dependency via
+`orion.memory` without importing `sqlalchemy` directly).
+
+**Fail-closed database-layer errors:** `DecisionJournalError(RuntimeError)`
+(own top-level hierarchy, never inheriting `PortfolioStoreError` or any
+other layer's) and its `DecisionJournalIntegrityError` subclass (a stored
+payload's recomputed fingerprint no longer matches its own primary key —
+corruption, tampering, or, in principle, a hash collision on write) mirror
+`orion.paper.store.PortfolioStoreError`'s "I could not persist" vs. "I
+persisted, and here is what happened" distinction. Both `SqliteDecisionJournal`
+and `SqlitePortfolioStore` wrap every unexpected `sqlalchemy.exc.
+SQLAlchemyError` (connection loss, disk I/O failure) in their own error
+type — proven with a fake-engine test that forces a real `OperationalError`,
+not merely inspection of the `except` clause — matching the same
+provider-boundary wrapping discipline `orion.reasoning.claude_provider`
+already applies to every Anthropic SDK failure.
+
+**Concurrency:** every connection gets `PRAGMA journal_mode=WAL` and
+`PRAGMA busy_timeout=5000` (`orion.memory.engine.create_memory_engine`),
+verified live (not merely configured) by reading both pragmas back from a
+real file-backed connection. Proven under genuine multi-threaded,
+multi-connection contention (a real temp-file database — deliberately not
+the `:memory:` + `StaticPool` test fixture, which pins every checkout to a
+single shared connection and so cannot exercise real cross-connection
+locking): ten threads racing to `save()` against the same `expected_revision`
+resolve to exactly one acceptance and nine `PortfolioStoreConcurrencyError`
+rejections; a five-thread reload-and-retry-on-conflict loop advances the
+store by exactly the intended number of revisions with none skipped or
+issued twice. The same classic-ABA-attack scenario from the H-ABA1 entry
+above was re-run against `SqlitePortfolioStore` directly and rejected
+identically.
+
+**Restart persistence — proven, not assumed:** a dedicated test
+initializes and saves through one `Engine` pointed at a real temp file,
+disposes it (simulating a process exit), opens a second, independent
+`Engine` against the same file path (simulating a restart), and confirms
+`load()` returns the exact prior state and revision; a second test confirms
+a stale `expected_revision` is still correctly rejected after that restart.
+
+**Files added:** `src/orion/memory/{schema.py, engine.py, journal.py,
+sqlite_journal.py, portfolio_store.py}`; `tests/memory/{conftest.py,
+test_journal.py, test_portfolio_store.py, test_import_hygiene.py}`. No
+existing file modified except this log and (additively) `docs/DECISIONS.md`
+itself.
+
+**Verification:** `ruff check .`, `ruff format --check .`, and `mypy .`
+(strict) all pass with zero findings. `pytest` collects 466 tests, all
+passing (up from 460 immediately after the new package's own 36 tests were
+first added, then 466 after adding the fail-closed-wrapping proof tests
+described above — 42 tests total under `tests/memory/`). Adversarial checks
+performed beyond the test suite, per the standing skeptical-review
+requirement for this codebase: duplicate-write idempotency (identical
+content, byte-for-byte, regardless of `recorded_at`, produces exactly one
+row); simulated fingerprint collision (a row's stored payload manually
+overwritten at the database level, then the true content re-recorded under
+its real fingerprint) correctly raises `DecisionJournalIntegrityError`
+rather than silently keeping either version; simulated on-disk corruption
+(a stored payload edited to a value that still parses but no longer hashes
+to its own primary key) is caught on read, not just write; every rejected
+CAS write (stale revision, ABA, concurrent race) leaves the store's prior
+state and revision completely unchanged, verified by explicit assertion
+after each rejection, not merely by the absence of an exception elsewhere.
+
+**Known limitations, deferred by design, not oversight:** semantic/
+similarity search, aggregate performance statistics, and reflection-derived
+"lessons" remain entirely out of scope (Mission 5, per M2-Q7 above); no
+orchestrator exists to actually call `DecisionJournal.record_*` in
+production sequence yet (M2-Q9); `DecisionJournal` covers `Evidence`/
+`ReasoningOutput`/`ProposedDecision`/`RiskVerdict`/`Fill`/`ClosedPosition`
+only — it does not itself journal `PortfolioState` history (that is
+`SqlitePortfolioStore`'s append-only `portfolio_state_revision` table, a
+deliberately separate contract, per the architecture entry above); no
+schema-migration tooling exists yet (not needed until a genuine breaking
+schema change is required — the JSON-payload-plus-indexed-columns design
+absorbs additive domain-model changes without one).
