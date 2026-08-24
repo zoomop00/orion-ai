@@ -12,6 +12,14 @@ External research data is untrusted: every event in Finnhub's response is
 parsed through `_to_event`, which raises on the first malformed value rather
 than skipping it or substituting a guessed default — a partially-fabricated
 calendar is worse than no calendar at all.
+
+The API key is sent as a `token` query parameter, as Finnhub's API requires.
+On an HTTP failure, the error message is built via `orion.http_errors.
+describe_http_error` (never `str(exc)` directly) and raised with `from None`
+— `httpx.HTTPStatusError.__str__` embeds the full request URL, query string
+included, which would otherwise leak the key into the error message and,
+via exception chaining, into any traceback/log that renders the chain. See
+`docs/DECISIONS.md` for the audit finding this closes.
 """
 
 from __future__ import annotations
@@ -21,6 +29,7 @@ from datetime import UTC, datetime
 import httpx
 from pydantic import BaseModel, Field
 
+from orion.http_errors import describe_http_error, raise_detached
 from orion.research.models import (
     EconomicCalendarEvent,
     EconomicCalendarSnapshot,
@@ -85,7 +94,9 @@ class FinnhubEconomicCalendarProvider(EconomicCalendarProvider):
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise EconomicCalendarProviderError(f"Finnhub request failed: {exc}") from exc
+            raise_detached(
+                EconomicCalendarProviderError(f"Finnhub request failed: {describe_http_error(exc)}")
+            )
 
         try:
             parsed = _FinnhubCalendarResponse.model_validate(response.json())

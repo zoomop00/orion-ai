@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import traceback
+
 import httpx
 import pytest
 import respx
@@ -9,10 +11,11 @@ from orion.data.provider_base import MarketDataProviderError
 from orion.data.twelvedata_provider import TwelveDataProvider
 
 BASE_URL = "https://api.twelvedata.com"
+FAKE_SECRET = "sk-live-supersecret-1234567890"
 
 
-def _provider() -> TwelveDataProvider:
-    return TwelveDataProvider(api_key="test-key", base_url=BASE_URL)
+def _provider(api_key: str = "test-key") -> TwelveDataProvider:
+    return TwelveDataProvider(api_key=api_key, base_url=BASE_URL)
 
 
 def test_missing_api_key_raises_immediately() -> None:
@@ -103,3 +106,38 @@ def test_fetch_ohlcv_raises_on_invalid_bar_values() -> None:
 
     with pytest.raises(MarketDataProviderError):
         _provider().fetch_ohlcv("XAUUSD", Timeframe.H1, output_size=1)
+
+
+# --- Credential-leakage regression (HIGH finding from the post-commit audit) ---
+
+
+@respx.mock
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 429, 500, 502, 503])
+def test_api_key_never_leaks_on_http_error_response(status_code: int) -> None:
+    respx.get(f"{BASE_URL}/time_series").mock(return_value=httpx.Response(status_code))
+
+    try:
+        _provider(api_key=FAKE_SECRET).fetch_ohlcv("XAUUSD", Timeframe.H1, output_size=2)
+        pytest.fail("expected MarketDataProviderError")
+    except MarketDataProviderError as exc:
+        assert FAKE_SECRET not in str(exc)
+        assert FAKE_SECRET not in repr(exc)
+        rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        assert FAKE_SECRET not in rendered
+        assert exc.__cause__ is None
+        assert exc.__suppress_context__ is True
+        assert exc.__context__ is None
+
+
+@respx.mock
+def test_api_key_never_leaks_on_connection_error() -> None:
+    respx.get(f"{BASE_URL}/time_series").mock(side_effect=httpx.ConnectError("connection refused"))
+
+    try:
+        _provider(api_key=FAKE_SECRET).fetch_ohlcv("XAUUSD", Timeframe.H1, output_size=2)
+        pytest.fail("expected MarketDataProviderError")
+    except MarketDataProviderError as exc:
+        assert FAKE_SECRET not in str(exc)
+        rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        assert FAKE_SECRET not in rendered
+        assert exc.__context__ is None

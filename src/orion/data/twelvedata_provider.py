@@ -2,6 +2,14 @@
 
 Free-tier reference: https://twelvedata.com/docs#time-series
 No fabricated fallback data — any failure raises MarketDataProviderError.
+
+The API key is sent as an `apikey` query parameter, as Twelve Data's API
+requires. On an HTTP failure, the error message is built via `orion.
+http_errors.describe_http_error` (never `str(exc)` directly) and raised with
+`from None` — `httpx.HTTPStatusError.__str__` embeds the full request URL,
+query string included, which would otherwise leak the key into the error
+message and, via exception chaining, into any traceback/log that renders the
+chain. See `docs/DECISIONS.md` for the audit finding this closes.
 """
 
 from __future__ import annotations
@@ -13,6 +21,7 @@ from pydantic import BaseModel
 
 from orion.data.models import DataSourceMeta, MarketSnapshot, OHLCVBar, Timeframe
 from orion.data.provider_base import MarketDataProvider, MarketDataProviderError
+from orion.http_errors import describe_http_error, raise_detached
 
 # ORION uses plain symbols like "XAUUSD"; Twelve Data expects "XAU/USD".
 _SYMBOL_MAP = {
@@ -61,7 +70,9 @@ class TwelveDataProvider(MarketDataProvider):
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise MarketDataProviderError(f"Twelve Data request failed: {exc}") from exc
+            raise_detached(
+                MarketDataProviderError(f"Twelve Data request failed: {describe_http_error(exc)}")
+            )
 
         try:
             parsed = _TwelveDataResponse.model_validate(response.json())
