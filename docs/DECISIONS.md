@@ -2008,3 +2008,128 @@ hygiene.py}`. No existing source file modified.
 **Verification:** `pytest` collects 803 tests, all passing (up from 757).
 `ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass with
 zero findings.
+
+## 2026-08-24 — Mission 9 (Voice) Phase 2: Deepgram Nova-3/Aura-2 concrete
+providers, still zero pipeline integration
+
+**Decision: two concrete providers, `orion.voice.deepgram_stt.
+DeepgramTranscriptionProvider` and `orion.voice.deepgram_tts.
+DeepgramSpeechSynthesisProvider`, implementing Phase 1's `TranscriptionProvider`/
+`SpeechSynthesisProvider` ABCs against Deepgram's REST API (Nova-3 for STT,
+Aura-2 for TTS) — the single vendor approved by the preceding read-only
+investigation, chosen in part for Nova-3's documented Hindi/Hinglish
+code-switching support.** Everything else from Phase 1 remains unchanged and
+still out of scope: no live microphone/speaker I/O, no streaming, no
+interruption/barge-in, no orchestrator, no UNDERSTANDING/LLM layer, no
+pipeline wiring (Evidence/Decision/Risk/Paper/Memory/Reflection/Backtest).
+
+**Deepgram REST, not the `deepgram-sdk` package.** The official Python SDK
+(`deepgram-sdk==7.7.0` on PyPI) was installed and inspected (`uv add
+deepgram-sdk`, then `dir(deepgram)`): it is a large, Fern-generated client
+covering Deepgram's entire product surface (agent configuration, billing,
+project/member management, voice-agent orchestration, streaming) of which
+STT/TTS is a small fraction, and it pulls in `websockets` as a transitive
+dependency this codebase has no other use for. This does not match how every
+other REST vendor in this codebase is integrated (`TwelveDataProvider`,
+`FinnhubEconomicCalendarProvider`: plain `httpx` calls against the documented
+REST endpoints) — only `anthropic` gets a vendor SDK, because
+`ClaudeReasoningProvider`/`ClaudeMacroAnalystProvider` depend on its
+structured-output parsing (`messages.parse`), which a hand-rolled REST call
+cannot replicate. Deepgram's REST contract for pre-recorded STT (`POST
+/v1/listen`) and TTS (`POST /v1/speak`) is simple enough to call directly
+with `httpx`, so the dependency was removed again (`uv remove deepgram-sdk`)
+in favor of matching the Finnhub/Twelve Data precedent: smaller attack
+surface, one dependency total (`httpx`, already present) instead of a large
+generated SDK plus `websockets`, and direct reuse of `orion.http_errors`
+(written generically enough to already cover header-auth vendors — see its
+module docstring) instead of an unaudited SDK's own exception types.
+
+**Header-based auth only, empirically verified rather than assumed safe.**
+Both providers send `Authorization: Token <key>` and never place the key in
+the URL/query string. Because `orion.http_errors.describe_http_error` was
+originally written against `TwelveDataProvider`/`FinnhubEconomicCalendarProvider`'s
+query-parameter auth, this phase did not assume the same protection
+automatically covers a header-auth vendor: a throwaway script constructed a
+real `httpx.Request` with a fake credential header and a resulting
+`httpx.HTTPStatusError`, and confirmed empirically that neither
+`Request.__repr__`/`__str__` nor `HTTPStatusError.__str__`/`repr()` embed
+headers (only scheme/host/path/query, matching `describe_http_error`'s own
+design). `tests/voice/test_deepgram_stt.py`/`test_deepgram_tts.py` encode
+this as permanent regression tests (parametrized across 400/401/403/404/429/
+500/502/503 plus a connection error, mirroring
+`tests/research/test_finnhub_provider.py`'s identical pattern) checking
+`str()`/`repr()`/`traceback.format_exception()`/`__context__` for the key,
+plus a dedicated test asserting the outgoing request's `Authorization`
+header carries the key and its URL/query params never do. A second,
+independently-written adversarial probe (no shared code with the
+implementation's own tests) re-ran the same checks, plus
+`logging.exception()` output, malformed-response handling, oversized/empty-
+input rejection, and an AST-based scan of the two provider files for
+dangerous calls/imports (`exec`/`eval`/`compile`/`subprocess`/`os`,
+persistence modules, `random`/`uuid`) — all passed.
+
+**Nova-3 `language=multi`.** Deepgram's documented multilingual
+code-switching mode for Nova-3 — the concrete mechanism behind the
+Hindi/Hinglish capability that was the stated reason for selecting Deepgram.
+Fixed as a module constant, not configurable: Settings gained only
+`DEEPGRAM_API_KEY` (`Settings.deepgram_api_key`, `.env.example`), matching
+the approved "no unnecessary configuration" scope. Aura-2's voice/model
+(`aura-2-thalia-en`) and output encoding (`mp3`) are likewise fixed constants
+in `deepgram_tts.py`, sent as explicit request query parameters so
+`SynthesizedSpeech.model`/`.format` reflect the actual values used by
+construction (a 200 response is Deepgram's REST contract that the requested
+model/encoding were honored) rather than a guessed or vendor-default value.
+
+**Fail-closed on every malformed/absent field, no fabrication.** Both
+providers validate the vendor response through private Pydantic models
+before ever touching `Transcript`/`SynthesizedSpeech`; a response missing
+`results.channels`, an empty `alternatives` list, an empty transcript ("no
+speech detected" is Deepgram's actual behavior for silence, not an error
+status) or empty synthesized audio all raise the documented
+`TranscriptionProviderError`/`SpeechSynthesisProviderError` rather than
+constructing a placeholder. `Transcript.model` is populated only from
+`metadata.model_info` when Deepgram actually reports it in the response —
+never fabricated when absent. `MAX_AUDIO_BYTES` (25 MB) and `MAX_TEXT_CHARS`
+(2000, matching `Transcript.text`'s existing cap) are enforced before any
+vendor request is made — oversized/empty input is rejected outright, never
+silently truncated, matching `orion.analysts.claude_macro_provider`'s
+identical pre-request size-limit discipline.
+
+**Import boundary tightened, not loosened.** `tests/voice/test_import_
+hygiene.py` now allows `httpx` only inside `deepgram_stt.py`/`deepgram_tts.py`
+(`test_only_vendor_provider_files_import_httpx`) — `schemas.py`/
+`provider_base.py`/`__init__.py` remain vendor-independent, unchanged from
+Phase 1. `deepgram` (the SDK package name) was added to the disallowed
+top-level module set even though it is not a dependency, as a deliberate
+tripwire against a future contributor reintroducing it. A new test
+(`test_deepgram_provider_files_do_not_import_orion_config`) confirms both
+provider files take `api_key: str` as a constructor parameter rather than
+reading `Settings` themselves, matching `FinnhubEconomicCalendarProvider`/
+`ClaudeReasoningProvider`'s identical pattern — wiring a provider instance to
+`Settings.deepgram_api_key` is orchestrator work, still out of scope.
+
+**Zero persistence, zero pipeline integration, zero live calls in tests.**
+No SQLite table, no journal method, no file/audio persistence anywhere in
+either provider — confirmed by the same AST-based hygiene tests plus the
+independent probe's source-text scan for `open(`/`.write_bytes(`/`pickle`.
+All provider tests mock the network via `respx`; no real `DEEPGRAM_API_KEY`
+is required to run the suite.
+
+**Known limitations, deferred by design:** no live audio I/O, no streaming,
+no interruption handling, no orchestrator, no UNDERSTANDING/LLM
+interpretation, no pipeline wiring, no CLI — all explicitly out of Phase 2's
+scope per the approved plan, not oversight.
+
+**Files added:** `src/orion/voice/{deepgram_stt.py, deepgram_tts.py}`,
+`tests/voice/{test_deepgram_stt.py, test_deepgram_tts.py}`. **Files
+modified:** `src/orion/config.py` (`Settings.deepgram_api_key`),
+`.env.example` (`DEEPGRAM_API_KEY`), `tests/voice/test_import_hygiene.py`
+(vendor-file httpx carve-out plus two new boundary tests). No Mission 0–8
+source touched.
+
+**Verification:** `pytest` collects 852 tests, all passing (up from 803).
+`ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass with
+zero findings. An independently-written adversarial probe (separate from the
+implementation's own test files) re-verified credential non-leakage,
+malformed/empty-response handling, pre-request size-limit enforcement, and
+import/dangerous-call hygiene — all checks passed.

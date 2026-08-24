@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     finnhub_api_key: str = Field(default="", alias="FINNHUB_API_KEY")
     finnhub_base_url: str = Field(default="https://finnhub.io/api/v1", alias="FINNHUB_BASE_URL")
 
+    # --- Voice STT/TTS provider (Mission 9 Phase 2, Deepgram Nova-3/Aura-2) ---
+    # Header-based auth (Authorization: Token ...) -- no base URL setting, unlike
+    # Twelve Data/Finnhub, since orion.voice.deepgram_stt/deepgram_tts hardcode
+    # Deepgram's fixed API host. See docs/DECISIONS.md.
+    deepgram_api_key: str = Field(default="", alias="DEEPGRAM_API_KEY")
+
     # --- Decision memory ---
     orion_db_path: str = Field(default="./orion.db", alias="ORION_DB_PATH")
 
