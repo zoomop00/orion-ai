@@ -1273,3 +1273,120 @@ schema.py` (two new indexes), `docs/DECISIONS.md` (this entry).
 **Verification:** `pytest` collects 511 tests, all passing (up from 482).
 `ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass
 with zero findings.
+
+---
+
+## 2026-08-24 — Mission 5 (Reflection) architecture approved and implemented
+
+**Decision: a new, pure, read-only package — `src/orion/reflection/` —
+implementing exactly the master brief's four-line Mission 5 spec ("After
+each paper trade: Prediction → Actual outcome → Difference →
+Decision-quality analysis → Lesson. Distinguish a bad outcome from a bad
+decision. Do not change production strategy because of one trade.") and
+nothing beyond it.** No orchestrator, no persistence, no LLM call, no
+semantic/vector similarity, no autonomous adjustment of `RiskPolicy` or
+reasoning prompts. `orion.risk`/`orion.paper`/`orion.memory` are unchanged.
+
+**Investigation finding, confirmed empirically before writing any code:**
+tracing the actual read chain live against a real journal showed Mission 5's
+core computation needs only three `DecisionJournal` reads —
+`get_closed_position` → `get_verdict` (via `opened_by_verdict_fingerprint`)
+→ `get_decision` (via `verdict.decision_ref.content_hash`) — not the full
+six-entity chain. `ProposedDecision.reasoning_ref`/`.evidence_ref` already
+carry everything needed for "prediction" (action, direction, confidence,
+risk_level, stop_loss, take_profit, and the evidence reference price),
+confirmed live (`hasattr(reasoning_ref, "rationale")` is `False`, confirming
+rationale stays structurally unreachable, exactly as designed one layer up).
+**No existing Mission 2–4 contract required extension** — the read API
+shipped in the immediately preceding entry was already sufficient.
+
+**The single load-bearing design decision: `TradeReflection` exposes
+objective facts only — no quality score, no good/bad verdict, no field a
+caller could wire up to automatically change strategy.** This is the
+concrete mechanism that satisfies "distinguish a bad outcome from a bad
+decision" and "do not change production strategy because of one trade"
+simultaneously: `approval_margin` (predicted risk/reward minus the policy
+minimum that was actually in force) and `exit_matched_predicted_take_
+profit`/`exit_matched_predicted_stop_loss` let a human see whether a losing
+trade had a thin or comfortable margin, and which predicted level actually
+fired — the judgment is left entirely to whoever reads a `TradeReflection`,
+never made by this module. Computing that judgment here would make
+Reflection a second risk authority sitting downstream of `orion.risk.
+guardian.review`, with its own thresholds that could silently diverge from
+the one that actually gates execution — the one outcome this design
+exists to prevent.
+
+**`reflect_on_closed_position(journal, closed_position_fingerprint, *,
+now)` — the whole of v1.** Pure function, matching `orion.decision.engine.
+decide`/`orion.risk.guardian.review`/`orion.paper.execution.execute`'s
+identical discipline: `now` is required and caller-supplied, stamped onto
+the result as `reflected_at`; no `datetime.now()`/`uuid4()`/`random`/
+`time.time()` anywhere. Typed against `DecisionJournal` (the abstract
+interface, never `SqliteDecisionJournal` or any other concrete class) and
+never against `PortfolioStore` in any form — there is no path through this
+function's own signature for it to touch current account state, and
+`DecisionJournal` itself declares no update/delete method, so even a bug
+in this module has no method available to call that could mutate history.
+The predicted risk/reward ratio reuses `orion.risk.controls.
+classify_trade_levels` (the exact coherence check `risk_reward_meets_
+minimum` performs first) plus that control's own inline formula — there is
+no separately exported ratio-computing function, so this is the faithful
+reuse, not a second implementation. Every fingerprint on `TradeReflection`
+is copied directly from fingerprint fields already present on the
+journaled records; no new hashing mechanism was introduced.
+
+**Fail-closed on an incomplete chain.** Mission 2 deliberately does not
+enforce cross-record write ordering (a documented, prior decision), so a
+`ClosedPosition` can exist in the journal without its `RiskVerdict` (or
+that verdict's `ProposedDecision`) ever having been journaled. `reflect_on_
+closed_position` raises `ReflectionError` (its own top-level `RuntimeError`
+subclass — never inheriting `DecisionJournalError`, matching the
+established "every layer owns its own error hierarchy" rule) on any
+missing link, never a partial or best-guess result.
+`DecisionJournalIntegrityError` from a corrupted journal record is never
+caught here — it propagates unchanged, verified directly (a corrupted
+`ClosedPosition` payload, and a hash-mismatched one, both surface as
+`DecisionJournalIntegrityError` through `reflect_on_closed_position`
+unmodified).
+
+**The opening `Fill` is optional enrichment, not a required link.** Looked
+up via `list_fills_by_verdict_fingerprint` and matched to the
+`ClosedPosition` by `fill.filled_at == closed.opened_at` — the exact
+instant the position was opened. Zero matches leaves `opening_fee` `None`;
+more than one match (e.g. a corrupted duplicate write, or in principle a
+replay that was mistakenly journaled) is a genuine ambiguity this function
+refuses to resolve by guessing, and raises `ReflectionError` instead. A
+second `Fill` for the *same* verdict at a *different* `filled_at` is
+correctly ignored, not treated as ambiguous — verified directly.
+
+**`TradeReflection`** — frozen, `extra="forbid"`, matching every schema in
+this codebase — carries: provenance (`closed_position_fingerprint`,
+`opened_by_verdict_fingerprint`, `decision_fingerprint`); prediction
+(`predicted_action`/`direction`/`confidence`/`risk_level`/`stop_loss`/
+`take_profit`/`risk_reward`); policy context (`policy_min_risk_reward`,
+`approval_margin`); actual outcome (`close_reason`, `entry_price`,
+`exit_price`, `realized_pnl`, `closing_fee`, `opening_fee`); and the
+difference (`exit_matched_predicted_take_profit`/`stop_loss`); plus
+`reflected_at`. A light cross-field validator confirms the two
+`exit_matched_*` booleans agree with `close_reason` — restated
+defense-in-depth against a hand-constructed `TradeReflection` with
+inconsistent fields, the same category of check this codebase already
+applies pervasively (`RuleOutcome`, `ControlOutcome`).
+
+**Persistence explicitly deferred, not designed around.** `TradeReflection`
+is a pure function of already-immutable, already-durable journal data, so
+persisting it would be an optimization (avoid recomputation), never a
+necessity — nothing is lost by not persisting it, since it can always be
+recomputed on demand. Designing a schema for it now, with no real consumer
+yet (no orchestrator exists for Missions 2–4 either), would repeat exactly
+the "building ahead of proven need" this project has deliberately avoided
+at every prior mission boundary. Revisit once Mission 6 or a human-review
+workflow actually needs durable storage for it.
+
+**Files added:** `src/orion/reflection/{__init__.py, schemas.py,
+analysis.py}`, `tests/reflection/{conftest.py, test_analysis.py}` (17
+tests). No existing source file modified.
+
+**Verification:** `pytest` collects 528 tests, all passing (up from 511).
+`ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass
+with zero findings.
