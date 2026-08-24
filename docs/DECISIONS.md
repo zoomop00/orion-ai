@@ -1863,3 +1863,148 @@ test_schemas.py, test_claude_macro_provider.py, test_import_hygiene.py}`,
 **Verification:** `pytest` collects 732 tests, all passing (up from 649).
 `ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass with
 zero findings.
+
+---
+
+## 2026-08-24 — Mission 9 (Voice) Phase 1: schema + provider-contract only,
+zero vendor, zero integration
+
+**Decision: a new package, `src/orion/voice/` (`__init__.py`, `schemas.py`,
+`provider_base.py`), establishing only the stable contract a future voice
+runtime and concrete STT/TTS providers will build upon.** Nothing else. This
+is Phase 1 of Mission 9 (`ORION_MASTER_ENGINEERING_BRIEF_V2.md` §15 —
+`IDLE → LISTENING → UNDERSTANDING → ANALYZING → SPEAKING → IDLE`), not a
+working voice interface — see the read-only architecture investigation that
+preceded this entry for why: no orchestrator, no CLI, no web layer, and no
+audio I/O of any kind exists anywhere in this codebase (confirmed fresh —
+`src/orion/cli.py` does not exist despite being referenced in
+`pyproject.toml`'s `[project.scripts]`), and every mission since Mission 2
+has explicitly and repeatedly deferred building one. The `UNDERSTANDING`/
+`ANALYZING` states cannot be made coherent without that orchestrator; this
+phase deliberately does not attempt to.
+
+**Two separate ABCs, not one "VoiceProvider" with a mode.**
+`TranscriptionProvider` (speech → text) and `SpeechSynthesisProvider` (text →
+speech), each with its own error root (`TranscriptionProviderError`,
+`SpeechSynthesisProviderError`), mirroring the "one ABC per concern"
+precedent already used seven times in this codebase (`MarketDataProvider`,
+`EconomicCalendarProvider`, `ReasoningProvider`, `MacroAnalystProvider`,
+`HistoricalBarSource`, `PortfolioStore`, `DecisionJournal`). Both ABCs live
+in one `provider_base.py` file only because the approved Phase 1 file list
+keeps `orion.voice` to three files; they remain independently named
+contracts a single vendor need not implement both halves of.
+
+**`TranscriptionProvider.transcribe(audio: bytes) -> Transcript`** —
+vendor-neutral by taking opaque raw bytes in, with no assumption about
+container format, sample rate, or encoding; a concrete provider adapts
+whatever conversion its own vendor API needs, the same way
+`TwelveDataProvider.fetch_ohlcv` adapts a raw JSON response into
+`MarketSnapshot` without the ABC knowing about either shape.
+**`SpeechSynthesisProvider.synthesize(text: str) -> SynthesizedSpeech`** —
+`SynthesizedSpeech` is the smallest vendor-neutral shape for TTS output
+(`audio: bytes`, `format: str`, plus provenance); `format` is a bounded
+string, not a closed enum, since supported encodings vary by vendor and are
+not guessed here.
+
+**`Transcript` — the model-authored-equivalent half of the contract, but
+provider-authored, not model-authored** (there is no LLM in this phase).
+Frozen, `extra="forbid"`, matching every schema in this codebase. `text` is
+the only free-text field and is explicitly treated as **untrusted data**
+from the moment it exists — nothing in this package interprets it as an
+instruction, and there is deliberately no `command`/`intent` field:
+assigning meaning to transcript text is the eventual UNDERSTANDING layer's
+job, a separate, not-yet-designed security boundary this phase does not
+attempt to solve (see `orion.analysts.claude_macro_provider` for the
+fencing/closed-schema/no-tools pattern that layer will need to follow).
+`text` additionally rejects non-printable/control characters
+(`str.isprintable()`), mirroring `orion.analysts.claude_macro_provider.
+_validate_provider_field`'s identical "reject, never silently normalize"
+discipline from the Mission 8 hardening follow-up — both a data-quality
+check (real STT output is natural language) and defense-in-depth for
+whatever future context eventually embeds this text.
+
+**No session/utterance identifier field.** A `Transcript` is content-
+addressed via `transcript_fingerprint(transcript)` — a thin wrapper around
+`orion.provenance.canonical_hash`, mirroring `decision_fingerprint`/
+`risk_verdict_fingerprint`/`portfolio_state_fingerprint` exactly, including
+why it is a standalone function and never a field on `Transcript` itself (a
+self-referencing hash field would need to exclude itself from its own
+input, which `canonical_hash` does not special-case for any model). This is
+the same "content fingerprint as identity" precedent Mission 2's entire
+journal design already established, and it is what makes a caller-supplied,
+`uuid4()`-minted identifier unnecessary — there is no orchestrator yet to be
+a minting authority for one anyway (the same reason `analysis_id` in
+`orion.decision.engine.decide` is caller-supplied, never internally minted).
+
+**Zero `datetime.now()` anywhere in this phase.** `Transcript.transcribed_at`
+/`SynthesizedSpeech.synthesized_at` are required, timezone-enforced fields
+with no default — a future concrete provider stamps them at its own live
+I/O boundary, exactly like `FinnhubEconomicCalendarProvider.retrieved_at`/
+`ClaudeMacroAnalystProvider.analyzed_at`, but no such boundary exists yet in
+Phase 1, so no wall-clock read exists yet either.
+
+**Finding, fixed before commit: `duration_seconds` did not exclude
+infinity.** A fresh adversarial probe (run after the implementation and its
+own test suite were already green) found that `Field(gt=0)` alone does not
+reject `float("inf")` — `inf > 0` is `True` in Python, so a malformed
+provider response reporting an infinite-duration clip would have
+constructed successfully (`NaN` was already correctly excluded, since NaN
+comparisons are always `False`). No real audio clip has infinite duration.
+Fixed with an explicit `math.isfinite()` field validator on
+`duration_seconds`. The same probe pass also confirmed, empirically rather
+than assumed, that the existing `text` control-character check already
+correctly rejects the RIGHT-TO-LEFT OVERRIDE character (U+202E, a known
+homoglyph/text-spoofing vector) — `str.isprintable()` treats Unicode's
+entire "Other" major category (`Cc`/`Cf`/`Cs`/`Co`/`Cn`), not just `Cc`
+("control"), as non-printable, so this was already covered without
+additional code. Recorded here in the interest of an honest audit trail,
+matching the same discipline the Mission 8 entry above already established.
+
+**Zero new dependencies, zero persistence, zero vendor.** No entry in
+`pyproject.toml` changed. No SQLite table, no journal method, no `orion.
+memory` integration — no proven consumer exists (matching Mission 5/7/8's
+identical precedent), and voice recordings/transcripts are plausibly
+biometric/PII data under some privacy regimes, a materially new sensitivity
+class this codebase has not had to consider before, reinforcing rather than
+merely repeating the "no persistence without a proven need" precedent.
+Concrete STT/TTS vendor selection is deliberately deferred to a separate,
+later decision — current-ecosystem research (Deepgram, ElevenLabs, OpenAI,
+Google Cloud, Azure, Amazon Polly) was done during the investigation phase,
+but no vendor is picked here.
+
+**Zero pipeline integration, mechanically proven.**
+`tests/voice/test_import_hygiene.py` proves, by AST parsing (not a
+`sys.modules` runtime check): `orion.voice` imports no Mission 0–8 pipeline
+package (`orion.data`/`analysis`/`research`/`reasoning`/`analysts`/
+`decision`/`risk`/`paper`/`memory`/`reflection`/`backtest`) and no network/
+AI-vendor/persistence module (the exact `DISALLOWED_TOP_LEVEL_MODULES` set
+`tests/backtest/test_import_hygiene.py` already uses, reused rather than
+reinvented); no Mission 0–8 package imports `orion.voice`; and — called out
+with its own dedicated test, per the explicit brief — `orion.backtest`
+specifically cannot import `orion.voice`. This is not an accidental-coupling
+guard: a live voice interaction is inherently non-deterministic (real-time
+audio, live vendor calls), and `run_backtest`'s determinism/no-look-ahead
+guarantee depends on every step being pure or a caller-supplied,
+presumably-deterministic implementation — the same structural
+incompatibility that already keeps `orion.analysts` out of backtest.
+`orion.provenance` is the one exception to the "no Mission-package import"
+rule, deliberately — it is a shared, dependency-free top-level utility, not
+a Mission-specific pipeline package, imported the same way `orion.analysts`/
+`orion.decision`/`orion.risk` already import it.
+
+**Known limitations, deferred by design, not oversight:** no concrete STT/
+TTS provider (vendor selection is a separate decision); no orchestrator, no
+`UNDERSTANDING`/`ANALYZING` state wiring, no live audio I/O, no microphone/
+speaker capture, no streaming, no interruption handling, no sensitive-
+command confirmation protocol (that needs a real command surface to confirm
+against, which does not exist yet), no CLI, and `src/orion/cli.py`'s broken
+`[project.scripts]` reference remains unfixed — all explicitly out of this
+phase's scope, not silently skipped.
+
+**Files added:** `src/orion/voice/{__init__.py, schemas.py,
+provider_base.py}`, `tests/voice/{__init__.py, test_schemas.py, test_import_
+hygiene.py}`. No existing source file modified.
+
+**Verification:** `pytest` collects 803 tests, all passing (up from 757).
+`ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass with
+zero findings.
