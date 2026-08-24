@@ -142,6 +142,16 @@ class DecisionJournal(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_fill(self, fingerprint: str) -> Fill | None:
+        """Return the Fill stored under `fingerprint`, or None if absent."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_closed_position(self, fingerprint: str) -> ClosedPosition | None:
+        """Return the ClosedPosition stored under `fingerprint`, or None if absent."""
+        raise NotImplementedError
+
+    @abstractmethod
     def list_decisions_by_analysis_id(self, analysis_id: str) -> tuple[ProposedDecision, ...]:
         """All ProposedDecisions recorded under `analysis_id`, oldest-recorded first."""
         raise NotImplementedError
@@ -164,4 +174,55 @@ class DecisionJournal(ABC):
         (either bound optional), ordered by `reviewed_at` ascending, capped
         at `limit` if given. The mechanical "historical search" capability —
         no semantic/similarity search; see `docs/DECISIONS.md`."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_fills_by_verdict_fingerprint(self, risk_verdict_fingerprint: str) -> tuple[Fill, ...]:
+        """All Fills recorded under `risk_verdict_fingerprint`, oldest-
+        recorded first. Mission 4 v1 opens at most one position per approved
+        verdict, so this is normally empty or a single-element tuple — a
+        tuple, not `Fill | None`, because nothing in this interface assumes
+        exactly one (a replayed/retried `execute()` call at a different
+        `now` produces a second, distinct fingerprint; see `docs/
+        DECISIONS.md`'s writer-trust-boundary note)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_fills_by_symbol(
+        self,
+        symbol: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> tuple[Fill, ...]:
+        """Fills for `symbol` with `filled_at` in `[start, end]` (either
+        bound optional), ordered by `filled_at` ascending, capped at `limit`
+        if given. Mirrors `list_verdicts_by_symbol` exactly."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_closed_positions_by_verdict_fingerprint(
+        self, opened_by_verdict_fingerprint: str
+    ) -> tuple[ClosedPosition, ...]:
+        """All ClosedPositions recorded under `opened_by_verdict_fingerprint`,
+        oldest-recorded first. A tuple, not `ClosedPosition | None`, for the
+        same reason as `list_fills_by_verdict_fingerprint`."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_closed_positions_by_symbol(
+        self,
+        symbol: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> tuple[ClosedPosition, ...]:
+        """ClosedPositions for `symbol` with `closed_at` in `[start, end]`
+        (either bound optional), ordered by `closed_at` ascending, capped at
+        `limit` if given. Mirrors `list_verdicts_by_symbol` exactly. This is
+        the query Mission 5's "actual outcome" step reads from: realized
+        P&L, close reason, entry/exit price, fee — everything `orion.paper.
+        execution.resolve_stop_take_profit` computed for a closed trade."""
         raise NotImplementedError

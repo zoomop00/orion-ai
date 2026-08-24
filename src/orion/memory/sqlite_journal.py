@@ -24,20 +24,35 @@ primary key (on-disk corruption, a hand-edited row, a bit flip) — the same
 `orion.risk.guardian` already applies to `PortfolioState.equity`.
 
 Reconstruction itself (`Model.model_validate_json`) is never called
-unguarded: `_deserialize` below wraps every call site (every `get_*`,
-`list_decisions_by_analysis_id`, `_verdicts_from_rows`) so a payload that is
-not even valid JSON, or is valid JSON that fails the model's own schema —
-not just "parses fine but hashes wrong" — also raises
-`DecisionJournalIntegrityError`, never a raw `pydantic.ValidationError`. A
-fresh adversarial pass after this module's first implementation found that
-gap empirically (a payload of literal garbage bytes raised an unwrapped
-`pydantic_core.ValidationError`, violating this class's own documented "I
-could not read the real journal, fail closed through my own error type"
-contract) — this is the fix, not a hypothetical concern.
+unguarded: `_deserialize` below wraps every call site (every `get_*` and,
+via `_rows_to_models`, every `list_*`) so a payload that is not even valid
+JSON, or is valid JSON that fails the model's own schema — not just "parses
+fine but hashes wrong" — also raises `DecisionJournalIntegrityError`, never
+a raw `pydantic.ValidationError`. A fresh adversarial pass after this
+module's first implementation found that gap empirically (a payload of
+literal garbage bytes raised an unwrapped `pydantic_core.ValidationError`,
+violating this class's own documented "I could not read the real journal,
+fail closed through my own error type" contract) — this is the fix, not a
+hypothetical concern.
+
+`Fill`/`ClosedPosition` reads (`get_fill`/`get_closed_position`/
+`list_fills_by_*`/`list_closed_positions_by_*`) use `orion.provenance.
+canonical_hash` directly for their integrity check, exactly like
+`record_fill`/`record_closed_position` already did on write — neither type
+has a domain-named fingerprint wrapper (unlike `evidence_fingerprint`/
+`decision_fingerprint`/`risk_verdict_fingerprint`), so there is nothing to
+import beyond the one shared hashing mechanism this whole package already
+depends on. See `docs/DECISIONS.md` for the writer-trust-boundary note this
+read path is subject to: these methods verify a `Fill`/`ClosedPosition` was
+stored unmodified and correctly references a `RiskVerdict` fingerprint —
+they cannot prove the numbers were actually computed by `orion.paper.
+execution.execute`/`resolve_stop_take_profit`, only that whatever was
+recorded has not been altered since.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -261,6 +276,32 @@ class SqliteDecisionJournal(DecisionJournal):
             )
         return verdict
 
+    def get_fill(self, fingerprint: str) -> Fill | None:
+        payload = self._read(fill_table, fingerprint)
+        if payload is None:
+            return None
+        fill = _deserialize(Fill, payload, fingerprint=fingerprint, table_name=fill_table.name)
+        if canonical_hash(fill) != fingerprint:
+            raise DecisionJournalIntegrityError(
+                f"stored Fill under fingerprint {fingerprint!r} no longer hashes to that "
+                "fingerprint; the stored payload may be corrupted"
+            )
+        return fill
+
+    def get_closed_position(self, fingerprint: str) -> ClosedPosition | None:
+        payload = self._read(closed_position_table, fingerprint)
+        if payload is None:
+            return None
+        closed = _deserialize(
+            ClosedPosition, payload, fingerprint=fingerprint, table_name=closed_position_table.name
+        )
+        if canonical_hash(closed) != fingerprint:
+            raise DecisionJournalIntegrityError(
+                f"stored ClosedPosition under fingerprint {fingerprint!r} no longer hashes "
+                "to that fingerprint; the stored payload may be corrupted"
+            )
+        return closed
+
     def _execute_query(self, query: Select[Any]) -> list[Row[Any]]:
         try:
             with self._engine.connect() as conn:
@@ -268,27 +309,43 @@ class SqliteDecisionJournal(DecisionJournal):
         except SQLAlchemyError as exc:
             raise DecisionJournalError(f"could not query the journal: {exc}") from exc
 
+    def _rows_to_models[ModelT: BaseModel](
+        self,
+        model_cls: type[ModelT],
+        rows: list[Row[Any]],
+        *,
+        fingerprint_fn: Callable[[ModelT], str],
+        table_name: str,
+    ) -> tuple[ModelT, ...]:
+        """Reconstruct and integrity-check every row in `rows`, in the order
+        the query already sorted them (SQL `ORDER BY`, never re-sorted here)
+        -- the shared tail of every `list_*` method, so each one only needs
+        to state its own filter/ordering, not repeat this loop."""
+        models = []
+        for row in rows:
+            model = _deserialize(
+                model_cls, row.payload, fingerprint=row.fingerprint, table_name=table_name
+            )
+            if fingerprint_fn(model) != row.fingerprint:
+                raise DecisionJournalIntegrityError(
+                    f"stored {model_cls.__name__} under fingerprint {row.fingerprint!r} no "
+                    "longer hashes to that fingerprint; the stored payload may be corrupted"
+                )
+            models.append(model)
+        return tuple(models)
+
     def list_decisions_by_analysis_id(self, analysis_id: str) -> tuple[ProposedDecision, ...]:
         rows = self._execute_query(
             select(proposed_decision_table.c.payload, proposed_decision_table.c.fingerprint)
             .where(proposed_decision_table.c.analysis_id == analysis_id)
             .order_by(proposed_decision_table.c.recorded_at.asc())
         )
-        decisions = []
-        for row in rows:
-            decision = _deserialize(
-                ProposedDecision,
-                row.payload,
-                fingerprint=row.fingerprint,
-                table_name=proposed_decision_table.name,
-            )
-            if decision_fingerprint(decision) != row.fingerprint:
-                raise DecisionJournalIntegrityError(
-                    f"stored ProposedDecision under fingerprint {row.fingerprint!r} no "
-                    "longer hashes to that fingerprint; the stored payload may be corrupted"
-                )
-            decisions.append(decision)
-        return tuple(decisions)
+        return self._rows_to_models(
+            ProposedDecision,
+            rows,
+            fingerprint_fn=decision_fingerprint,
+            table_name=proposed_decision_table.name,
+        )
 
     def list_verdicts_by_analysis_id(self, analysis_id: str) -> tuple[RiskVerdict, ...]:
         rows = self._execute_query(
@@ -296,7 +353,12 @@ class SqliteDecisionJournal(DecisionJournal):
             .where(risk_verdict_table.c.analysis_id == analysis_id)
             .order_by(risk_verdict_table.c.recorded_at.asc())
         )
-        return self._verdicts_from_rows(rows)
+        return self._rows_to_models(
+            RiskVerdict,
+            rows,
+            fingerprint_fn=risk_verdict_fingerprint,
+            table_name=risk_verdict_table.name,
+        )
 
     def list_verdicts_by_symbol(
         self,
@@ -317,21 +379,86 @@ class SqliteDecisionJournal(DecisionJournal):
         if limit is not None:
             query = query.limit(limit)
         rows = self._execute_query(query)
-        return self._verdicts_from_rows(rows)
+        return self._rows_to_models(
+            RiskVerdict,
+            rows,
+            fingerprint_fn=risk_verdict_fingerprint,
+            table_name=risk_verdict_table.name,
+        )
 
-    def _verdicts_from_rows(self, rows: list[Row[Any]]) -> tuple[RiskVerdict, ...]:
-        verdicts = []
-        for row in rows:
-            verdict = _deserialize(
-                RiskVerdict,
-                row.payload,
-                fingerprint=row.fingerprint,
-                table_name=risk_verdict_table.name,
+    def list_fills_by_verdict_fingerprint(self, risk_verdict_fingerprint: str) -> tuple[Fill, ...]:
+        rows = self._execute_query(
+            select(fill_table.c.payload, fill_table.c.fingerprint)
+            .where(fill_table.c.risk_verdict_fingerprint == risk_verdict_fingerprint)
+            .order_by(fill_table.c.recorded_at.asc())
+        )
+        return self._rows_to_models(
+            Fill, rows, fingerprint_fn=canonical_hash, table_name=fill_table.name
+        )
+
+    def list_fills_by_symbol(
+        self,
+        symbol: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> tuple[Fill, ...]:
+        query = select(fill_table.c.payload, fill_table.c.fingerprint).where(
+            fill_table.c.symbol == symbol
+        )
+        if start is not None:
+            query = query.where(fill_table.c.filled_at >= start.isoformat())
+        if end is not None:
+            query = query.where(fill_table.c.filled_at <= end.isoformat())
+        query = query.order_by(fill_table.c.filled_at.asc())
+        if limit is not None:
+            query = query.limit(limit)
+        rows = self._execute_query(query)
+        return self._rows_to_models(
+            Fill, rows, fingerprint_fn=canonical_hash, table_name=fill_table.name
+        )
+
+    def list_closed_positions_by_verdict_fingerprint(
+        self, opened_by_verdict_fingerprint: str
+    ) -> tuple[ClosedPosition, ...]:
+        rows = self._execute_query(
+            select(closed_position_table.c.payload, closed_position_table.c.fingerprint)
+            .where(
+                closed_position_table.c.opened_by_verdict_fingerprint
+                == opened_by_verdict_fingerprint
             )
-            if risk_verdict_fingerprint(verdict) != row.fingerprint:
-                raise DecisionJournalIntegrityError(
-                    f"stored RiskVerdict under fingerprint {row.fingerprint!r} no longer "
-                    "hashes to that fingerprint; the stored payload may be corrupted"
-                )
-            verdicts.append(verdict)
-        return tuple(verdicts)
+            .order_by(closed_position_table.c.recorded_at.asc())
+        )
+        return self._rows_to_models(
+            ClosedPosition,
+            rows,
+            fingerprint_fn=canonical_hash,
+            table_name=closed_position_table.name,
+        )
+
+    def list_closed_positions_by_symbol(
+        self,
+        symbol: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> tuple[ClosedPosition, ...]:
+        query = select(closed_position_table.c.payload, closed_position_table.c.fingerprint).where(
+            closed_position_table.c.symbol == symbol
+        )
+        if start is not None:
+            query = query.where(closed_position_table.c.closed_at >= start.isoformat())
+        if end is not None:
+            query = query.where(closed_position_table.c.closed_at <= end.isoformat())
+        query = query.order_by(closed_position_table.c.closed_at.asc())
+        if limit is not None:
+            query = query.limit(limit)
+        rows = self._execute_query(query)
+        return self._rows_to_models(
+            ClosedPosition,
+            rows,
+            fingerprint_fn=canonical_hash,
+            table_name=closed_position_table.name,
+        )

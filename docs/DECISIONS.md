@@ -1158,3 +1158,118 @@ deliberately separate contract, per the architecture entry above); no
 schema-migration tooling exists yet (not needed until a genuine breaking
 schema change is required — the JSON-payload-plus-indexed-columns design
 absorbs additive domain-model changes without one).
+
+---
+
+## 2026-08-24 — `DecisionJournal` gains Fill/ClosedPosition read methods
+(Mission 5 prerequisite); two architectural findings documented
+
+**Context:** a fresh end-to-end Missions 2–4 integration audit (Evidence →
+ReasoningOutput → ProposedDecision → RiskVerdict → Paper Execution →
+PortfolioState → Decision Memory) found no HIGH/CRITICAL issues, but
+surfaced one concrete MEDIUM prerequisite blocking Mission 5: `DecisionJournal`
+could `record_fill`/`record_closed_position` but had no corresponding
+`get_fill`/`get_closed_position`/`list_fills_by_*`/`list_closed_positions_by_*`
+— meaning Mission 5's core input (realized P&L, close reason, fill price/fee
+— the "actual outcome" half of "Prediction → Actual outcome → Difference →
+Decision-quality analysis → Lesson", brief §11) had no read path through the
+documented interface at all.
+
+**Decision: add six new read-only methods to `DecisionJournal`, additively,
+mirroring the existing `RiskVerdict` query methods exactly.** `get_fill`/
+`get_closed_position` mirror `get_evidence`/`get_verdict` (fingerprint in,
+object-or-`None` out, same `_deserialize`-then-recompute-fingerprint
+integrity check). `list_fills_by_verdict_fingerprint`/`list_closed_positions_
+by_verdict_fingerprint` mirror `list_verdicts_by_analysis_id` (a "by the
+fingerprint that links back to a decision" query, ordered by `recorded_at`
+ascending) — a tuple, not `Fill | None`/`ClosedPosition | None`, because
+Mission 4 v1 opening at most one position per verdict does not make more
+than one Fill for that verdict impossible (a replayed/retried `execute()`
+call at a different `now` produces a second, distinct fingerprint; nothing
+in this interface should assume otherwise). `list_fills_by_symbol`/
+`list_closed_positions_by_symbol` mirror `list_verdicts_by_symbol` exactly
+(`symbol`, optional `start`/`end` against `filled_at`/`closed_at`, optional
+`limit`, ascending order). No new hashing mechanism: `Fill`/`ClosedPosition`
+have no domain-named fingerprint wrapper (unlike `evidence_fingerprint`/
+`decision_fingerprint`/`risk_verdict_fingerprint`), so these methods use
+`orion.provenance.canonical_hash` directly, exactly as `record_fill`/
+`record_closed_position` already did on write.
+
+**Schema change: `fill.symbol` and `closed_position.symbol` gained an index**
+(previously present but unindexed, unlike `risk_verdict.symbol`) — the one
+addition `list_fills_by_symbol`/`list_closed_positions_by_symbol` actually
+need; no other schema change. `_verdicts_from_rows` was generalized into a
+private `_rows_to_models` helper (parameterized by model class and
+fingerprint function) so the four new `list_*` methods reuse the same
+integrity-checked reconstruction loop instead of duplicating it — an
+internal refactor, not an interface or behavior change.
+
+**All existing guarantees preserved, verified, not merely asserted:** no
+update/delete method exists on `DecisionJournal` (`__abstractmethods__`
+introspected directly in a new regression test — the six new method names
+are confirmed present and none contain update/delete/remove/mutate/set_);
+content-addressed idempotent writes, fingerprint integrity checks, and
+`DecisionJournalIntegrityError` on corrupted payloads all re-verified for
+Fill/ClosedPosition specifically (invalid JSON, schema-invalid-but-parseable
+JSON, and hash-mismatch-after-tampering, mirroring the exact three-case
+matrix already proven for Evidence/ReasoningOutput/ProposedDecision/
+RiskVerdict); deterministic ascending ordering and pagination boundaries
+(`limit=0`/`limit` exceeding actual count) verified; restart persistence
+verified (a `Fill`/`ClosedPosition` written through one `Engine`, on a real
+temp-file database, correctly reconstructs — including through every new
+`list_*` method — from a second, independent `Engine` opened against the
+same file). Zero changes to `orion.risk`/`orion.paper`/any existing
+fingerprint function; `orion.paper.execution`/`orion.paper.store` contracts
+untouched.
+
+**Finding A — journal/account transaction boundary (documented, not
+fixed in this entry; explicitly out of scope for this task).**
+`SqliteDecisionJournal` and `SqlitePortfolioStore` are independently
+committed transactions — each `record_*`/`save()` call is its own
+`engine.begin()` block, even when both are backed by the same database
+file. A crash between "account state saved" and "fill journaled" (in
+either order) is architecturally possible and was previously undocumented.
+**For the future Mission 6 orchestrator: treat `PortfolioStore` as
+authoritative and persist it first; call `journal.record_fill()`/
+`record_closed_position()` second.** If the second step fails or the
+process crashes before it runs, retrying the journal write alone is safe —
+it is content-addressed and idempotent, so replaying it after a restart
+never creates a duplicate or requires re-executing the trade. This entry
+does not attempt to create a cross-package transaction spanning both
+stores; that would either violate `PortfolioStore`'s Mission 4 interface-
+preservation requirement or require the two packages to share a connection
+in a way neither currently does, and was explicitly out of scope for this
+task.
+
+**Finding B — Fill/ClosedPosition authenticity is a writer-trust boundary,
+not a proof (documented, not fixed in this entry; explicitly out of scope
+for this task).** `DecisionJournal` verifies that a stored `Fill`/
+`ClosedPosition` has not been altered since it was written (content
+integrity) and that its `risk_verdict_fingerprint`/`opened_by_verdict_
+fingerprint` refers to a real fingerprint string — but it cannot prove the
+object was actually computed by `orion.paper.execution.execute`/
+`resolve_stop_take_profit` rather than hand-constructed with a legitimate
+verdict's fingerprint attached to fabricated numbers (confirmed empirically
+during the audit: a hand-built `Fill` with an absurd `fill_price` and a
+real verdict's fingerprint was accepted by `record_fill` without
+complaint). This is consistent with Mission 2's already-documented
+"no cross-record ordering/authenticity enforcement by design" scope (no
+orchestrator exists to be the sole legitimate caller yet) — restated here
+explicitly because Mission 5 will read these records as ground truth for
+"actual outcome," and should know the guarantee is provenance and
+integrity, not computational proof. **This entry does not redesign Fill
+provenance or introduce a second execution-attestation system** — the
+correct long-term mitigation (a future orchestrator being the only
+production caller of `record_fill`/`record_closed_position`, always
+passing `execute()`'s own return value directly) is a Mission 6
+orchestrator-design concern, not a Decision Memory schema concern.
+
+**Files added:** `tests/memory/test_journal_fills_and_closed_positions.py`
+(29 new tests). **Files modified:** `src/orion/memory/journal.py` (6 new
+abstract methods), `src/orion/memory/sqlite_journal.py` (6 new
+implementations + the `_rows_to_models` refactor), `src/orion/memory/
+schema.py` (two new indexes), `docs/DECISIONS.md` (this entry).
+
+**Verification:** `pytest` collects 511 tests, all passing (up from 482).
+`ruff check .`, `ruff format --check .`, and `mypy . --strict` all pass
+with zero findings.
