@@ -1,0 +1,349 @@
+/*
+ * Layout and chrome for the ORION surface.
+ *
+ * Three rows: identity, core, readout. The middle row takes every pixel the
+ * other two do not, so the core is always optically centred in whatever space
+ * remains -- on a phone in landscape as much as on a desktop.
+ */
+
+.shell {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: clamp(12px, 2vh, 28px);
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding:
+    calc(clamp(18px, 3.2vh, 34px) + env(safe-area-inset-top))
+    calc(clamp(18px, 3.4vw, 46px) + env(safe-area-inset-right))
+    calc(clamp(18px, 3.2vh, 34px) + env(safe-area-inset-bottom))
+    calc(clamp(18px, 3.4vw, 46px) + env(safe-area-inset-left));
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* ---------------------------------------------------------- background --- */
+
+.field {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+
+/*
+ * Two very slow, very large blurred lights. This is what stops the background
+ * from being flat black without adding a single visible element.
+ */
+.aurora {
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(38% 30% at 22% 18%, rgba(46, 122, 186, 0.2), transparent 70%),
+    radial-gradient(42% 34% at 82% 86%, rgba(58, 88, 190, 0.16), transparent 72%);
+  filter: blur(40px);
+  animation: drift 64s ease-in-out infinite alternate;
+}
+
+/*
+ * A faint measurement grid, masked so it only exists near the centre of the
+ * frame. Reads as an instrument surface rather than a pattern.
+ */
+.grid {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(150, 200, 235, 0.16) 1px, transparent 1px);
+  background-size: 36px 36px;
+  opacity: 0.5;
+  -webkit-mask: radial-gradient(58% 58% at 50% 46%, #000 0%, transparent 100%);
+  mask: radial-gradient(58% 58% at 50% 46%, #000 0%, transparent 100%);
+}
+
+.vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    120% 100% at 50% 42%,
+    transparent 38%,
+    rgba(2, 4, 9, 0.55) 78%,
+    rgba(2, 4, 9, 0.9) 100%
+  );
+}
+
+/* -------------------------------------------------------------- header --- */
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.identity {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.wordmark {
+  margin-right: -0.46em;
+  color: rgba(230, 242, 255, 0.94);
+  font-size: clamp(12px, 1.1vw, 15px);
+  font-weight: 500;
+  letter-spacing: 0.46em;
+}
+
+.tagline {
+  margin-right: -0.24em;
+  color: rgba(196, 220, 244, 0.34);
+  font-size: clamp(8.5px, 0.72vw, 10px);
+  font-weight: 500;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+}
+
+.build {
+  margin-right: -0.16em;
+  color: rgba(196, 220, 244, 0.24);
+  font-size: clamp(8.5px, 0.7vw, 10px);
+  letter-spacing: 0.16em;
+  text-align: right;
+  text-transform: uppercase;
+}
+
+/* -------------------------------------------------------------- centre --- */
+
+.centre {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+}
+
+/* -------------------------------------------------------------- footer --- */
+
+.footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(14px, 2.2vh, 24px);
+}
+
+.readout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-height: 3.6em;
+  margin: 0;
+  text-align: center;
+}
+
+.stateLabel {
+  margin-right: -0.38em;
+  color: var(--orion-accent);
+  font-size: clamp(9.5px, 0.82vw, 11px);
+  font-weight: 600;
+  letter-spacing: 0.38em;
+  text-transform: uppercase;
+  transition: color 900ms ease;
+}
+
+.statusText {
+  max-width: 34ch;
+  color: rgba(226, 240, 255, 0.8);
+  font-size: clamp(16px, 2vw, 21px);
+  font-weight: 300;
+  letter-spacing: -0.005em;
+  line-height: 1.4;
+}
+
+/* ------------------------------------------------------ mic affordance --- */
+
+.mic {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  padding: 0;
+  border: 1px solid rgba(150, 200, 235, 0.18);
+  border-radius: 50%;
+  background: rgba(140, 200, 240, 0.04);
+  color: rgba(226, 240, 255, 0.62);
+  cursor: pointer;
+  transition:
+    border-color 400ms ease,
+    background-color 400ms ease,
+    color 400ms ease,
+    box-shadow 400ms ease,
+    transform 400ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.mic svg {
+  width: 21px;
+  height: 21px;
+}
+
+.mic:hover {
+  border-color: rgba(150, 200, 235, 0.34);
+  color: rgba(232, 244, 255, 0.9);
+}
+
+.mic:focus-visible {
+  outline: 1px solid var(--orion-accent);
+  outline-offset: 4px;
+}
+
+.mic[aria-pressed="true"] {
+  border-color: rgb(var(--orion-accent-rgb) / 0.6);
+  background: rgb(var(--orion-accent-rgb) / 0.12);
+  box-shadow: 0 0 24px rgb(var(--orion-accent-rgb) / 0.28);
+  color: rgba(240, 250, 255, 0.96);
+  transform: scale(1.04);
+}
+
+/* -------------------------------------------------- development controls -- */
+
+.dev {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 4px 4px 12px;
+  border: 1px solid rgba(150, 200, 235, 0.12);
+  border-radius: 999px;
+  background: rgba(10, 18, 32, 0.45);
+  backdrop-filter: blur(8px);
+}
+
+.devLabel {
+  padding-right: 6px;
+  color: rgba(196, 220, 244, 0.28);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.devButton {
+  padding: 7px 13px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(210, 230, 250, 0.5);
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    color 300ms ease,
+    background-color 300ms ease,
+    border-color 300ms ease;
+}
+
+.devButton:hover {
+  color: rgba(232, 244, 255, 0.88);
+}
+
+.devButton:focus-visible {
+  outline: 1px solid var(--orion-accent);
+  outline-offset: 2px;
+}
+
+.devButton[aria-pressed="true"] {
+  border-color: rgb(var(--orion-accent-rgb) / 0.35);
+  background: rgb(var(--orion-accent-rgb) / 0.12);
+  color: rgba(240, 250, 255, 0.95);
+}
+
+.devAdvance {
+  color: rgba(210, 230, 250, 0.34);
+}
+
+.disclosure {
+  margin: 0;
+  color: rgba(196, 220, 244, 0.2);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-align: center;
+}
+
+/* ---------------------------------------------------- state accenting ---- */
+
+.shell {
+  --orion-accent-rgb: 104 206 240;
+  --orion-accent: rgb(var(--orion-accent-rgb));
+}
+.shell[data-state="listening"] {
+  --orion-accent-rgb: 132 240 255;
+}
+.shell[data-state="thinking"] {
+  --orion-accent-rgb: 148 178 255;
+}
+.shell[data-state="speaking"] {
+  --orion-accent-rgb: 186 230 255;
+}
+
+/* ------------------------------------------------------------ responsive - */
+
+@media (max-width: 560px) {
+  .header {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .build {
+    text-align: left;
+  }
+
+  .dev {
+    padding-left: 10px;
+  }
+
+  .devButton {
+    padding: 6px 10px;
+    font-size: 10px;
+  }
+}
+
+/* Short viewports (phone in landscape): give the core the room back. */
+@media (max-height: 620px) {
+  .footer {
+    gap: 10px;
+  }
+
+  .readout {
+    min-height: 0;
+  }
+
+  .statusText {
+    font-size: 15px;
+  }
+
+  .mic {
+    width: 44px;
+    height: 44px;
+  }
+
+  .mic svg {
+    width: 18px;
+    height: 18px;
+  }
+}
+
+@keyframes drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2%, -2%, 0) scale(1.08);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora {
+    animation: none;
+  }
+}

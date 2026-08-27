@@ -2330,3 +2330,128 @@ runtime's own exception plumbing, real-hardware error wrapping, source-level
 AST hygiene (no `exec`/`eval`/`compile`/`subprocess`, no persistence, no
 randomness, no bare filesystem `open`), and Mission 0–8/backtest isolation
 — all checks passed.
+
+---
+
+## 2026-08-27 — Mission 10 Phase 1: the ORION interface prototype
+
+**Decision:** Build the first real ORION interface as a standalone Next.js 16 /
+React 19 / TypeScript app in `frontend/`, rendered entirely with CSS, SVG and
+native browser APIs. Frontend only: no FastAPI, no WebSocket, no microphone, no
+persistence, no network call of any kind.
+
+**Why a separate `frontend/` directory rather than a monorepo tool.** The Python
+brain and the web body have completely different toolchains (`uv`/`ruff`/`mypy`
+vs `npm`/`eslint`/`tsc`) and no shared code today — the only thing they will
+eventually share is an HTTP contract. A workspace manager (Turborepo, Nx, npm
+workspaces) would add configuration that buys nothing until there is a second
+JavaScript package. Two independent CI jobs in one workflow gives the same
+guarantee with no new dependency. Revisit if a second JS package ever appears.
+
+**Why no Tailwind, no Framer Motion, no Three.js.** The brief's §5 technology
+direction lists Tailwind and Framer Motion as a *likely* direction, to be
+validated rather than assumed. Validated here, they lose:
+
+- The core is one composition of ~10 layers with hand-tuned conic gradients,
+  radial masks, 3D-tilted orbital planes and staggered keyframes. Tailwind's
+  value is consistency across many components; there is one component, and
+  every declaration in it is bespoke. CSS Modules give the same scoping with
+  zero dependencies and zero build configuration.
+- Framer Motion animates React state. Almost nothing here is React state — the
+  motion is continuous, infinite and compositor-driven, which is exactly what
+  CSS keyframes already are. The one thing CSS cannot do smoothly is change an
+  animation's *speed* without restarting its clock, and the platform already
+  solves that: `Animation.playbackRate` via the Web Animations API. That is a
+  ~40-line hook (`useOrionTempo`), not a 100 kB dependency.
+- Three.js would put a WebGL renderer, a scene graph and a render loop between
+  ORION and a shape that is, geometrically, a sphere and four rings. It also
+  costs battery on the phones the brief requires this to run on.
+
+Total added runtime dependencies: `next`, `react`, `react-dom`. Nothing else.
+
+**Four presentation states, not a second state machine.** The interface renders
+IDLE / LISTENING / THINKING / SPEAKING. The backend owns five
+(`orion.voice.schemas.VoiceState`, sequenced by
+`orion.voice.state.VoiceStateMachine`): UNDERSTANDING and ANALYZING are separate
+stages of work but identical to a human watching a screen, so they collapse into
+one THINKING presentation. Critically,
+`frontend/src/state/orion-visual-state.ts` contains **no transition validation
+at all** — no `_ALLOWED_TRANSITIONS` mirror, no graph, no legality checks.
+Duplicating that graph in TypeScript would create exactly the second, silently
+drifting state machine this design exists to avoid; transition legality stays
+the sole property of the Python machine. When Phase 2+ connects a real runtime,
+the only new code required is one total function at the integration boundary
+mapping `VoiceState -> OrionVisualState`. It is deliberately not written yet:
+there is no runtime to receive states from, and an unused adapter is a
+liability, not a head start.
+
+**Honesty about audio.** Mission 10's brief says SPEAKING must react to ORION's
+*actual* voice audio, which is Phase 4 work. This prototype therefore does not
+simulate it. The circular waveform's opening is driven by a single value,
+`--envelope`, fed from `OrionCore`'s `amplitude` prop; when that prop is unset
+it falls back to a **fixed per-state constant**, never a random number. A
+random envelope would be visually indistinguishable from a real one, which is
+precisely the kind of fabricated output the brief's quality rules forbid — and
+it would be an outright lie in a screen recording. Phase 4 drives `amplitude`
+from a real `AnalyserNode` and no markup or stylesheet changes. Randomness is
+additionally banned from `frontend/src` by an automated test, partly for this
+reason and partly because randomness in render would desynchronise server and
+client hydration.
+
+**Security posture.** Phase 1 has no attack surface by construction, and that is
+asserted rather than merely claimed in prose:
+`frontend/tests/source-safety.test.ts` scans every `.ts`/`.tsx` file under
+`src/` (comments stripped) and fails the build on `dangerouslySetInnerHTML`,
+`innerHTML`/`outerHTML`/`insertAdjacentHTML`,
+`fetch`/`XMLHttpRequest`/`WebSocket`/`EventSource`/`sendBeacon`,
+`localStorage`/`sessionStorage`/`indexedDB`/`document.cookie`, `process.env`,
+anything matching `api[_-]?key` or `Authorization`,
+`getUserMedia`/`AudioContext`/`MediaRecorder`, the two randomness sources, and
+`eval`/`new Function`. This is the same committed-guarantee discipline as the
+Python side's import-hygiene tests: a rule that survives future commits, not an
+observation that today's code happens to be clean. All React rendering is
+through JSX text interpolation, which escapes by default.
+
+**Testing scope.** Vitest + jsdom + Testing Library — four dev dependencies, no
+Jest, no Playwright, no snapshot infrastructure. 34 tests covering: the four
+states exist and are mutually distinguishable; every state renders and tags the
+DOM correctly; state profiles reach CSS as custom properties; the amplitude
+seam clamps to 0..1; every core layer is present; dev controls and the
+microphone affordance drive state; the readout announces politely; no table,
+canvas, form, price or ticker appears anywhere in the rendered output; the
+layout data is deterministic; and the responsive/reduced-motion structures
+exist in the stylesheets. End-to-end browser testing is deferred until there is
+a backend to be end-to-end *with*.
+
+**Known limitations, deferred by design:** no backend connection, no
+microphone, no audio analysis, no real transcript, no dynamic-information
+system (the brief's "transform around the relevant analysis" is a later phase);
+the state controls are development affordances, not product UI; the visual
+prototype was verified by production build, SSR output inspection, a live
+`next start` HTTP fetch and jsdom tests, but **not by an automated screenshot
+in a real browser** — browser automation was unavailable in this session, so
+final visual judgement (glow balance, motion timing, phone rendering) is the
+founder's to make on real devices; typography is a system stack rather than a
+webfont, to avoid a build-time network fetch for a prototype whose defining
+property is that it needs nothing behind it.
+
+**Files added:** `frontend/` (package.json, package-lock.json, tsconfig.json,
+next.config.ts, eslint.config.mjs, vitest.config.mts, .gitignore,
+`src/app/{layout.tsx,page.tsx,globals.css}`,
+`src/components/{OrionCore.tsx,OrionCore.module.css,OrionInterface.tsx,OrionInterface.module.css}`,
+`src/hooks/use-orion-tempo.ts`, `src/lib/core-geometry.ts`,
+`src/state/orion-visual-state.ts`, and four test files under `tests/`).
+**Files modified:** `.gitignore` (Node/Next artefacts),
+`.github/workflows/ci.yml` (a second, independent `frontend` job — the Python
+job is untouched), `README.md`. **No Mission 0–9 source touched:** nothing
+under `src/orion/` or `tests/` was added, modified or deleted, and
+`pyproject.toml`/`uv.lock` are unchanged.
+
+**Verification:** Python baseline re-run after the change — `pytest` 923 passed,
+`ruff check .`, `ruff format --check .` and `mypy . --strict` all clean, i.e.
+identical to the pre-Mission-10 baseline. Frontend — `npm run lint` (14 files,
+0 problems), `npm run typecheck` clean, `npm test` 34 passed, `npm run build`
+compiles and prerenders `/` as static content; the served page was fetched over
+HTTP and confirmed to contain all 26 particles, all 44 waveform bars, the
+lattice, the rings, the sphere and the polite live region, with no error
+markers in the SSR output.

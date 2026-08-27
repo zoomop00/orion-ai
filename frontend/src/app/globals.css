@@ -1,0 +1,57 @@
+/*
+ * Global ground for the ORION interface.
+ *
+ * Kept intentionally tiny: a reset, a type scale, and the deep-space
+ * background. Everything with a look of its own lives in a CSS module next to
+ * the component that owns it.
+ */
+
+:root {
+  --orion-void: #04060b;
+  --orion-ink: #e8f2ff;
+
+  /*
+   * A system stack rather than a webfont. A downloaded face would add a network
+   * dependency and a build-time fetch for a prototype whose entire point is
+   * that it runs with nothing behind it. The premium feel here comes from
+   * weight, tracking and restraint, not from the family.
+   */
+  --orion-font:
+    ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial,
+    sans-serif;
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  background: var(--orion-void);
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  color: var(--orion-ink);
+  font-family: var(--orion-font);
+  font-feature-settings: "kern" 1, "liga" 1, "tnum" 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(120, 210, 245, 0.28);
+}

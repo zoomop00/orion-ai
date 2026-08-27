@@ -1,0 +1,7 @@
+import { defineConfig } from "eslint/config";
+import next from "eslint-config-next";
+
+export default defineConfig([
+  { ignores: [".next/**", "node_modules/**", "coverage/**", "next-env.d.ts"] },
+  ...next,
+]);

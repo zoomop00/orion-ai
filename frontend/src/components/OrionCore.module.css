@@ -1,0 +1,414 @@
+/*
+ * The ORION core.
+ *
+ * Every layer is composited from transform / opacity / filter only, so the
+ * whole thing stays on the GPU. Sizes are expressed as fractions of a single
+ * --stage length rather than pixels, which is what lets the identical markup
+ * fill a 4K display and a 360px phone without a single breakpoint.
+ *
+ * State is communicated by exactly one attribute (data-state) plus five
+ * numeric custom properties set from TypeScript. CSS owns the look, React owns
+ * the state. Neither knows the other implementation.
+ */
+
+.stage {
+  --stage: clamp(230px, 58vmin, 540px);
+  --accent-rgb: 108 214 246;
+
+  position: relative;
+  width: var(--stage);
+  height: var(--stage);
+  perspective: 1100px;
+  transform: translateZ(0);
+}
+
+.stage[data-state="idle"] {
+  --accent-rgb: 104 206 240;
+}
+.stage[data-state="listening"] {
+  --accent-rgb: 132 240 255;
+}
+.stage[data-state="thinking"] {
+  --accent-rgb: 148 178 255;
+}
+.stage[data-state="speaking"] {
+  --accent-rgb: 186 230 255;
+}
+
+/* ---------------------------------------------------------------- glow --- */
+
+.bloom,
+.aura {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  border-radius: 50%;
+  pointer-events: none;
+  transition: opacity 1100ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.bloom {
+  width: 152%;
+  height: 152%;
+  background: radial-gradient(
+    closest-side,
+    rgb(var(--accent-rgb) / 0.17) 0%,
+    rgb(var(--accent-rgb) / 0.06) 42%,
+    rgb(var(--accent-rgb) / 0) 74%
+  );
+  filter: blur(calc(var(--stage) * 0.05));
+  opacity: calc(0.28 + 0.72 * var(--glow));
+  animation: bloomDrift 19s ease-in-out infinite;
+}
+
+.aura {
+  width: 74%;
+  height: 74%;
+  background: radial-gradient(
+    closest-side,
+    rgb(var(--accent-rgb) / 0.34) 0%,
+    rgb(var(--accent-rgb) / 0.12) 48%,
+    rgb(var(--accent-rgb) / 0) 78%
+  );
+  filter: blur(calc(var(--stage) * 0.018));
+  opacity: calc(0.34 + 0.66 * var(--glow));
+  animation: auraBreath 9s ease-in-out infinite;
+}
+
+/* ----------------------------------------------------------- particles --- */
+
+.particleField {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.particle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: calc(var(--dot) * var(--stage));
+  height: calc(var(--dot) * var(--stage));
+  margin: calc(var(--dot) * var(--stage) * -0.5);
+  border-radius: 50%;
+  background: rgb(var(--accent-rgb) / 0.95);
+  box-shadow: 0 0 calc(var(--stage) * 0.014) rgb(var(--accent-rgb) / 0.7);
+  opacity: calc(var(--alpha) * var(--particle-energy));
+  animation: orbit var(--spin) linear var(--offset) infinite;
+  animation-direction: var(--direction);
+  transition: opacity 1000ms ease;
+}
+
+/* --------------------------------------------------------------- rings --- */
+
+.ringField {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  pointer-events: none;
+}
+
+.ringPlane {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: var(--ring-size);
+  height: var(--ring-size);
+  transform: rotateX(var(--tilt-x)) rotateZ(var(--tilt-z));
+  transform-style: preserve-3d;
+}
+
+.ringSpin {
+  position: absolute;
+  inset: 0;
+  animation: spin var(--spin) linear infinite;
+  animation-direction: var(--direction);
+}
+
+.ringLine {
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgb(var(--accent-rgb) / calc(0.1 + 0.16 * var(--glow)));
+  border-radius: 50%;
+  transition: border-color 1000ms ease;
+}
+
+/*
+ * An arc rather than a closed circle: a conic gradient punched down to a
+ * hairline by a radial mask. This is the detail that stops the rings from
+ * reading as plain borders.
+ */
+.ringArc {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgb(var(--accent-rgb) / 0) 0deg 18deg,
+    rgb(var(--accent-rgb) / 0.55) 46deg 104deg,
+    rgb(var(--accent-rgb) / 0) 132deg 196deg,
+    rgb(var(--accent-rgb) / 0.28) 224deg 262deg,
+    rgb(var(--accent-rgb) / 0) 292deg 360deg
+  );
+  -webkit-mask: radial-gradient(
+    closest-side,
+    transparent calc(100% - 1.5px),
+    #000 calc(100% - 1.5px)
+  );
+  mask: radial-gradient(closest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
+  opacity: calc(0.55 + 0.45 * var(--glow));
+  transition: opacity 1000ms ease;
+}
+
+.ringArm {
+  position: absolute;
+  inset: 0;
+  transform: rotate(var(--angle));
+}
+
+.ringNode {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: calc(var(--stage) * 0.012);
+  height: calc(var(--stage) * 0.012);
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 0 calc(var(--stage) * 0.024) rgb(var(--accent-rgb) / 0.9);
+  transform: translate(-50%, -50%);
+}
+
+/* ------------------------------------------------ intelligence lattice --- */
+
+.lattice {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  opacity: var(--lattice-energy);
+  transition: opacity 900ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+.latticeSpin {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  animation: spin 84s linear infinite;
+}
+
+.latticeEdge {
+  fill: none;
+  stroke: rgb(var(--accent-rgb) / 0.34);
+  stroke-width: 0.26;
+}
+
+.latticeNode {
+  fill: rgb(var(--accent-rgb) / 0.95);
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: nodePulse 2.7s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------ waveform --- */
+
+/*
+ * A circular energy waveform. --envelope scales every bar, the travelling
+ * motion is a fixed staggered keyframe. Phase 4 replaces --envelope with a
+ * measured audio amplitude and nothing else here has to change.
+ */
+.wave {
+  position: absolute;
+  inset: 0;
+  opacity: calc(0.16 + 0.84 * var(--envelope));
+  transition: opacity 900ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+.barSlot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1.6px;
+  height: calc(var(--stage) * 0.082);
+  margin-left: -0.8px;
+  transform-origin: 50% 0%;
+  transform: rotate(var(--angle)) translateY(calc(var(--stage) * 0.183))
+    scaleY(calc(0.08 + var(--envelope) * var(--weight)));
+  transition: transform 900ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.bar {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 1px;
+  background: linear-gradient(
+    to bottom,
+    rgb(var(--accent-rgb) / 0.95),
+    rgb(var(--accent-rgb) / 0)
+  );
+  transform-origin: 50% 0%;
+  animation: waveTravel 2.2s ease-in-out infinite;
+}
+
+/* -------------------------------------------------------------- sphere --- */
+
+.sphereWrap {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 28%;
+  height: 28%;
+  transform: scale(var(--core-scale));
+  transition: transform 1100ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sphere {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 50% 36%,
+    #ffffff 0%,
+    rgba(255, 255, 255, 0.92) 9%,
+    rgb(var(--accent-rgb)) 33%,
+    rgba(26, 96, 172, 0.94) 68%,
+    rgba(6, 20, 48, 0.96) 100%
+  );
+  box-shadow:
+    0 0 calc(var(--stage) * 0.05) rgb(var(--accent-rgb) / calc(0.3 + 0.5 * var(--glow))),
+    0 0 calc(var(--stage) * 0.17) rgb(var(--accent-rgb) / calc(0.08 + 0.3 * var(--glow)));
+  animation: breathe 7.2s ease-in-out infinite;
+  transition: box-shadow 1000ms ease;
+  overflow: hidden;
+}
+
+.shimmer {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(255, 255, 255, 0) 0deg,
+    rgba(255, 255, 255, 0.4) 68deg,
+    rgba(255, 255, 255, 0) 148deg,
+    rgba(255, 255, 255, 0) 226deg,
+    rgba(255, 255, 255, 0.2) 292deg,
+    rgba(255, 255, 255, 0) 360deg
+  );
+  mix-blend-mode: screen;
+  opacity: 0.55;
+  animation: spin 15s linear infinite;
+}
+
+.hotspot {
+  position: absolute;
+  top: 15%;
+  left: 26%;
+  width: 34%;
+  height: 24%;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0));
+}
+
+.rim {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 calc(var(--stage) * -0.014) calc(var(--stage) * 0.036) rgba(8, 30, 72, 0.55);
+}
+
+/* ----------------------------------------------------------- keyframes --- */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes orbit {
+  from {
+    transform: rotate(var(--angle)) translateX(calc(var(--radius) * var(--stage)));
+  }
+  to {
+    transform: rotate(calc(var(--angle) + 360deg)) translateX(calc(var(--radius) * var(--stage)));
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.038);
+  }
+}
+
+@keyframes auraBreath {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.09);
+  }
+}
+
+@keyframes bloomDrift {
+  0%,
+  100% {
+    transform: scale(1) translate3d(0, 0, 0);
+  }
+  50% {
+    transform: scale(1.06) translate3d(0, -1.5%, 0);
+  }
+}
+
+@keyframes nodePulse {
+  0%,
+  100% {
+    opacity: 0.32;
+    transform: scale(0.68);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.28);
+  }
+}
+
+@keyframes waveTravel {
+  0%,
+  100% {
+    transform: scaleY(0.42);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+/*
+ * Reduced motion: hold the composition on a settled frame instead of removing
+ * it. State changes still cross-fade colour, glow and scale, so the interface
+ * remains readable and still communicates state, it simply stops moving.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .bloom,
+  .aura,
+  .particle,
+  .ringSpin,
+  .latticeSpin,
+  .latticeNode,
+  .bar,
+  .sphere,
+  .shimmer {
+    animation: none;
+  }
+
+  .particle {
+    transform: rotate(var(--angle)) translateX(calc(var(--radius) * var(--stage)));
+  }
+}

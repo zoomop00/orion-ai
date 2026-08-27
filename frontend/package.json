@@ -1,0 +1,31 @@
+{
+  "name": "orion-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ORION interface - Mission 10 Phase 1 visual prototype (frontend only, no backend integration).",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "next": "16.3.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "eslint": "^9.39.1",
+    "eslint-config-next": "16.3.3",
+    "jsdom": "^30.0.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

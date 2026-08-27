@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+next-env.d.ts
+
+# Test / coverage output
+coverage/
+
+# Local env files (Phase 1 uses none - this is a guard, not a promise of one)
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+*.tsbuildinfo

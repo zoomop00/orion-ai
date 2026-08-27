@@ -30,6 +30,12 @@ htmlcov/
 /data/
 /logs/
 
+# Frontend (Mission 10) - see frontend/.gitignore for the full set
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
 # Editors / OS
 .vscode/
 .idea/

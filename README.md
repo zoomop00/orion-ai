@@ -22,6 +22,7 @@ and `docs/DECISIONS.md` for why specific technical choices were made.
 
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/) for dependency/environment management
+- Node.js 20+ and npm — only for the `frontend/` interface prototype
 
 ## Setup
 
@@ -46,6 +47,30 @@ uv run ruff format .   # format
 uv run mypy src        # typecheck
 ```
 
+## The ORION interface (Mission 10, Phase 1)
+
+`frontend/` holds the first visual prototype of ORION itself: a full-screen
+cinematic core with four presentation states — idle, listening, thinking,
+speaking. It is **frontend only**. It makes no network calls, reads no
+microphone, stores nothing, and is not wired to the Python brain yet.
+
+```bash
+cd frontend
+npm install
+npm run dev        # then open http://localhost:3000
+```
+
+```bash
+npm run lint       # eslint
+npm run typecheck  # tsc --noEmit
+npm test           # vitest
+npm run build      # production build
+```
+
+The four states can be switched with the development controls at the bottom of
+the screen. The microphone button toggles the *visual* listening state; no
+microphone is connected.
+
 ## Project layout
 
 ```
@@ -58,6 +83,12 @@ src/orion/
     memory/           # append-only SQLite decision journal
     pipeline.py       # wires the above into one auditable run
     cli.py            # `orion analyze <symbol>` entrypoint
+
+frontend/             # Mission 10 - the ORION interface (Next.js, frontend only)
+    src/state/        # typed presentation states (NOT a second voice state machine)
+    src/components/   # the ORION core and the surface it sits on
+    src/lib/          # deterministic layout data for the generated core elements
+    src/hooks/        # Web Animations tempo control, in place of an animation library
 ```
 
 Every provider (market data, AI reasoning) sits behind an abstract interface so it
