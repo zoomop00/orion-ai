@@ -47,6 +47,36 @@ uv run ruff format .   # format
 uv run mypy src        # typecheck
 ```
 
+## The voice backend (Mission 10, Phase 2)
+
+`src/orion/interface/` is a thin HTTP adapter over the Mission 9 voice runtime.
+It is **localhost-only and unauthenticated**. Run it with:
+
+```bash
+uv run python -c "from orion.interface.app import run; run()"
+# serves on http://127.0.0.1:8000 — interactive docs at /docs
+```
+
+`run()` takes no `host` argument and always binds `127.0.0.1`. **Do not expose
+this server beyond loopback** — there is no authentication, no rate limiting and
+no TLS, and anyone who can reach it can spend your Deepgram credit. Authentication
+and production hardening are deferred; see `docs/DECISIONS.md`.
+
+| Endpoint | Body | Purpose |
+| --- | --- | --- |
+| `GET /health` | — | Liveness, plus whether a Deepgram key is configured |
+| `POST /v1/voice/turn` | raw audio bytes, `Content-Type: audio/*` | Speak to ORION |
+| `POST /v1/voice/turn/text` | `{"text": "..."}` | Same turn, skipping speech-to-text |
+
+Both turn endpoints return the transcript, ORION's reply, and the untranscoded
+WAV audio as base64. `DEEPGRAM_API_KEY` must be set in `.env` for either to work.
+Nothing is persisted: no database, no files, no request logging.
+
+```bash
+curl -s localhost:8000/v1/voice/turn/text \
+  -H 'Content-Type: application/json' -d '{"text":"hello orion"}'
+```
+
 ## The ORION interface (Mission 10, Phase 1)
 
 `frontend/` holds the first visual prototype of ORION itself: a full-screen
@@ -84,7 +114,10 @@ src/orion/
     pipeline.py       # wires the above into one auditable run
     cli.py            # `orion analyze <symbol>` entrypoint
 
-frontend/             # Mission 10 - the ORION interface (Next.js, frontend only)
+    interface/        # Mission 10 Phase 2 - localhost HTTP adapter over the voice runtime
+    voice/            # Mission 9 - STT/TTS providers, audio I/O, the voice state machine
+
+frontend/             # Mission 10 Phase 1 - the ORION interface (Next.js, frontend only)
     src/state/        # typed presentation states (NOT a second voice state machine)
     src/components/   # the ORION core and the surface it sits on
     src/lib/          # deterministic layout data for the generated core elements

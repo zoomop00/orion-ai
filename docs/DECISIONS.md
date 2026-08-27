@@ -2455,3 +2455,196 @@ compiles and prerenders `/` as static content; the served page was fetched over
 HTTP and confirmed to contain all 26 particles, all 44 waveform bars, the
 lattice, the rings, the sphere and the polite live region, with no error
 markers in the SSR output.
+
+---
+
+## 2026-08-27 — Mission 10 Phase 2: the voice interface adapter
+
+**Decision:** Expose the Mission 9 voice runtime over HTTP from a new
+`src/orion/interface/` package (FastAPI + Uvicorn, four files), bound to
+loopback only, with no authentication, no streaming, no persistence and no
+connection to Missions 0–8. Three endpoints: `GET /health`,
+`POST /v1/voice/turn` (raw audio bytes), `POST /v1/voice/turn/text` (text
+fallback).
+
+**Why FastAPI.** The requirement is "the smallest safe HTTP boundary", and
+the deciding factor was not speed or popularity but that this codebase is
+already Pydantic-shaped end to end — every schema from `MarketSnapshot` to
+`Transcript` is a frozen, `extra="forbid"` Pydantic model. FastAPI validates
+request bodies with the same library, so `TextTurnRequest` is a real schema
+rather than hand-written `dict` parsing, and a malformed body is rejected
+before any handler code runs. It is also plain ASGI underneath, which is
+what made the request-size ceiling implementable as ~30 lines of middleware
+that wraps `receive` directly rather than as a framework plugin. Flask was
+rejected (WSGI, no async, no Pydantic integration, and the blocking voice
+turn would need a different concurrency story); Starlette alone was rejected
+(it would mean re-implementing request-model validation that FastAPI already
+does with the exact library the rest of ORION uses); a bare `http.server` was
+rejected as writing a web server by hand to avoid a dependency the brief
+already approved. Two runtime dependencies added — `fastapi`, `uvicorn` —
+and nothing else. `python-multipart` was specifically **not** added: the
+audio endpoint takes raw bytes with an explicit `Content-Type`, so there is
+no multipart parser standing between the socket and the size check.
+
+**An adapter, not the orchestrator.** `orion.interface` may import
+`orion.voice` and `orion.config`, and nothing else from ORION. It cannot
+import `orion.decision`, `orion.risk`, `orion.paper`, `orion.memory` or any
+other Mission 0–8 package — enforced by `tests/interface/
+test_import_hygiene.py`, not by convention. This is the load-bearing
+boundary of the whole phase: the moment an HTTP handler can reach the
+decision engine, a request from a browser is one edit away from producing a
+trade proposal. The real orchestrator decides *what ORION does with what it
+heard*; this layer only decides *how bytes become a turn and back*. The one
+thing between "user said something" and "ORION replies" is still
+`StaticResponseProvider`, which by design never reads the transcript.
+
+**Zero Mission 9 changes, by using its own extension mechanism.**
+`VoiceRuntime`'s docstring states that swapping a component means
+"constructing `VoiceRuntime` with different arguments, never editing this
+file." The text-fallback path is exactly that: `PreparedTranscription`, a
+new `TranscriptionProvider` in `orion.interface`, returns an
+already-validated `Transcript` and ignores the audio it is handed, so
+speech-to-text is bypassed without the runtime learning about a second kind
+of turn. Not one file under `src/orion/voice/` or `tests/voice/` was
+modified. The Mission 9 invariants Phase 2 could plausibly have eroded
+(`runtime.py` free of HTTP/framework imports, `httpx` confined to the two
+Deepgram files, `sounddevice` confined to the two audio-I/O files) are
+re-verified from `tests/interface/` looking *inward*, which keeps the proof
+current without editing a Mission 9 test either.
+
+**One VoiceRuntime per request, never shared.** `VoiceRuntime` documents
+itself as "a single synchronous session object ... not thread-safe and not
+reentrant". Serving concurrent requests from a shared instance would mean
+one request's `VoiceStateMachine` being advanced by another; the second
+caller would get `VoiceRuntimeBusyError` at best and interleaved state at
+worst. So every request constructs its own runtime, its own providers and
+its own `httpx.Client` (closed in a `with` block), and drops all of them
+when the response is sent. Nothing is cached on the service, at module
+scope, or in a registry. Asserted structurally: a test counts constructions
+across sixteen concurrent turns and requires sixteen distinct objects, and
+another checks that no two concurrent callers receive each other's
+transcript. `run_turn` is blocking, so both routes hand it to
+`run_in_threadpool` rather than declaring `async def` and stalling the event
+loop — which is also what makes that concurrency test meaningful rather than
+sequential.
+
+**Request/response, not streaming.** No WebSockets, no SSE, no live state
+push. A single request/response turn is the smallest thing that proves
+browser → HTTP → adapter → Mission 9 → real Deepgram → safe response, and
+it needs no connection lifecycle, no reconnection logic, no backpressure
+policy and no second state representation on the wire. Phase 3 can render
+IDLE/LISTENING/THINKING/SPEAKING from the request lifecycle it already
+controls. `VoiceTurnResponse.state` is read from Mission 9's own
+`VoiceStateMachine` after the turn; this package declares no states and
+validates no transitions, so there is still exactly one state machine in
+the backend.
+
+**Audio: base64 in one JSON response, untranscoded.** Mission 9 pinned
+Deepgram to `linear16`/`wav`/24 kHz specifically so playback needs no
+decoder, and those exact bytes are returned — `base64.b64encode` is the only
+thing done to them, verified byte-for-byte identical in a test. base64 costs
+~33% on a payload of roughly 100–200 KB over a loopback connection. The
+alternatives were worse: a separate "fetch the audio" endpoint would require
+storing audio between requests, which this phase forbids outright and which
+would also mean either a second synthesis call or server-side state;
+metadata-in-response-headers with an `audio/wav` body avoids the inflation
+but breaks once a 2000-character multilingual transcript is percent-encoded
+past the ~8 KB header ceiling; transcoding to a smaller format was
+explicitly forbidden and would undo Mission 9's decoder-free decision.
+
+**Localhost only, enforced rather than documented.** `run()` hardcodes
+`127.0.0.1` and exposes no `host` parameter, so the supported entry point
+cannot be widened by passing an argument (a test asserts the parameter does
+not exist). **This service has no authentication, no authorization, no rate
+limiting and no TLS.** Exposing it beyond loopback — a public bind, a port
+forward, a tunnel, a container port mapping — is not supported and would
+hand anyone who can reach it unmetered use of a paid Deepgram credential.
+No authentication was added because adding a real one now means choosing a
+session/token model for a UI that does not exist yet, and a fake one
+(a static shared secret) would create a false sense of safety. Loopback is
+the security boundary until production hardening exists.
+
+**Request-size ceiling before the runtime.** `_BodySizeLimitMiddleware` is
+pure ASGI so it can wrap `receive`: it refuses a declared `Content-Length`
+over the limit without reading a byte, and independently counts what
+actually arrives, so a request that lies about its length or streams chunked
+with no declared length is cut off at the same ceiling. `MAX_REQUEST_BODY_
+BYTES` *is* `orion.voice.audio_input.MAX_AUDIO_INPUT_BYTES` rather than a
+second hand-picked number — one constant means the HTTP boundary can never
+drift looser than what Mission 9 accepts. A test drives the ASGI app
+directly with an undeclared chunked body to prove the counter, not just the
+header check.
+
+**CORS: an explicit two-origin allowlist.** `http://localhost:3000` and
+`http://127.0.0.1:3000`, with `allow_credentials=False`. Never `"*"`. A
+wildcard would let any page the founder happens to have open drive ORION's
+paid credential, and it is precisely the setting that becomes unsafe the
+moment authentication is added — better to never have it than to remember to
+remove it. Tests assert both that allowed origins are echoed and that
+`http://localhost.evil.example`, `https://localhost:3000` and
+`http://localhost:3001` get nothing.
+
+**Errors carry no detail, structurally.** `VoiceInterfaceError` takes a
+`VoiceInterfaceFault` and *no message parameter*, so there is no argument
+through which an exception string, a provider message, a URL or a request
+body could be attached — a test asserts passing a second argument is a
+`TypeError`. `FAULT_RESPONSES` is the complete closed mapping from fault to
+(status, code, sentence), every sentence a literal written at development
+time. This is deliberately coarser than it could be: telling "Deepgram heard
+no speech" apart from "Deepgram rejected the request" would mean inspecting
+a vendor's error text and reflecting a judgement about it back to the
+client, which is the coupling that leaks vendor internals one refactor
+later. FastAPI's default 422 body (which echoes the offending `input` and a
+`loc` path into the payload) is replaced for the same reason. Mission 9
+already guarantees credential-free error messages via `orion.http_errors`;
+this layer does not depend on that guarantee — it never forwards the message
+at all. Starlette still re-raises unexpected exceptions after sending the
+clean 500, so a traceback reaches the *server's* log and never the client.
+
+**Zero persistence, asserted against the filesystem.** No database, no
+files, no cache, no session, no cookie. `orion.interface` imports none of
+`sqlite3`/`sqlalchemy`/`pickle`/`shelve`/`tempfile` and calls no `open()` —
+checked by AST, not by inspection. It also imports **no logging framework**,
+so no request body, transcript or audio can be written to a log; uvicorn's
+access log records method, path and status only, which is additionally why
+no endpoint accepts a query parameter. One test runs two complete turns
+inside a temporary working directory and asserts the directory is still
+empty afterwards.
+
+**Why Missions 0–8 remain untouched.** Nothing in this phase needed them.
+Wiring voice to evidence, decisions, risk or memory is the orchestrator's
+job, and doing any part of it here would put pipeline logic behind an
+unauthenticated HTTP endpoint. `git diff` for this phase touches no file
+under `src/orion/` outside `interface/`, and no file under `tests/` outside
+`tests/interface/`; `pyproject.toml`/`uv.lock` changed only to add the two
+approved dependencies.
+
+**Explicitly deferred:** live state streaming (WebSockets/SSE), barge-in and
+interruption, voice-activity detection, conversation history across turns,
+a transcript-aware response provider, the dynamic-information system, the
+full ORION orchestrator, any Mission 0–8 wiring, authentication /
+authorization / rate limiting / TLS, and any deployment beyond loopback.
+Frontend integration is Phase 3 and no frontend file was touched here.
+
+**Files added:** `src/orion/interface/{__init__.py, schemas.py, service.py,
+app.py}`, `tests/interface/{__init__.py, conftest.py, test_app.py,
+test_service.py, test_security.py, test_import_hygiene.py}`.
+**Files modified:** `pyproject.toml`/`uv.lock` (added `fastapi`, `uvicorn`),
+`.github/workflows/ci.yml` (one added step — the interface tests already run
+under the existing `pytest`, so the new step covers the one thing they
+cannot: that `uvicorn` really installs and the documented entry point
+resolves), `README.md`. No Mission 0–9 source touched.
+
+**Verification:** `pytest` 1035 passed (923 before this phase, 112 added),
+`pytest --collect-only` 1035 collected, `ruff check .`,
+`ruff format --check .` and `mypy . --strict` (144 source files) all clean.
+The 112 new tests cover both turn paths end to end through the real runtime
+and real Deepgram provider code with only the socket mocked; every rejection
+path; the size ceiling by both the declared-length and streamed-byte routes;
+credential non-leakage across every reachable failure mode; no tracebacks or
+Python internals in any body; ten hostile strings (script tags, template
+expressions, JNDI, SQL, path traversal, header injection, prompt injection)
+round-tripping as inert text from both the client and the vendor side;
+filesystem-level zero persistence; the CORS allowlist including near-miss
+origins; loopback-only binding; per-request runtime isolation under sixteen
+concurrent turns; and the full inbound/outbound import-direction matrix.

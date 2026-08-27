@@ -34,6 +34,18 @@ jobs:
       - name: Test
         run: uv run pytest --cov=orion --cov-report=term-missing
 
+      # The interface tests build the ASGI app in-process and never import
+      # uvicorn for real (they stub it, so no server is started). This step
+      # is the one place that proves the documented way to actually serve
+      # ORION still resolves: the server package installs and imports, and
+      # the app exposes its routes.
+      - name: Interface entrypoint smoke check
+        run: >
+          uv run python -c "import uvicorn;
+          from orion.interface.app import app, run;
+          assert {r.path for r in app.routes} >= {'/health', '/v1/voice/turn', '/v1/voice/turn/text'};
+          print('interface entrypoint ok')"
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
