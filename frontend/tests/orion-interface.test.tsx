@@ -71,8 +71,18 @@ describe("OrionInterface", () => {
 
     expect(container.querySelectorAll("table")).toHaveLength(0);
     expect(container.querySelectorAll("canvas")).toHaveLength(0);
-    expect(container.querySelectorAll("input")).toHaveLength(0);
-    expect(container.querySelectorAll("form")).toHaveLength(0);
+    // Phase 3 adds exactly one command surface -- one form, one input, and
+    // nothing else. This assertion was "zero inputs" in Phase 1; tightening
+    // it to "exactly one" keeps it doing the job it was written for, which
+    // is stopping the interface from growing into a dashboard.
+    expect(container.querySelectorAll("form")).toHaveLength(1);
+    expect(container.querySelectorAll("input")).toHaveLength(1);
+    expect(container.querySelectorAll("textarea")).toHaveLength(0);
+    expect(container.querySelectorAll("select")).toHaveLength(0);
+    // No chat log: the last exchange is two lines in the existing readout,
+    // never an accumulating list.
+    expect(container.querySelectorAll("ul, ol, li")).toHaveLength(0);
+    expect(container.querySelectorAll("time")).toHaveLength(0);
 
     // No prices, percentages or ticker symbols anywhere in the rendered text.
     const text = container.textContent ?? "";
@@ -80,8 +90,12 @@ describe("OrionInterface", () => {
     expect(text).not.toMatch(/[$€£]|XAU|USD|%/);
   });
 
-  it("states honestly what the prototype is not connected to", () => {
+  it("states honestly what the prototype is and is not connected to", () => {
     render(<OrionInterface />);
-    expect(screen.getByText(/no microphone, no network, no stored data/i)).toBeTruthy();
+    // Phase 3 really does make a network call now, so the Phase 1 wording
+    // ("no network") would be a false claim and is replaced rather than
+    // quietly deleted.
+    expect(screen.getByText(/talks only to ORION on this machine/i)).toBeTruthy();
+    expect(screen.getByText(/no microphone yet, nothing stored/i)).toBeTruthy();
   });
 });

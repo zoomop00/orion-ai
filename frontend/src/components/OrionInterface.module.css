@@ -157,13 +157,140 @@
   line-height: 1.4;
 }
 
+/*
+ * What ORION heard, held one step below what ORION said. Dimmer and
+ * smaller rather than boxed or bubbled -- the hierarchy does the work a
+ * chat layout would otherwise need furniture for.
+ */
+.transcript {
+  max-width: 34ch;
+  color: rgba(196, 220, 244, 0.44);
+  font-size: clamp(11px, 1.05vw, 12.5px);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  line-height: 1.45;
+}
+
+.error {
+  max-width: 36ch;
+  margin: 0;
+  color: rgba(255, 196, 186, 0.82);
+  font-size: clamp(12px, 1.2vw, 13.5px);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  text-align: center;
+}
+
+/* ------------------------------------------------------ command surface --- */
+
+/*
+ * One command line and one send affordance, with the microphone beside them
+ * as the path Phase 4 will make real. Everything shares the hairline /
+ * blurred-glass language the development controls already use, so this reads
+ * as part of ORION rather than as a form dropped onto it.
+ */
+.commandRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 520px;
+}
+
+.command {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 5px 5px 18px;
+  border: 1px solid rgba(150, 200, 235, 0.16);
+  border-radius: 999px;
+  background: rgba(10, 18, 32, 0.5);
+  backdrop-filter: blur(8px);
+  transition:
+    border-color 400ms ease,
+    box-shadow 400ms ease;
+}
+
+.command:focus-within {
+  border-color: rgb(var(--orion-accent-rgb) / 0.42);
+  box-shadow: 0 0 28px rgb(var(--orion-accent-rgb) / 0.13);
+}
+
+.commandInput {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 0;
+  border: none;
+  background: transparent;
+  color: rgba(232, 244, 255, 0.94);
+  font-family: inherit;
+  font-size: clamp(13.5px, 1.4vw, 15px);
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  outline: none;
+}
+
+.commandInput::placeholder {
+  color: rgba(196, 220, 244, 0.36);
+  letter-spacing: 0.08em;
+}
+
+.commandInput:disabled {
+  color: rgba(226, 240, 255, 0.45);
+  cursor: not-allowed;
+}
+
+.commandSend {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid rgb(var(--orion-accent-rgb) / 0.28);
+  border-radius: 50%;
+  background: rgb(var(--orion-accent-rgb) / 0.14);
+  color: rgba(240, 250, 255, 0.92);
+  cursor: pointer;
+  transition:
+    background-color 300ms ease,
+    border-color 300ms ease,
+    color 300ms ease,
+    opacity 300ms ease;
+}
+
+.commandSend svg {
+  width: 17px;
+  height: 17px;
+}
+
+.commandSend:hover:not(:disabled) {
+  border-color: rgb(var(--orion-accent-rgb) / 0.55);
+  background: rgb(var(--orion-accent-rgb) / 0.24);
+}
+
+.commandSend:focus-visible {
+  outline: 1px solid var(--orion-accent);
+  outline-offset: 3px;
+}
+
+.commandSend:disabled {
+  border-color: rgba(150, 200, 235, 0.12);
+  background: rgba(140, 200, 240, 0.04);
+  color: rgba(226, 240, 255, 0.34);
+  cursor: not-allowed;
+}
+
 /* ------------------------------------------------------ mic affordance --- */
 
 .mic {
   display: grid;
+  flex: none;
   place-items: center;
-  width: 54px;
-  height: 54px;
+  width: 46px;
+  height: 46px;
   padding: 0;
   border: 1px solid rgba(150, 200, 235, 0.18);
   border-radius: 50%;
@@ -179,8 +306,8 @@
 }
 
 .mic svg {
-  width: 21px;
-  height: 21px;
+  width: 19px;
+  height: 19px;
 }
 
 .mic:hover {
@@ -191,6 +318,12 @@
 .mic:focus-visible {
   outline: 1px solid var(--orion-accent);
   outline-offset: 4px;
+}
+
+.mic:disabled,
+.devButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .mic[aria-pressed="true"] {
@@ -302,6 +435,14 @@
     padding-left: 10px;
   }
 
+  .command {
+    padding-left: 14px;
+  }
+
+  .commandRow {
+    gap: 8px;
+  }
+
   .devButton {
     padding: 6px 10px;
     font-size: 10px;
@@ -328,8 +469,17 @@
   }
 
   .mic svg {
-    width: 18px;
-    height: 18px;
+    width: 17px;
+    height: 17px;
+  }
+
+  .commandSend {
+    width: 34px;
+    height: 34px;
+  }
+
+  .commandInput {
+    padding: 6px 0;
   }
 }
 

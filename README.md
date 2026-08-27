@@ -77,18 +77,35 @@ curl -s localhost:8000/v1/voice/turn/text \
   -H 'Content-Type: application/json' -d '{"text":"hello orion"}'
 ```
 
-## The ORION interface (Mission 10, Phase 1)
+## The ORION interface (Mission 10, Phases 1 and 3)
 
-`frontend/` holds the first visual prototype of ORION itself: a full-screen
-cinematic core with four presentation states — idle, listening, thinking,
-speaking. It is **frontend only**. It makes no network calls, reads no
-microphone, stores nothing, and is not wired to the Python brain yet.
+`frontend/` holds ORION's face: a full-screen cinematic core with four
+presentation states — idle, listening, thinking, speaking — and a single
+command line that really talks to the voice backend above.
+
+**To use it, run both halves.** In one terminal:
+
+```bash
+uv run python -c "from orion.interface.app import run; run()"   # 127.0.0.1:8000
+```
+
+In another:
 
 ```bash
 cd frontend
 npm install
 npm run dev        # then open http://localhost:3000
 ```
+
+Type a command and press Enter. ORION goes to **thinking** for exactly as long
+as the request takes, then to **speaking** for exactly as long as the returned
+WAV actually plays, then back to **idle**. `DEEPGRAM_API_KEY` must be set in
+`.env` or the backend answers with a calm "voice is not configured" and the
+interface returns to idle.
+
+The microphone button still only previews the listening *visual* — microphone
+capture and audio-reactive visualization are Phase 4. Nothing is stored: no
+history, no cookies, no browser storage, no logging of what you typed.
 
 ```bash
 npm run lint       # eslint
@@ -97,9 +114,8 @@ npm test           # vitest
 npm run build      # production build
 ```
 
-The four states can be switched with the development controls at the bottom of
-the screen. The microphone button toggles the *visual* listening state; no
-microphone is connected.
+The four states can also be switched with the development controls at the
+bottom of the screen, which are disabled while a turn is running.
 
 ## Project layout
 
@@ -117,11 +133,11 @@ src/orion/
     interface/        # Mission 10 Phase 2 - localhost HTTP adapter over the voice runtime
     voice/            # Mission 9 - STT/TTS providers, audio I/O, the voice state machine
 
-frontend/             # Mission 10 Phase 1 - the ORION interface (Next.js, frontend only)
+frontend/             # Mission 10 Phases 1 + 3 - the ORION interface (Next.js)
     src/state/        # typed presentation states (NOT a second voice state machine)
-    src/components/   # the ORION core and the surface it sits on
-    src/lib/          # deterministic layout data for the generated core elements
-    src/hooks/        # Web Animations tempo control, in place of an animation library
+    src/components/   # the ORION core and the command surface it sits on
+    src/lib/          # core layout data, the API client, and the audio boundary
+    src/hooks/        # the turn lifecycle, and Web Animations tempo control
 ```
 
 Every provider (market data, AI reasoning) sits behind an abstract interface so it

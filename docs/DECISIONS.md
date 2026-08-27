@@ -2648,3 +2648,185 @@ round-tripping as inert text from both the client and the vendor side;
 filesystem-level zero persistence; the CORS allowlist including near-miss
 origins; loopback-only binding; per-request runtime isolation under sixteen
 concurrent turns; and the full inbound/outbound import-direction matrix.
+
+---
+
+## 2026-08-27 — Mission 10 Phase 3: the frontend meets the backend
+
+**Decision:** Connect the Phase 1 interface to the Phase 2 adapter over one
+typed HTTP call, and make the ORION core's SPEAKING state track the real
+playback of the real WAV Deepgram produced. Text is the only input; the
+microphone, audio-reactive visualization, streaming and interruption all
+remain deferred. Zero new dependencies.
+
+**Text first, because it is the only honest input today.** Mission 9 built
+the text-fallback path precisely so the interface could be driven on a
+machine with no microphone; Phase 2 exposed it at
+`POST /v1/voice/turn/text`. Wiring that first means the full chain —
+browser → HTTP → `VoiceTurnService` → `VoiceRuntime` → Deepgram TTS →
+`SynthesizedSpeech` → the browser's speakers — is proven end to end before
+`getUserMedia` adds a permission prompt, a capture format negotiation and a
+second failure surface on top of it. Phase 4 then only has to replace where
+the words come from.
+
+**SPEAKING means sound is coming out.** This is the one invariant the phase
+exists to establish, and it is enforced structurally rather than by
+convention. `playTurnAudio` calls `onStart` only when the element's
+`play()` promise resolves, and `useOrionTurn` dispatches `speaking` only
+from that callback; the arrival of the HTTP response dispatches `heard`,
+which deliberately does not touch `visualState`. THINKING therefore lasts
+exactly as long as the network call, and SPEAKING exactly as long as the
+audio. There is no `setTimeout` anywhere in the Phase 3 code. A mutation
+test confirmed the guarantee is real: moving the `speaking` dispatch to the
+moment the response arrived failed the suite with
+`expected 'speaking' to be 'thinking'`, and the file was then restored
+byte-identically (sha256 verified).
+
+**Native `fetch`, native `<audio>`, nothing else.** `axios` would add a
+dependency and an interceptor system for a single POST whose only
+non-trivial needs — timeout and cancellation — are `AbortController`. An
+audio library would add a decoder for a format the platform already plays.
+`AudioContext` was rejected for this phase specifically: it buys nothing
+until Phase 4 wants analysis, and it costs a user-gesture resume dance and
+a second copy of the decoded audio in memory. Dependencies added: **none**.
+
+**The API base is a constant, not an environment variable.** Phase 2's
+`run()` hardcodes `127.0.0.1` and defaults to port 8000 and exposes no host
+parameter, so there is nothing genuinely configurable to expose. A
+`NEXT_PUBLIC_*` variable would create a permanently client-visible
+configuration surface and would force `process.env` to be permitted in
+frontend source, weakening a source-safety rule that currently holds with
+no exceptions. `127.0.0.1` rather than `localhost` is deliberate: on
+IPv6-first systems `localhost` can resolve to `::1`, which the IPv4-bound
+backend is not listening on.
+
+**No CORS change was needed, and that was verified rather than assumed.**
+Phase 2 already allows `http://localhost:3000` and `http://127.0.0.1:3000`,
+which is exactly where `next dev` and `next start` serve. A live preflight
+from `http://localhost:3000` to `127.0.0.1:8000` returned
+`access-control-allow-origin: http://localhost:3000` with no
+`allow-credentials`, and a POST from `http://evil.example` received no
+grant header at all. **`src/orion/interface/` was not modified in this
+phase.**
+
+**The response is not trusted because it is ours.** `parseTurn` validates
+all seven fields by hand — type, emptiness, integer-ness, a browser-memory
+ceiling on `audio_bytes`, and a consistency check that the base64 length is
+exactly `4·ceil(bytes/3)` — and returns a camelCase object, so a value of
+type `OrionTurn` cannot exist without having been validated. A schema
+library was not added: Zod is ~14 kB of runtime for seven fields, and this
+validator is the only thing standing between a malformed response and the
+React tree, so being readable in one sitting matters more than being
+generic.
+
+**Audio is validated before it reaches the platform.** `decodeTurnAudio`
+checks the format against an allowlist, the media type against the labels
+that format may legitimately carry, the base64 alphabet and length, the
+decoded length against the server's own stated length, and the RIFF/WAVE
+magic — before any `Blob` exists. Crucially, **no server-controlled string
+ever becomes a MIME type or a URL**: `audio_media_type` is compared against
+the allowlist and then discarded, the `Blob` is built with a constant
+declared in `orion-audio.ts`, and the only URL used is the `blob:` URL the
+platform mints. The object URL is revoked in a `finally` on every path —
+success, media error, autoplay block, cancellation — and no URL is minted
+at all when validation fails.
+
+**Errors are frontend-authored.** Phase 2's `detail` strings are calm and
+credential-free by construction, and the frontend still never renders them.
+It classifies the *status code* into one of seven failures and shows a
+sentence written in `orion-api.ts`. That way nothing between the page and
+ORION — a proxy error page, a captive portal, a future gateway — can put
+foreign text on ORION's face, and the interface owns its own voice.
+`OrionApiError`/`OrionAudioError` take a failure key and no message
+parameter, so there is no argument through which an exception's text could
+be attached. Every failure ends at IDLE with the input immediately usable
+again, and the caret is handed back automatically.
+
+**Zero persistence, still.** No storage, no cookies, no cache, no file, no
+logging — `console` is banned outright in frontend source so a transcript
+can never reach a browser console that extensions and screen recordings can
+read. The command input sets `autoComplete="off"`, which closes the one
+remaining accidental-persistence vector: the browser's own form history.
+
+**Two Phase 1 rules were narrowed rather than dropped.** Phase 1's
+source-safety test banned `fetch` and audio APIs outright, which was correct
+for a frontend that talked to nothing. Phase 3 needs one of each, so the ban
+became a per-file allowlist — `fetch` only in `orion-api.ts`, media
+playback only in `orion-audio.ts` — plus an inverse assertion that those
+files really do use them. That is stronger than deleting the rules: a
+component that starts calling the backend directly still fails the build. It
+mirrors the Python side's `_ALLOWED_EXTRA_IMPORTS_BY_FILE` exactly. New bans
+were added at the same time for `AudioContext`, `AnalyserNode`,
+`createMediaElementSource`, `console.*`, `caches`, `document.write` and file
+pickers, so "no audio-reactive visualization yet" is a property of the source
+rather than a promise. Two Phase 1 *assertions* also had to change because
+they encoded facts Phase 3 deliberately made false — the disclosure line no
+longer claims "no network", and the "zero inputs, zero forms" check became
+"exactly one input, exactly one form, and still no list, table, canvas or
+timestamp", which keeps it doing the job it was written for.
+
+**Phase 1's visual design is intact.** `OrionCore.tsx`, its stylesheet,
+`orion-visual-state.ts`, `core-geometry.ts` and `use-orion-tempo.ts` are
+byte-identical. The command line reuses the hairline/blurred-glass language
+the development controls already had, the microphone sits beside it as the
+path Phase 4 will make real, and the last exchange occupies two lines of the
+readout that already existed — no chat log, no bubbles, no timestamps, no
+sidebar.
+
+**The Phase 4 seam is in place and unused.** `playTurnAudio`'s `onStart`
+receives the live `HTMLAudioElement`. Phase 3 ignores the argument; Phase 4
+can hand it to `createMediaElementSource` and drive a real `AnalyserNode`
+without changing a signature or a caller. `OrionCore`'s `amplitude` prop is
+untouched and still falls back to a fixed per-state constant. **Nothing
+fabricates amplitude, and `Math.random` remains banned frontend-wide.**
+
+**Live verification status — stated precisely.** There is no
+`DEEPGRAM_API_KEY` and no `.env` on this machine, so **a successful
+vendor-backed turn was never observed and is not claimed**. What *was*
+verified live, against the real backend on `127.0.0.1:8000` and the real
+production frontend on `:3000`: the page serves (HTTP 200) with the command
+surface in the markup; the CORS preflight succeeds for the page's origin and
+is refused for a hostile one; a POST with no credential returns a clean 503
+`voice_unavailable` with CORS headers; and a POST with a deliberately wrong
+credential performs a **genuine Deepgram round trip**, receives 401, and
+returns a clean 502 `synthesis_failed` carrying no credential, no vendor
+name and no traceback. Successful decode-and-play was proven only against a
+locally generated, genuine RIFF/WAVE file through the real module code.
+**Browser automation was unavailable this session, so no page was driven in
+a real browser**: desktop/mobile layout, actual audible playback and the
+visual state transitions on screen remain unverified by eye and are the
+founder's to confirm.
+
+**Explicitly deferred:** microphone capture (`getUserMedia`/`MediaRecorder`),
+audio-reactive visualization (`AudioContext`/`AnalyserNode`), streaming
+(WebSocket/SSE), interruption and barge-in, conversation history, the
+dynamic-information system, any Mission 0–8 orchestration, authentication,
+and any deployment beyond loopback.
+
+**Files added:** `frontend/src/lib/{orion-api.ts, orion-audio.ts}`,
+`frontend/src/hooks/use-orion-turn.ts`,
+`frontend/tests/{orion-api.test.ts, orion-audio.test.ts,
+orion-turn.test.tsx}`, `frontend/tests/support/audio-harness.ts`.
+**Files modified:** `frontend/src/components/OrionInterface.tsx` and its
+stylesheet (the command surface), `frontend/tests/orion-interface.test.tsx`
+(two assertions that encoded now-false facts),
+`frontend/tests/source-safety.test.ts` (narrowed bans plus new ones),
+`README.md`. **No Python source, no Phase 2 file and no Phase 1 visual
+module was touched.**
+
+**Verification:** frontend — 162 tests passing across 7 files (34 before
+this phase, 128 added), `npm run typecheck`, `npm run lint` and a clean
+`npm run build` all green. Backend — `pytest` 1035 passed,
+`pytest --collect-only` 1035, `pytest tests/interface` 112,
+`ruff check .`, `ruff format --check .` and `mypy . --strict` all clean and
+identical to the pre-Phase-3 baseline. An independent adversarial probe
+sharing no code with the test suite (its own WAV, base64, DOM and fetch
+stub) ran 29 checks with zero failures, including 13 hostile audio payloads
+and 16 malformed response shapes all refused, `__proto__`/`constructor`/
+`toString`/`valueOf` rejected as format keys, no prototype pollution, object
+URLs revoked on every outcome, and no credential, vendor name or server path
+in any user-visible string. The compiled client bundle was searched and
+contains exactly one origin — `http://127.0.0.1:8000` — and zero
+occurrences of `deepgram`, `anthropic`, `api_key`, `Authorization`,
+`Bearer`, `localStorage`, `sessionStorage`, `indexedDB`, `document.cookie`,
+`getUserMedia`, `MediaRecorder`, `AnalyserNode` or `AudioContext`.
