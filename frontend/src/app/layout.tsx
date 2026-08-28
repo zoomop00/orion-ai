@@ -14,7 +14,7 @@ export const viewport: Viewport = {
   // The interface paints edge to edge, so it has to opt into the notch area and
   // then respect it with env(safe-area-inset-*) in the layout stylesheet.
   viewportFit: "cover",
-  themeColor: "#04060b",
+  themeColor: "#040807",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

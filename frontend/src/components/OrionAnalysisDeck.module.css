@@ -30,7 +30,7 @@
  */
 
 .deck {
-  --accent-rgb: var(--orion-accent-rgb, 104 206 240);
+  --accent-rgb: var(--orion-accent-rgb, 46 172 118);
 
   display: flex;
   flex-direction: column;
@@ -62,14 +62,14 @@
   justify-content: center;
   gap: clamp(8px, 1.4vw, 14px);
   margin: 0;
-  color: rgba(196, 220, 244, 0.44);
+  color: rgba(178, 214, 194, 0.44);
   font-size: clamp(9.5px, 0.85vw, 11px);
   letter-spacing: 0.18em;
   text-transform: uppercase;
 }
 
 .symbol {
-  color: rgba(232, 244, 255, 0.9);
+  color: rgba(224, 244, 232, 0.9);
   font-weight: 600;
   letter-spacing: 0.3em;
 }
@@ -81,14 +81,14 @@
 }
 
 .price {
-  color: rgba(232, 244, 255, 0.78);
+  color: rgba(224, 244, 232, 0.78);
   font-weight: 500;
   letter-spacing: 0.12em;
 }
 
 .instant,
 .bars {
-  color: rgba(196, 220, 244, 0.34);
+  color: rgba(178, 214, 194, 0.34);
   letter-spacing: 0.14em;
 }
 
@@ -96,7 +96,7 @@
 .divider {
   width: 14px;
   height: 1px;
-  background: rgba(150, 200, 235, 0.22);
+  background: rgba(112, 186, 152, 0.22);
 }
 
 /* ------------------------------------------------------------ verdict --- */
@@ -113,8 +113,8 @@
   gap: clamp(10px, 1.6vh, 16px);
   min-width: 0;
   padding: clamp(16px, 2.4vh, 26px) 0;
-  border-top: 1px solid rgba(150, 200, 235, 0.1);
-  border-bottom: 1px solid rgba(150, 200, 235, 0.1);
+  border-top: 1px solid rgba(112, 186, 152, 0.1);
+  border-bottom: 1px solid rgba(112, 186, 152, 0.1);
   text-align: center;
 }
 
@@ -128,7 +128,7 @@
 }
 
 .actionWord {
-  color: rgba(240, 250, 255, 0.96);
+  color: rgba(236, 252, 242, 0.96);
   font-size: clamp(26px, 4.4vw, 46px);
   font-weight: 200;
   letter-spacing: 0.06em;
@@ -148,7 +148,7 @@
 }
 
 .bias {
-  color: rgba(196, 220, 244, 0.42);
+  color: rgba(178, 214, 194, 0.42);
   font-size: clamp(9.5px, 0.85vw, 11px);
   font-weight: 500;
   letter-spacing: 0.28em;
@@ -159,7 +159,7 @@
   max-width: 52ch;
   min-width: 0;
   margin: 0;
-  color: rgba(226, 240, 255, 0.76);
+  color: rgba(214, 238, 224, 0.76);
   font-size: clamp(13px, 1.35vw, 15.5px);
   font-weight: 300;
   letter-spacing: 0.005em;
@@ -187,7 +187,7 @@
 }
 
 .gaugeLabel {
-  color: rgba(196, 220, 244, 0.34);
+  color: rgba(178, 214, 194, 0.34);
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.22em;
@@ -200,7 +200,7 @@
   height: 2px;
   overflow: hidden;
   border-radius: 2px;
-  background: rgba(150, 200, 235, 0.14);
+  background: rgba(112, 186, 152, 0.14);
 }
 
 .meterFill {
@@ -218,14 +218,14 @@
 }
 
 .gaugeValue {
-  color: rgba(232, 244, 255, 0.84);
+  color: rgba(224, 244, 232, 0.84);
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.1em;
 }
 
 .riskLevel {
-  color: rgba(232, 244, 255, 0.84);
+  color: rgba(224, 244, 232, 0.84);
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.16em;
@@ -261,9 +261,9 @@
 .code {
   min-width: 0;
   padding: 4px 10px;
-  border: 1px solid rgba(150, 200, 235, 0.14);
+  border: 1px solid rgba(112, 186, 152, 0.14);
   border-radius: 999px;
-  color: rgba(196, 220, 244, 0.5);
+  color: rgba(178, 214, 194, 0.5);
   font-size: 9.5px;
   font-weight: 500;
   letter-spacing: 0.14em;
@@ -297,7 +297,7 @@
   gap: 12px;
   min-width: 0;
   padding-top: 12px;
-  border-top: 1px solid rgba(150, 200, 235, 0.12);
+  border-top: 1px solid rgba(112, 186, 152, 0.12);
   animation: panelRise 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -342,7 +342,7 @@
 }
 
 .readingLabel {
-  color: rgba(196, 220, 244, 0.4);
+  color: rgba(178, 214, 194, 0.4);
   font-size: 10.5px;
   font-weight: 500;
   letter-spacing: 0.1em;
@@ -358,14 +358,14 @@
 }
 
 .value {
-  color: rgba(232, 244, 255, 0.88);
+  color: rgba(224, 244, 232, 0.88);
   font-size: 13px;
   font-weight: 400;
   letter-spacing: 0.03em;
 }
 
 .hint {
-  color: rgba(196, 220, 244, 0.26);
+  color: rgba(178, 214, 194, 0.26);
   font-size: 9px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -377,7 +377,7 @@
  * indistinguishable from a row this build forgot to render.
  */
 .reading[data-available="false"] .value {
-  color: rgba(196, 220, 244, 0.3);
+  color: rgba(178, 214, 194, 0.3);
 }
 
 /* -------------------------------------------------------- capabilities -- */
@@ -390,7 +390,7 @@
 }
 
 .capabilityLabel {
-  color: rgba(226, 240, 255, 0.72);
+  color: rgba(214, 238, 224, 0.72);
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.14em;
@@ -405,9 +405,9 @@
 .capabilityStatus {
   align-self: center;
   padding: 3px 8px;
-  border: 1px solid rgba(150, 200, 235, 0.16);
+  border: 1px solid rgba(112, 186, 152, 0.16);
   border-radius: 999px;
-  color: rgba(196, 220, 244, 0.44);
+  color: rgba(178, 214, 194, 0.44);
   font-size: 8.5px;
   font-weight: 600;
   letter-spacing: 0.18em;
@@ -417,7 +417,7 @@
 .capabilityDetail {
   grid-column: 1 / -1;
   min-width: 0;
-  color: rgba(196, 220, 244, 0.36);
+  color: rgba(178, 214, 194, 0.36);
   font-size: 10.5px;
   font-weight: 400;
   letter-spacing: 0.02em;
@@ -429,7 +429,7 @@
 
 .riskHeadline {
   margin: 0;
-  color: rgba(232, 244, 255, 0.86);
+  color: rgba(224, 244, 232, 0.86);
   font-size: 15px;
   font-weight: 300;
   letter-spacing: 0.1em;
@@ -438,7 +438,7 @@
 
 /* No verdict exists, so the headline is stated as quietly as the reason. */
 .panel[data-available="false"] .riskHeadline {
-  color: rgba(196, 220, 244, 0.42);
+  color: rgba(178, 214, 194, 0.42);
   font-size: 12px;
   letter-spacing: 0.18em;
 }
@@ -446,7 +446,7 @@
 .riskExplanation {
   min-width: 0;
   margin: 0;
-  color: rgba(196, 220, 244, 0.4);
+  color: rgba(178, 214, 194, 0.4);
   font-size: 10.5px;
   font-weight: 400;
   letter-spacing: 0.02em;
@@ -459,7 +459,7 @@
   flex-wrap: wrap;
   gap: 8px;
   margin: 0;
-  color: rgba(196, 220, 244, 0.34);
+  color: rgba(178, 214, 194, 0.34);
   font-size: 10px;
   letter-spacing: 0.1em;
 }

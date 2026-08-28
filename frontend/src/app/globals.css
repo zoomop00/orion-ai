@@ -7,8 +7,8 @@
  */
 
 :root {
-  --orion-void: #04060b;
-  --orion-ink: #e8f2ff;
+  --orion-void: #040807;
+  --orion-ink: #e4f3ea;
 
   /*
    * A system stack rather than a webfont. A downloaded face would add a network
@@ -53,5 +53,5 @@ button {
 }
 
 ::selection {
-  background: rgba(120, 210, 245, 0.28);
+  background: rgba(52, 190, 132, 0.3);
 }
