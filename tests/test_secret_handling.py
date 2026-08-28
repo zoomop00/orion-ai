@@ -238,10 +238,11 @@ def _executable_code(source_path: Path) -> str:
 def test_the_source_unwraps_a_secret_only_at_the_two_composition_roots() -> None:
     """`get_secret_value()` is a deliberate, countable act.
 
-    Two call sites, both handing the value straight to the object that needs
-    it. A third appearing anywhere in `src/` means a credential started
-    travelling as a plain string again, which is the whole thing this change
-    prevents.
+    Four call sites, each handing the value straight to the object that needs
+    it: market data and reasoning, plus the calendar provider and the Macro
+    Analyst when this deployment has a Finnhub credential, and Deepgram in the
+    HTTP app. One appearing anywhere else in `src/` means a credential started
+    travelling as a plain string again, which is the whole thing this prevents.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "orion"
     callers: dict[str, int] = {}
@@ -254,4 +255,4 @@ def test_the_source_unwraps_a_secret_only_at_the_two_composition_roots() -> None
         if count:
             callers[path.relative_to(src).as_posix()] = count
 
-    assert callers == {"interface/app.py": 1, "orchestrator/wiring.py": 2}
+    assert callers == {"interface/app.py": 1, "orchestrator/wiring.py": 4}

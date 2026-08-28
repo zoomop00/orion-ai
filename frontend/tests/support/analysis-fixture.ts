@@ -48,6 +48,11 @@ export function analysisFixture(overrides: Partial<OrionAnalysis> = {}): OrionAn
     macro: {
       status: "not_connected",
       detail: "No macro source is connected in this build.",
+      policyPressure: null,
+      marketRelevance: null,
+      confidence: null,
+      rationale: null,
+      eventCount: null,
     },
     risk: {
       availability: "no_portfolio_store",

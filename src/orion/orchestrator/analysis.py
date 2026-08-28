@@ -49,9 +49,10 @@ lifetime of the analysis.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from orion.analysis.evidence import Evidence, build_evidence
+from orion.analysts.provider_base import MacroAnalystProvider
 from orion.data.models import Timeframe
 from orion.data.provider_base import MarketDataProvider
 from orion.data.validation import validate_snapshot
@@ -61,12 +62,16 @@ from orion.orchestrator.schemas import (
     AnalysisReport,
     Intent,
     IntentKind,
+    MacroAvailability,
+    MacroPanel,
     NotConnectedPanel,
     RiskAvailability,
     RiskPanel,
 )
 from orion.paper.store import PortfolioStore, PortfolioStoreError
 from orion.reasoning.provider_base import ReasoningProvider
+from orion.research.provider_base import EconomicCalendarProvider
+from orion.research.validation import validate_calendar_snapshot
 from orion.risk.guardian import review
 from orion.risk.policy import RiskPolicy
 from orion.risk.portfolio import mark_to_market
@@ -88,6 +93,22 @@ NEWS_NOT_CONNECTED = (
 MACRO_NOT_CONNECTED = (
     "No macro source is connected in this build, so ORION has nothing to report here."
 )
+
+# The remaining `MacroPanel.detail` sentences. Fixed strings from this module,
+# exactly like the two above: nothing here is ever composed at runtime from a
+# vendor response, an exception message or an event title.
+MACRO_AVAILABLE = "Macro context from the economic calendar, assessed by the Macro Analyst."
+MACRO_UNAVAILABLE = (
+    "ORION could not read the economic calendar for this analysis, so there is no macro context."
+)
+MACRO_NO_EVENTS = "The economic calendar returned no events in this window."
+
+# How far either side of `now` the calendar is read. Two days back catches the
+# prints a market is still digesting; five forward is the horizon a session is
+# actually positioning for. Deliberately constants rather than settings: this
+# is what "macro context" means in this build, not a per-deployment knob.
+MACRO_LOOKBACK = timedelta(days=2)
+MACRO_LOOKAHEAD = timedelta(days=5)
 
 
 class AnalysisError(RuntimeError):
@@ -182,6 +203,55 @@ def _risk_panel(
     )
 
 
+def _macro_panel(
+    *,
+    calendar_provider: EconomicCalendarProvider | None,
+    macro_analyst: MacroAnalystProvider | None,
+    now: datetime,
+) -> MacroPanel:
+    """Read the economic calendar and assess it, or say honestly why not.
+
+    FAIL-SOFT, AND DELIBERATELY UNLIKE EVERY OTHER STAGE HERE. The module
+    docstring's fail-closed rule exists because market data, reasoning, the
+    decision engine and the Risk Guardian each produce something the
+    *proposal* depends on -- a partial one of those is a wrong one. Macro is
+    context for the person reading the report and nothing downstream consumes
+    it, so a calendar outage must not destroy an otherwise complete analysis.
+    It must not invent one either, which is what `MACRO_UNAVAILABLE` is for:
+    the failure is reported as a state, never smoothed into silence and never
+    filled in with a neutral-looking reading.
+
+    The exception is caught broadly and discarded without being read.
+    `EconomicCalendarProviderError` and `MacroAnalystProviderError` carry
+    messages that may name a vendor or a URL -- `orion.http_errors` exists
+    because one of them once embedded an API key in one -- and none of that
+    may reach a field this report will serialise.
+    """
+    if calendar_provider is None or macro_analyst is None:
+        return MacroPanel(availability=MacroAvailability.NOT_CONNECTED, detail=MACRO_NOT_CONNECTED)
+
+    try:
+        snapshot = calendar_provider.fetch_calendar(now - MACRO_LOOKBACK, now + MACRO_LOOKAHEAD)
+        # The same quality gate Mission 7 built. A snapshot with a blocking
+        # issue is not handed to the analyst: assessing data ORION already
+        # knows is bad would produce a confident opinion about nothing.
+        if not validate_calendar_snapshot(snapshot, now=now).is_valid:
+            return MacroPanel(
+                availability=MacroAvailability.MACRO_UNAVAILABLE, detail=MACRO_UNAVAILABLE
+            )
+        if not snapshot.events:
+            return MacroPanel(availability=MacroAvailability.NO_EVENTS, detail=MACRO_NO_EVENTS)
+        opinion = macro_analyst.analyze(snapshot)
+    except Exception:
+        return MacroPanel(
+            availability=MacroAvailability.MACRO_UNAVAILABLE, detail=MACRO_UNAVAILABLE
+        )
+
+    return MacroPanel(
+        availability=MacroAvailability.AVAILABLE, detail=MACRO_AVAILABLE, opinion=opinion
+    )
+
+
 def run_analysis(
     *,
     intent: Intent,
@@ -191,6 +261,8 @@ def run_analysis(
     portfolio_store: PortfolioStore | None,
     now: datetime,
     output_size: int = DEFAULT_OUTPUT_SIZE,
+    calendar_provider: EconomicCalendarProvider | None = None,
+    macro_analyst: MacroAnalystProvider | None = None,
 ) -> AnalysisReport:
     """Run one complete live analysis for `intent` and return what it found.
 
@@ -251,6 +323,11 @@ def run_analysis(
         now=now,
     )
 
+    # Last, and after the decision exists: macro is context attached to a
+    # finished analysis, never an input to one. Running it here rather than
+    # earlier makes that ordering structural instead of a convention.
+    macro = _macro_panel(calendar_provider=calendar_provider, macro_analyst=macro_analyst, now=now)
+
     return AnalysisReport(
         analysis_id=analysis_id,
         symbol=symbol,
@@ -262,7 +339,7 @@ def run_analysis(
         decision=decision,
         risk=risk,
         news=NotConnectedPanel(detail=NEWS_NOT_CONNECTED),
-        macro=NotConnectedPanel(detail=MACRO_NOT_CONNECTED),
+        macro=macro,
     )
 
 
@@ -286,12 +363,19 @@ class AnalysisService:
         policy: RiskPolicy,
         portfolio_store: PortfolioStore | None = None,
         output_size: int = DEFAULT_OUTPUT_SIZE,
+        calendar_provider: EconomicCalendarProvider | None = None,
+        macro_analyst: MacroAnalystProvider | None = None,
     ) -> None:
         self._market_data = market_data
         self._reasoning_provider = reasoning_provider
         self._policy = policy
         self._portfolio_store = portfolio_store
         self._output_size = output_size
+        # Both default to None, so every existing caller keeps the exact
+        # behaviour it had: macro reports NOT_CONNECTED and no second vendor
+        # is contacted.
+        self._calendar_provider = calendar_provider
+        self._macro_analyst = macro_analyst
 
     def run(self, intent: Intent, *, now: datetime) -> AnalysisReport:
         return run_analysis(
@@ -302,4 +386,6 @@ class AnalysisService:
             portfolio_store=self._portfolio_store,
             now=now,
             output_size=self._output_size,
+            calendar_provider=self._calendar_provider,
+            macro_analyst=self._macro_analyst,
         )

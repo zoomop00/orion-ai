@@ -50,6 +50,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from orion.analysis.evidence import Evidence
+from orion.analysts.schemas import MacroAnalystOutput
 from orion.data.models import Timeframe
 from orion.decision.schemas import ProposedDecision
 from orion.reasoning.schemas import ReasoningOutput
@@ -129,6 +130,63 @@ class NotConnectedPanel(BaseModel):
     detail: str = Field(min_length=1, max_length=200)
 
 
+class MacroAvailability(StrEnum):
+    """Why a `MacroPanel` does or does not carry an opinion.
+
+    Every member is a real, reachable condition. `NOT_CONNECTED` is this
+    deployment having no economic-calendar credential -- the state every build
+    before this one was permanently in. The other two are genuine runtime
+    outcomes, and neither is ever answered by inventing macro context.
+    """
+
+    AVAILABLE = "available"
+    NOT_CONNECTED = "not_connected"
+    MACRO_UNAVAILABLE = "macro_unavailable"
+    NO_EVENTS = "no_events"
+
+
+class MacroPanel(BaseModel):
+    """The Macro Analyst's opinion, or an explicit reason there isn't one.
+
+    Shaped exactly like `RiskPanel`, and for the same reason: a caller can
+    tell "ORION looked and found nothing" apart from "ORION could not look"
+    apart from "this build cannot look at all", and no state is answered with
+    a fabricated read.
+
+    `detail` stays a fixed sentence from an `orion.orchestrator.analysis`
+    module constant, never composed at runtime -- the property
+    `NotConnectedPanel` had and this type inherits rather than drops, so a
+    client that only ever read `status`/`detail` sees exactly what it always
+    did while this deployment has no calendar credential.
+
+    ADVISORY ONLY, AND STRUCTURALLY SO. `opinion` is a `MacroAnalystOutput`:
+    a policy-pressure reading, a relevance, a confidence and a rationale,
+    stamped with the model, prompt version and the fingerprint of the exact
+    calendar snapshot it was computed from. Nothing downstream reads it.
+    `orion.decision` never sees it, the Risk Guardian never sees it, and it
+    cannot reach `ProposedDecision` -- macro context informs the person
+    reading the report, never the machine proposing the trade.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    availability: MacroAvailability
+    detail: str = Field(min_length=1, max_length=200)
+    opinion: MacroAnalystOutput | None = None
+
+    @model_validator(mode="after")
+    def _check_macro_invariants(self) -> MacroPanel:
+        available = self.availability is MacroAvailability.AVAILABLE
+        if available and self.opinion is None:
+            raise ValueError("availability is AVAILABLE but no opinion is present")
+        if not available and self.opinion is not None:
+            raise ValueError(
+                f"availability is {self.availability.value!r} but an opinion is present; "
+                "an opinion may only accompany AVAILABLE"
+            )
+        return self
+
+
 class RiskAvailability(StrEnum):
     """Why a `RiskPanel` does or does not carry a verdict.
 
@@ -203,7 +261,7 @@ class AnalysisReport(BaseModel):
 
     risk: RiskPanel
     news: NotConnectedPanel
-    macro: NotConnectedPanel
+    macro: MacroPanel
 
     @model_validator(mode="after")
     def _check_report_invariants(self) -> AnalysisReport:

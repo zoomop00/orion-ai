@@ -94,8 +94,10 @@ DISALLOWED_ORION_SUBPACKAGES = {
     "orion.memory",
     "orion.backtest",
     "orion.reflection",
-    # Deferred out of Phase 5.1's approved scope. Present here so wiring the
-    # Macro Analyst in is a deliberate edit to this list, not a quiet import.
+    # Wired in deliberately, per the note this comment replaces: the Macro
+    # Analyst is now connected, so `orion.analysts`/`orion.research` are
+    # reachable from three named files and nowhere else. They stay on this
+    # list precisely so the carve-out below has to name them.
     "orion.analysts",
     "orion.research",
 }
@@ -103,7 +105,26 @@ DISALLOWED_ORION_SUBPACKAGES = {
 # The per-file carve-out. `wiring.py` is the one place allowed to read
 # `Settings`, because something has to and `orion.interface` may not.
 _ALLOWED_EXTRA_ORION_IMPORTS_BY_FILE: dict[str, set[str]] = {
-    "wiring.py": {"orion.config"},
+    # `wiring.py` is the one place allowed to read `Settings`, and now also
+    # the one place that constructs the calendar provider and the Macro
+    # Analyst from it.
+    # Named module by module, not package by package: `wiring.py` may reach
+    # the two concrete vendor providers and nothing else in those packages.
+    "wiring.py": {
+        "orion.config",
+        "orion.analysts.claude_macro_provider",
+        "orion.research.finnhub_provider",
+    },
+    # `analysis.py` calls the two ABCs it is handed and re-uses Mission 7's
+    # quality gate -- never a concrete provider, so it cannot construct a
+    # vendor client of its own.
+    "analysis.py": {
+        "orion.analysts.provider_base",
+        "orion.research.provider_base",
+        "orion.research.validation",
+    },
+    # `schemas.py` holds the analyst's output on `MacroPanel`. Schemas only.
+    "schemas.py": {"orion.analysts.schemas"},
 }
 
 DANGEROUS_CALL_NAMES = {"exec", "eval", "compile"}

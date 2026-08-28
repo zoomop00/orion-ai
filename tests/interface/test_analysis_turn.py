@@ -34,6 +34,7 @@ from orion.interface.service import VoiceTurnService
 from orion.orchestrator.analysis import AnalysisService
 from orion.orchestrator.schemas import AnalysisReport, Intent
 from orion.reasoning.provider_base import ReasoningProviderError
+from orion.research.provider_base import EconomicCalendarProviderError
 from orion.risk.policy import KillSwitchState, RiskPolicy
 from orion.risk.portfolio import PortfolioState
 from orion.risk.schemas import ControlStatus
@@ -44,6 +45,7 @@ from tests.orchestrator.conftest import (
     make_bars,
     make_portfolio,
 )
+from tests.orchestrator.test_macro import FakeCalendarProvider, FakeMacroAnalyst
 
 from .conftest import (
     DEEPGRAM_LISTEN_URL,
@@ -104,12 +106,16 @@ def build_analysis_service(
     market_data: MarketDataProvider | None = None,
     reasoning_provider: FakeReasoningProvider | None = None,
     portfolio_store: FakePortfolioStore | None = None,
+    calendar_provider: FakeCalendarProvider | None = None,
+    macro_analyst: FakeMacroAnalyst | None = None,
 ) -> AnalysisService:
     return AnalysisService(
         market_data=market_data or LiveFakeMarketDataProvider(),
         reasoning_provider=reasoning_provider or FakeReasoningProvider(),
         policy=RiskPolicy(kill_switch=KillSwitchState.DISENGAGED),
         portfolio_store=portfolio_store,
+        calendar_provider=calendar_provider,
+        macro_analyst=macro_analyst,
     )
 
 
@@ -219,16 +225,87 @@ class TestAnAnalysisCrossesTheWire:
 
 
 class TestAbsenceIsReportedNeverFilledIn:
-    def test_news_and_macro_are_always_explicitly_not_connected(
-        self, analysing: TestClient
-    ) -> None:
+    def test_news_is_always_explicitly_not_connected(self, analysing: TestClient) -> None:
         analysis = analysing.post(TEXT_URL, json={"text": ANALYZE}).json()["analysis"]
 
-        for panel in (analysis["news"], analysis["macro"]):
-            assert panel["status"] == "not_connected"
-            assert set(panel) == {"status", "detail"}
-            assert isinstance(panel["detail"], str)
-            assert not any(char.isdigit() for char in panel["detail"])
+        news = analysis["news"]
+        assert news["status"] == "not_connected"
+        assert set(news) == {"status", "detail"}
+        assert isinstance(news["detail"], str)
+        assert not any(char.isdigit() for char in news["detail"])
+
+    def test_macro_reports_not_connected_and_carries_no_read(self, analysing: TestClient) -> None:
+        """Macro can now carry a reading, so the assertion sharpens rather
+        than relaxes: with no calendar wired, every payload field is null."""
+        analysis = analysing.post(TEXT_URL, json={"text": ANALYZE}).json()["analysis"]
+
+        macro = analysis["macro"]
+        assert macro["status"] == "not_connected"
+        assert isinstance(macro["detail"], str)
+        assert not any(char.isdigit() for char in macro["detail"])
+        for field in (
+            "policy_pressure",
+            "market_relevance",
+            "confidence",
+            "rationale",
+            "event_count",
+        ):
+            assert macro[field] is None
+
+    def test_a_macro_read_crosses_the_wire_without_its_provenance(
+        self, deepgram: respx.MockRouter
+    ) -> None:
+        """The capability, end to end, and the allowlist that bounds it.
+
+        Four values and a count reach the browser. The model identifier, the
+        prompt version, the input fingerprint and the 64-character per-event
+        ids all exist on `MacroAnalystOutput` and all stop at
+        `_to_macro_summary` -- the same discipline reasoning provenance is
+        already held to.
+        """
+        service = build_analysis_service(
+            calendar_provider=FakeCalendarProvider(),
+            macro_analyst=FakeMacroAnalyst(),
+        )
+
+        analysis = (
+            analysing_client(service).post(TEXT_URL, json={"text": ANALYZE}).json()["analysis"]
+        )
+
+        macro = analysis["macro"]
+        assert macro["status"] == "available"
+        assert macro["policy_pressure"] == "tightening_pressure"
+        assert macro["market_relevance"] == "high"
+        assert macro["confidence"] == pytest.approx(0.72)
+        assert "above estimate" in macro["rationale"]
+        assert macro["event_count"] == 1
+
+        blob = json.dumps(analysis)
+        assert "fake-model" not in blob
+        assert "fake-v1" not in blob
+        assert "b" * 64 not in blob
+        assert "a" * 64 not in blob
+        assert "input_fingerprint" not in blob
+        assert "key_event_assessments" not in blob
+
+    def test_a_calendar_outage_still_returns_a_complete_analysis(
+        self, deepgram: respx.MockRouter
+    ) -> None:
+        service = build_analysis_service(
+            calendar_provider=FakeCalendarProvider(
+                error=EconomicCalendarProviderError("finnhub 500")
+            ),
+            macro_analyst=FakeMacroAnalyst(),
+        )
+
+        analysis = (
+            analysing_client(service).post(TEXT_URL, json={"text": ANALYZE}).json()["analysis"]
+        )
+
+        assert analysis["macro"]["status"] == "macro_unavailable"
+        assert analysis["macro"]["rationale"] is None
+        assert analysis["conclusion"] is not None
+        assert "finnhub" not in json.dumps(analysis).lower()
 
     def test_a_missing_momentum_reading_stays_missing(self, deepgram: respx.MockRouter) -> None:
         class ShortHistory(LiveFakeMarketDataProvider):

@@ -37,6 +37,7 @@ from orion.orchestrator.schemas import (
     CapabilityStatus,
     Intent,
     IntentKind,
+    MacroAvailability,
     RiskAvailability,
 )
 from orion.paper.store import PortfolioStoreError
@@ -101,7 +102,7 @@ class TestTheHappyPath:
         assert report.decision.action is Action.BUY
         assert report.risk.availability is RiskAvailability.AVAILABLE
         assert report.news.status is CapabilityStatus.NOT_CONNECTED
-        assert report.macro.status is CapabilityStatus.NOT_CONNECTED
+        assert report.macro.availability is MacroAvailability.NOT_CONNECTED
 
     def test_asks_the_data_provider_for_exactly_what_the_intent_named(
         self, permissive_policy: RiskPolicy
@@ -346,23 +347,32 @@ class TestAbsentCapabilities:
         assert report.news.detail == NEWS_NOT_CONNECTED
         assert "no news source is connected" in report.news.detail.lower()
 
-    def test_macro_is_always_reported_as_not_connected(self, permissive_policy: RiskPolicy) -> None:
+    def test_macro_is_not_connected_when_no_calendar_is_wired(
+        self, permissive_policy: RiskPolicy
+    ) -> None:
         report = analyse(policy=permissive_policy)
 
-        assert report.macro.status is CapabilityStatus.NOT_CONNECTED
+        assert report.macro.availability is MacroAvailability.NOT_CONNECTED
         assert report.macro.detail == MACRO_NOT_CONNECTED
+        assert report.macro.opinion is None
 
     def test_the_absent_panels_carry_no_data_of_any_kind(
         self, permissive_policy: RiskPolicy
     ) -> None:
         report = analyse(policy=permissive_policy)
 
-        for panel in (report.news, report.macro):
-            dumped = panel.model_dump()
-            assert set(dumped) == {"status", "detail"}
-            assert isinstance(dumped["detail"], str)
-            # No headline, no number, no timestamp, nowhere to put one.
-            assert not any(char.isdigit() for char in dumped["detail"])
+        news = report.news.model_dump()
+        assert set(news) == {"status", "detail"}
+        assert isinstance(news["detail"], str)
+        # No headline, no number, no timestamp, nowhere to put one.
+        assert not any(char.isdigit() for char in news["detail"])
+
+        # Macro now *has* somewhere to put a reading, so the guarantee is
+        # sharper rather than weaker: with nothing wired, that place is empty.
+        macro = report.macro.model_dump()
+        assert set(macro) == {"availability", "detail", "opinion"}
+        assert macro["opinion"] is None
+        assert not any(char.isdigit() for char in macro["detail"])
 
 
 class TestAnalysisService:

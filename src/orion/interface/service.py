@@ -85,6 +85,7 @@ from orion.interface.schemas import (
     AnalysisSummary,
     CapabilitySummary,
     ConclusionSummary,
+    MacroSummary,
     MomentumSummary,
     RiskSummary,
     StructureSummary,
@@ -410,6 +411,29 @@ class VoiceTurnService:
         return _to_response(result, state=runtime.state.value, analysis=analysis)
 
 
+def _to_macro_summary(report: AnalysisReport) -> MacroSummary:
+    """Reduce the macro panel to the five client-visible values.
+
+    Named field by field like everything else here. The per-event
+    assessments, their ids, the input fingerprint, the prompt version and the
+    model identifier stay on `MacroAnalystOutput` and stop at this function --
+    a browser learns what ORION concluded about the calendar, never which
+    model concluded it or from exactly which bytes.
+    """
+    opinion = report.macro.opinion
+    if opinion is None:
+        return MacroSummary(status=report.macro.availability.value, detail=report.macro.detail)
+    return MacroSummary(
+        status=report.macro.availability.value,
+        detail=report.macro.detail,
+        policy_pressure=opinion.policy_pressure.value,
+        market_relevance=opinion.market_relevance.value,
+        confidence=opinion.confidence,
+        rationale=opinion.rationale,
+        event_count=len(opinion.key_event_assessments),
+    )
+
+
 def _to_analysis_summary(report: AnalysisReport) -> AnalysisSummary:
     """Reduce a full `AnalysisReport` to the client-visible allowlist.
 
@@ -467,7 +491,7 @@ def _to_analysis_summary(report: AnalysisReport) -> AnalysisSummary:
             ema_slow_length=indicators.ema_slow_length,
         ),
         news=CapabilitySummary(detail=report.news.detail),
-        macro=CapabilitySummary(detail=report.macro.detail),
+        macro=_to_macro_summary(report),
         risk=RiskSummary(
             availability=report.risk.availability.value,
             outcome=verdict.outcome.value if verdict is not None else None,

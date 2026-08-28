@@ -40,6 +40,10 @@ import type {
   OrionAction,
   OrionAnalysis,
   OrionDirection,
+  OrionMacro,
+  OrionMacroStatus,
+  OrionMarketRelevance,
+  OrionPolicyPressure,
   OrionRiskAvailability,
   OrionRiskLevel,
   OrionRiskOutcome,
@@ -64,6 +68,71 @@ export const NOT_CONNECTED_LABEL = "NOT CONNECTED";
 
 /** Shown instead of a risk verdict when the guardian was never consulted. */
 export const RISK_UNAVAILABLE_LABEL = "NOT AVAILABLE";
+
+/**
+ * How each macro status reads on screen.
+ *
+ * `available` is deliberately absent: when there *is* a read, the status line
+ * is built from the read itself rather than from a constant, because "MACRO
+ * AVAILABLE" tells the user nothing they cannot see from the sentence
+ * underneath it.
+ */
+const MACRO_STATUS_LABELS: Readonly<Record<Exclude<OrionMacroStatus, "available">, string>> = {
+  not_connected: NOT_CONNECTED_LABEL,
+  macro_unavailable: "UNAVAILABLE",
+  no_events: "NO EVENTS",
+};
+
+/**
+ * The policy-pressure vocabulary, kept in ORION's own words.
+ *
+ * Never "bullish"/"bearish"/"hawkish"/"dovish" and never a direction: the
+ * backend's `MacroPolicyPressure` docstring is explicit that this describes
+ * what the data implies about policy-relevant conditions, not what to do
+ * about it, and the label a user reads must not quietly promote it into a
+ * trade signal.
+ */
+const POLICY_PRESSURE_LABELS: Readonly<Record<OrionPolicyPressure, string>> = {
+  tightening_pressure: "TIGHTENING",
+  easing_pressure: "EASING",
+  mixed: "MIXED",
+  in_line: "IN LINE",
+  insufficient_data: "INSUFFICIENT DATA",
+};
+
+const MARKET_RELEVANCE_LABELS: Readonly<Record<OrionMarketRelevance, string>> = {
+  high: "HIGH RELEVANCE",
+  medium: "MEDIUM RELEVANCE",
+  low: "LOW RELEVANCE",
+  none: "NOT RELEVANT",
+};
+
+/**
+ * One line for the macro capability row: what the calendar implied, how much
+ * it matters, and how sure the analyst is. Built here so the deck stays a
+ * renderer -- it gains no branch and no new element for this capability.
+ */
+export function macroStatusLine(macro: OrionMacro): string {
+  if (
+    macro.status !== "available" ||
+    macro.policyPressure === null ||
+    macro.marketRelevance === null ||
+    macro.confidence === null
+  ) {
+    return MACRO_STATUS_LABELS[macro.status as Exclude<OrionMacroStatus, "available">];
+  }
+  return [
+    POLICY_PRESSURE_LABELS[macro.policyPressure],
+    MARKET_RELEVANCE_LABELS[macro.marketRelevance],
+    formatPercent(macro.confidence),
+  ].join(" · ");
+}
+
+/** The sentence under that line: the analyst's own rationale when there is
+ * one, and the backend's fixed explanation when there is not. */
+export function macroDetailLine(macro: OrionMacro): string {
+  return macro.rationale ?? macro.detail;
+}
 
 const TREND_LABELS: Readonly<Record<OrionTrend, string>> = {
   bullish: "Bullish",
@@ -227,8 +296,11 @@ export interface AnalysisReading {
 export interface AnalysisCapabilityView {
   readonly id: "news" | "macro";
   readonly label: string;
-  /** Always `NOT_CONNECTED_LABEL`; the type says so and so does the parser. */
-  readonly status: typeof NOT_CONNECTED_LABEL;
+  /**
+   * `NOT_CONNECTED_LABEL` for news, always. For macro it is that too until a
+   * calendar is wired, and then the read itself -- see `macroStatusLine`.
+   */
+  readonly status: string;
   /** The backend's own fixed sentence about why. */
   readonly detail: string;
 }
@@ -331,7 +403,12 @@ export function toAnalysisView(analysis: OrionAnalysis): AnalysisView {
     ],
     capabilities: [
       { id: "news", label: "News", status: NOT_CONNECTED_LABEL, detail: analysis.news.detail },
-      { id: "macro", label: "Macro", status: NOT_CONNECTED_LABEL, detail: analysis.macro.detail },
+      {
+        id: "macro",
+        label: "Macro",
+        status: macroStatusLine(analysis.macro),
+        detail: macroDetailLine(analysis.macro),
+      },
     ],
     risk: {
       // The parser has already made "available with no outcome" and

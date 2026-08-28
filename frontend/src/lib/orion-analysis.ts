@@ -118,6 +118,51 @@ export interface OrionCapability {
   readonly detail: string;
 }
 
+export const ORION_MACRO_STATUSES = [
+  "available",
+  "not_connected",
+  "macro_unavailable",
+  "no_events",
+] as const;
+export type OrionMacroStatus = (typeof ORION_MACRO_STATUSES)[number];
+
+export const ORION_POLICY_PRESSURES = [
+  "tightening_pressure",
+  "easing_pressure",
+  "mixed",
+  "in_line",
+  "insufficient_data",
+] as const;
+export type OrionPolicyPressure = (typeof ORION_POLICY_PRESSURES)[number];
+
+export const ORION_MARKET_RELEVANCES = ["high", "medium", "low", "none"] as const;
+export type OrionMarketRelevance = (typeof ORION_MARKET_RELEVANCES)[number];
+
+/**
+ * Macro context, or an explicit reason there is none.
+ *
+ * Unlike `OrionCapability` this one *can* carry a reading, so the five
+ * payload fields are present together when `status` is `"available"` and
+ * `null` together otherwise -- the backend's `MacroSummary` enforces exactly
+ * that pairing, and this parser re-checks it rather than trusting it. A
+ * partially-populated macro read is a rejected payload, not a half-rendered
+ * panel.
+ *
+ * `policyPressure` describes the DATA, never a trade direction: the backend's
+ * `MacroPolicyPressure` docstring is emphatic that "tightening pressure"
+ * means the prints read hotter than expected, not "buy" or "sell". Nothing
+ * downstream of this type may translate it into one.
+ */
+export interface OrionMacro {
+  readonly status: OrionMacroStatus;
+  readonly detail: string;
+  readonly policyPressure: OrionPolicyPressure | null;
+  readonly marketRelevance: OrionMarketRelevance | null;
+  readonly confidence: number | null;
+  readonly rationale: string | null;
+  readonly eventCount: number | null;
+}
+
 export interface OrionRisk {
   readonly availability: OrionRiskAvailability;
   /** Present if and only if `availability` is `"available"`. */
@@ -156,7 +201,7 @@ export interface OrionAnalysis {
   readonly structure: OrionStructure;
   readonly momentum: OrionMomentum;
   readonly news: OrionCapability;
-  readonly macro: OrionCapability;
+  readonly macro: OrionMacro;
   readonly risk: OrionRisk;
   readonly confidence: number;
   readonly riskLevel: OrionRiskLevel;
@@ -325,6 +370,45 @@ function parseCapability(value: Record<string, unknown>): OrionCapability {
   };
 }
 
+function parseMacro(value: Record<string, unknown>): OrionMacro {
+  const status = readOneOf(value, "status", ORION_MACRO_STATUSES);
+  const detail = readString(value, "detail", MAX_DETAIL_CHARS);
+
+  if (status !== "available") {
+    // Every payload field must be absent. A backend that sent a reading
+    // alongside a non-available status is not something to render partially.
+    for (const key of [
+      "policy_pressure",
+      "market_relevance",
+      "confidence",
+      "rationale",
+      "event_count",
+    ]) {
+      const present = value[key];
+      if (present !== null && present !== undefined) return reject();
+    }
+    return {
+      status,
+      detail,
+      policyPressure: null,
+      marketRelevance: null,
+      confidence: null,
+      rationale: null,
+      eventCount: null,
+    };
+  }
+
+  return {
+    status,
+    detail,
+    policyPressure: readOneOf(value, "policy_pressure", ORION_POLICY_PRESSURES),
+    marketRelevance: readOneOf(value, "market_relevance", ORION_MARKET_RELEVANCES),
+    confidence: readNumber(value, "confidence", { min: 0, max: 1 }),
+    rationale: readString(value, "rationale", MAX_RATIONALE_CHARS),
+    eventCount: readNumber(value, "event_count", { min: 1, integer: true }),
+  };
+}
+
 function parseRisk(value: Record<string, unknown>): OrionRisk {
   const availability = readOneOf(value, "availability", ORION_RISK_AVAILABILITIES);
   const rawOutcome = value["outcome"];
@@ -400,7 +484,7 @@ export function parseAnalysis(value: unknown): OrionAnalysis | null {
     structure: parseStructure(readRecord(value, "structure")),
     momentum: parseMomentum(readRecord(value, "momentum")),
     news: parseCapability(readRecord(value, "news")),
-    macro: parseCapability(readRecord(value, "macro")),
+    macro: parseMacro(readRecord(value, "macro")),
     risk: parseRisk(readRecord(value, "risk")),
     confidence: readNumber(value, "confidence", { min: 0, max: 1 }),
     riskLevel: readOneOf(value, "risk_level", ORION_RISK_LEVELS),

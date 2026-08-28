@@ -144,6 +144,55 @@ class CapabilitySummary(BaseModel):
     detail: str = Field(min_length=1, max_length=MAX_DETAIL_CHARS)
 
 
+class MacroSummary(BaseModel):
+    """Macro context, or an explicit reason there is none.
+
+    A SEPARATE TYPE FROM `CapabilitySummary`, ON PURPOSE. News is still
+    structurally incapable of claiming connectivity -- its `status` remains a
+    one-member `Literal` with nowhere to put a headline -- and widening that
+    type to let macro report a reading would have taken the guarantee away
+    from news as collateral. Two types keep both statements exact.
+
+    WHAT CROSSES, AND WHAT DOES NOT. Four values and a count: the analyst's
+    policy-pressure reading, how much it thinks the batch matters, its
+    confidence, and its plain-language rationale. The per-event assessments,
+    their 64-character ids, the input fingerprint, the prompt version and the
+    model identifier all exist on `MacroAnalystOutput` and all stop here --
+    the same allowlist discipline `_to_analysis_summary` already applies to
+    reasoning provenance.
+
+    NOTHING IS EVER PARTIALLY POPULATED. The five payload fields are present
+    together when `status` is `"available"` and absent together otherwise, so
+    a client can branch on one field and trust the rest.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["available", "not_connected", "macro_unavailable", "no_events"]
+    detail: str = Field(min_length=1, max_length=MAX_DETAIL_CHARS)
+    policy_pressure: str | None = Field(default=None, max_length=MAX_CODE_CHARS)
+    market_relevance: str | None = Field(default=None, max_length=MAX_CODE_CHARS)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    rationale: str | None = Field(default=None, max_length=MAX_RATIONALE_CHARS)
+    event_count: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _check_macro_summary_invariants(self) -> MacroSummary:
+        payload = (
+            self.policy_pressure,
+            self.market_relevance,
+            self.confidence,
+            self.rationale,
+            self.event_count,
+        )
+        available = self.status == "available"
+        if available and any(value is None for value in payload):
+            raise ValueError("status is 'available' but the macro read is incomplete")
+        if not available and any(value is not None for value in payload):
+            raise ValueError(f"status is {self.status!r} but a macro read is present")
+        return self
+
+
 class StructureSummary(BaseModel):
     """Market structure, as `orion.analysis.structure` computed it."""
 
@@ -247,7 +296,7 @@ class AnalysisSummary(BaseModel):
     structure: StructureSummary
     momentum: MomentumSummary
     news: CapabilitySummary
-    macro: CapabilitySummary
+    macro: MacroSummary
     risk: RiskSummary
     confidence: float = Field(ge=0.0, le=1.0)
     risk_level: str = Field(min_length=1, max_length=MAX_CODE_CHARS)

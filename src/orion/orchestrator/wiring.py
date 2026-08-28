@@ -48,11 +48,13 @@ fabricated flat account.
 
 from __future__ import annotations
 
+from orion.analysts.claude_macro_provider import ClaudeMacroAnalystProvider
 from orion.config import Settings
 from orion.data.twelvedata_provider import TwelveDataProvider
 from orion.orchestrator.analysis import DEFAULT_OUTPUT_SIZE, AnalysisService
 from orion.paper.store import PortfolioStore
 from orion.reasoning.claude_provider import ClaudeReasoningProvider
+from orion.research.finnhub_provider import FinnhubEconomicCalendarProvider
 from orion.risk.policy import RiskPolicy
 
 
@@ -68,6 +70,18 @@ def analysis_available(settings: Settings) -> bool:
     the credential at all.
     """
     return bool(settings.twelve_data_api_key) and bool(settings.anthropic_api_key)
+
+
+def macro_available(settings: Settings) -> bool:
+    """Whether this deployment can read and assess the economic calendar.
+
+    A third credential on top of the two an analysis already needs, and
+    genuinely optional: without it every analysis still completes, and the
+    macro panel reports `not_connected` exactly as every build before this
+    one did. Booleans only, and `SecretStr` is tested for truthiness rather
+    than unwrapped -- same discipline as `analysis_available`.
+    """
+    return bool(settings.finnhub_api_key) and bool(settings.anthropic_api_key)
 
 
 def build_analysis_service(
@@ -94,6 +108,22 @@ def build_analysis_service(
     # the plain credential is never bound to a local, never stored on this
     # module, and exists only for as long as the provider's constructor takes
     # to hand it to its HTTP client / SDK.
+    # Built together or not at all. A calendar with no analyst, or an
+    # analyst with no calendar, is a half-wired capability that would report
+    # `not_connected` anyway -- so the pair is the unit, and `macro_available`
+    # is the one place that decides.
+    calendar_provider = None
+    macro_analyst = None
+    if macro_available(settings):
+        calendar_provider = FinnhubEconomicCalendarProvider(
+            settings.finnhub_api_key.get_secret_value(), settings.finnhub_base_url
+        )
+        macro_analyst = ClaudeMacroAnalystProvider(
+            settings.anthropic_api_key.get_secret_value(),
+            settings.anthropic_model,
+            settings.anthropic_effort,
+        )
+
     return AnalysisService(
         market_data=TwelveDataProvider(
             settings.twelve_data_api_key.get_secret_value(), settings.twelve_data_base_url
@@ -107,4 +137,6 @@ def build_analysis_service(
         policy=RiskPolicy.from_settings(settings),
         portfolio_store=portfolio_store,
         output_size=output_size,
+        calendar_provider=calendar_provider,
+        macro_analyst=macro_analyst,
     )
