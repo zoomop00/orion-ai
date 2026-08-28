@@ -31,7 +31,7 @@ jobs:
     name: Python dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -68,7 +68,7 @@ jobs:
     name: npm dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -99,7 +99,7 @@ jobs:
     # docs/DECISIONS.md.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Review dependency changes
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
@@ -112,7 +112,7 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # gitleaks scans commits, not the working tree. A secret that was
           # committed and later deleted is still leaked, so the scan needs the
