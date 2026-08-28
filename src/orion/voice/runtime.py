@@ -77,7 +77,10 @@ class VoiceTurnResult(BaseModel):
 
     transcript: Transcript
     response_text: str
-    speech: SynthesizedSpeech
+    #: `None` when the turn ran unspoken -- see `VoiceRuntime.__init__`. A
+    #: turn that produced no audio says so; it never carries fabricated
+    #: bytes, which is why `SynthesizedSpeech.audio` can keep `min_length=1`.
+    speech: SynthesizedSpeech | None = None
 
 
 class VoiceRuntime:
@@ -90,15 +93,48 @@ class VoiceRuntime:
         audio_input: AudioInput,
         transcription: TranscriptionProvider,
         response_provider: ResponseProvider,
-        synthesis: SpeechSynthesisProvider,
-        audio_output: AudioOutput,
+        synthesis: SpeechSynthesisProvider | None = None,
+        audio_output: AudioOutput | None = None,
     ) -> None:
+        """Five dependencies, of which the last two are together optional.
+
+        AN UNSPOKEN TURN IS A COMPLETE TURN. Supplying neither `synthesis`
+        nor `audio_output` runs
+
+            IDLE -> LISTENING -> UNDERSTANDING -> ANALYZING -> IDLE
+
+        which is a path `orion.voice.state`'s graph has always permitted:
+        every non-`IDLE` state already has an edge straight back to `IDLE`,
+        because failure recovery needed one. Nothing about the graph, the
+        transition rules or the recovery guarantee changes here -- this only
+        stops the runtime from insisting on the `SPEAKING` leg when nothing
+        was given to speak with.
+
+        Why it exists: ORION's reply is *text* first. Requiring a TTS vendor
+        in order to answer a typed question made every capability in this
+        repository -- analysis, risk, macro -- unreachable without a speech
+        credential, which is a deployment accident rather than a design.
+
+        BOTH OR NEITHER. A synthesis provider with nowhere to play, or an
+        output with nothing to play, is a half-wired turn that would fail
+        halfway through the `SPEAKING` leg. It is refused at construction.
+        """
+        if (synthesis is None) != (audio_output is None):
+            raise ValueError(
+                "synthesis and audio_output must be supplied together or not at all; "
+                "a runtime with one and not the other cannot complete the SPEAKING stage"
+            )
         self._audio_input = audio_input
         self._transcription = transcription
         self._response_provider = response_provider
         self._synthesis = synthesis
         self._audio_output = audio_output
         self._state_machine = VoiceStateMachine()
+
+    @property
+    def speaks(self) -> bool:
+        """Whether this runtime will produce audio. Fixed at construction."""
+        return self._synthesis is not None
 
     @property
     def state(self) -> VoiceState:
@@ -129,9 +165,14 @@ class VoiceRuntime:
             self._state_machine.transition(VoiceState.ANALYZING)
             response_text = self._response_provider.respond(transcript)
 
-            self._state_machine.transition(VoiceState.SPEAKING)
-            speech = self._synthesis.synthesize(response_text)
-            self._audio_output.play(speech)
+            # The SPEAKING leg, only when there is something to speak with.
+            # `speech` stays None otherwise and the machine takes the
+            # ANALYZING -> IDLE edge below, which the graph already allows.
+            speech: SynthesizedSpeech | None = None
+            if self._synthesis is not None and self._audio_output is not None:
+                self._state_machine.transition(VoiceState.SPEAKING)
+                speech = self._synthesis.synthesize(response_text)
+                self._audio_output.play(speech)
         except Exception:
             self._state_machine.reset_to_idle()
             raise

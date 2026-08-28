@@ -266,6 +266,16 @@ export function useOrionTurn(): OrionTurnController {
         analysis: turn.analysis,
       });
 
+      // An unspoken turn is a complete turn: ORION answered in writing
+      // because this deployment has no text-to-speech credential. The reply
+      // is already on screen from the dispatch above, so the core settles
+      // straight back to idle rather than entering SPEAKING with nothing to
+      // speak -- and no audio failure is reported, because nothing failed.
+      if (!turn.spoken) {
+        if (current()) dispatch({ type: "settled" });
+        return;
+      }
+
       await playTurnAudio(turn, {
         signal,
         onStart: (element) => {

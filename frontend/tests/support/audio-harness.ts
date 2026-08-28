@@ -54,6 +54,7 @@ export function turnPayload(overrides: Record<string, unknown> = {}): Record<str
   return {
     transcript: "hello orion",
     response_text: "Hello. I'm ORION.",
+    spoken: true,
     audio_base64: WAV_BASE64,
     audio_format: "wav",
     audio_media_type: "audio/wav",
@@ -67,6 +68,7 @@ export function turnFixture(overrides: Partial<OrionTurn> = {}): OrionTurn {
   return {
     transcript: "hello orion",
     responseText: "Hello. I'm ORION.",
+    spoken: true,
     audioBase64: WAV_BASE64,
     audioFormat: "wav",
     audioMediaType: "audio/wav",

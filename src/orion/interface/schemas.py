@@ -314,15 +314,27 @@ class VoiceTurnResponse(BaseModel):
         "Transcript validation — never before."
     )
     response_text: str = Field(description="What ORION said back, as text.")
-    audio_base64: str = Field(
-        description="Base64 of the untranscoded synthesized speech. Decode and play."
+    spoken: bool = Field(
+        description="Whether this turn produced audio. False when the server has no "
+        "text-to-speech credential: ORION still answered, in writing, and the four audio "
+        "fields below are null rather than empty. Branch on this, never on a length."
     )
-    audio_format: str = Field(description="Container/encoding of the decoded audio, e.g. 'wav'.")
-    audio_media_type: str = Field(
-        description="MIME type for the decoded bytes, ready for a Blob/Audio element."
+    audio_base64: str | None = Field(
+        default=None,
+        description="Base64 of the untranscoded synthesized speech. Decode and play. "
+        "Null when `spoken` is false.",
     )
-    audio_bytes: int = Field(
-        gt=0, description="Length of the decoded audio in bytes, for client-side verification."
+    audio_format: str | None = Field(
+        default=None, description="Container/encoding of the decoded audio, e.g. 'wav'."
+    )
+    audio_media_type: str | None = Field(
+        default=None,
+        description="MIME type for the decoded bytes, ready for a Blob/Audio element.",
+    )
+    audio_bytes: int | None = Field(
+        default=None,
+        gt=0,
+        description="Length of the decoded audio in bytes, for client-side verification.",
     )
     state: str = Field(
         description="The voice runtime's state after the turn, read from Mission 9's "
@@ -337,6 +349,21 @@ class VoiceTurnResponse(BaseModel):
         "fields and never see one. Never partially populated — a failed analysis is a "
         "failed turn, not a response with empty panels.",
     )
+
+    @model_validator(mode="after")
+    def _check_audio_invariants(self) -> VoiceTurnResponse:
+        """The four audio fields arrive together or not at all.
+
+        Same discipline as `RiskSummary` and `MacroSummary`: a client may
+        branch on one field and trust the rest, and a half-populated audio
+        payload is a rejected response rather than a half-playable one.
+        """
+        audio = (self.audio_base64, self.audio_format, self.audio_media_type, self.audio_bytes)
+        if self.spoken and any(value is None for value in audio):
+            raise ValueError("spoken is true but the audio payload is incomplete")
+        if not self.spoken and any(value is not None for value in audio):
+            raise ValueError("spoken is false but an audio payload is present")
+        return self
 
 
 class HealthResponse(BaseModel):

@@ -106,6 +106,19 @@ const startsWith = (
  * reasoned about — without a media element in the room.
  */
 export function decodeTurnAudio(turn: OrionTurn): Uint8Array<ArrayBuffer> {
+  // An unspoken turn has no audio to decode. Refused here rather than
+  // guarded at every call site, and refused with the existing vocabulary so
+  // this module still has exactly one kind of failure.
+  if (
+    !turn.spoken ||
+    turn.audioFormat === null ||
+    turn.audioMediaType === null ||
+    turn.audioBase64 === null ||
+    turn.audioBytes === null
+  ) {
+    throw new OrionAudioError("malformed");
+  }
+
   const accepted = ACCEPTED_MEDIA_TYPES_BY_FORMAT[turn.audioFormat];
   if (accepted === undefined) throw new OrionAudioError("unsupported");
   if (!accepted.includes(turn.audioMediaType)) throw new OrionAudioError("unsupported");
@@ -168,7 +181,11 @@ export async function playTurnAudio(
   { onStart, signal }: PlayOptions = {},
 ): Promise<void> {
   const bytes = decodeTurnAudio(turn);
-  const mediaType = CANONICAL_MEDIA_TYPE_BY_FORMAT[turn.audioFormat];
+  // `decodeTurnAudio` has already refused a null format; the local is what
+  // lets the compiler see that too.
+  const format = turn.audioFormat;
+  if (format === null) throw new OrionAudioError("malformed");
+  const mediaType = CANONICAL_MEDIA_TYPE_BY_FORMAT[format];
   if (mediaType === undefined) throw new OrionAudioError("unsupported");
   if (signal?.aborted) throw new OrionAudioError("cancelled");
 

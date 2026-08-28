@@ -160,10 +160,19 @@ export function messageForFailure(failure: OrionFailure): string {
 export interface OrionTurn {
   readonly transcript: string;
   readonly responseText: string;
-  readonly audioBase64: string;
-  readonly audioFormat: string;
-  readonly audioMediaType: string;
-  readonly audioBytes: number;
+  /**
+   * Whether this turn produced audio.
+   *
+   * `false` when the server has no text-to-speech credential: ORION still
+   * answered, in writing, and the four audio fields are `null` together.
+   * Branch on this rather than on a length -- the server never sends a
+   * zero-length base64 string that could be mistaken for silence.
+   */
+  readonly spoken: boolean;
+  readonly audioBase64: string | null;
+  readonly audioFormat: string | null;
+  readonly audioMediaType: string | null;
+  readonly audioBytes: number | null;
   readonly state: string;
   /**
    * The analysis this turn produced, or `null` for every ordinary
@@ -196,21 +205,65 @@ const readString = (source: Record<string, unknown>, key: string): string => {
  * Exported so tests (and a future audio-turn endpoint) can use exactly this
  * function rather than a second, drifting copy.
  */
+/**
+ * Attach the analysis and close the turn.
+ *
+ * Both exits from `parseTurn` -- spoken and unspoken -- end here, so the
+ * analysis is validated exactly once and cannot be validated differently on
+ * one of the two paths.
+ */
+function finishTurn(value: Record<string, unknown>, base: Omit<OrionTurn, "analysis">): OrionTurn {
+  // Absent, null, or a complete valid analysis -- never a partial one. The
+  // rejection is flattened into this module's own failure vocabulary so a
+  // caller still has exactly one kind of error to handle, and so no field
+  // name or offending value can ride out on an error the interface renders.
+  let analysis: OrionAnalysis | null;
+  try {
+    analysis = parseAnalysis(value["analysis"]);
+  } catch {
+    throw new OrionApiError("malformed");
+  }
+  return { ...base, analysis };
+}
+
 export function parseTurn(value: unknown): OrionTurn {
   if (!isRecord(value)) throw new OrionApiError("malformed");
 
   const transcript = readString(value, "transcript");
   const responseText = readString(value, "response_text");
+  const state = readString(value, "state");
+  const spoken = value["spoken"];
+
+  if (typeof spoken !== "boolean") throw new OrionApiError("malformed");
+  if (responseText.length === 0) throw new OrionApiError("malformed");
+
+  if (!spoken) {
+    // All four absent, together. A payload carrying audio alongside
+    // `spoken: false` is contradictory and is refused rather than played.
+    for (const key of ["audio_base64", "audio_format", "audio_media_type", "audio_bytes"]) {
+      const present = value[key];
+      if (present !== null && present !== undefined) throw new OrionApiError("malformed");
+    }
+    return finishTurn(value, {
+      transcript,
+      responseText,
+      spoken,
+      audioBase64: null,
+      audioFormat: null,
+      audioMediaType: null,
+      audioBytes: null,
+      state,
+    });
+  }
+
   const audioBase64 = readString(value, "audio_base64");
   const audioFormat = readString(value, "audio_format");
   const audioMediaType = readString(value, "audio_media_type");
-  const state = readString(value, "state");
   const audioBytes = value["audio_bytes"];
 
   if (audioBase64.length === 0) throw new OrionApiError("malformed");
   if (audioFormat.length === 0) throw new OrionApiError("malformed");
   if (audioMediaType.length === 0) throw new OrionApiError("malformed");
-  if (responseText.length === 0) throw new OrionApiError("malformed");
 
   if (
     typeof audioBytes !== "number" ||
@@ -228,27 +281,16 @@ export function parseTurn(value: unknown): OrionTurn {
   const expectedEncodedLength = 4 * Math.ceil(audioBytes / 3);
   if (audioBase64.length !== expectedEncodedLength) throw new OrionApiError("malformed");
 
-  // Absent, null, or a complete valid analysis — never a partial one. The
-  // rejection is flattened into this module's own failure vocabulary so a
-  // caller still has exactly one kind of error to handle, and so no field
-  // name or offending value can ride out on an error the interface renders.
-  let analysis: OrionAnalysis | null;
-  try {
-    analysis = parseAnalysis(value["analysis"]);
-  } catch {
-    throw new OrionApiError("malformed");
-  }
-
-  return {
+  return finishTurn(value, {
     transcript,
     responseText,
+    spoken,
     audioBase64,
     audioFormat,
     audioMediaType,
     audioBytes,
     state,
-    analysis,
-  };
+  });
 }
 
 function failureForStatus(status: number): OrionFailure {

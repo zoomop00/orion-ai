@@ -302,7 +302,10 @@ def create_app(
         return HealthResponse(
             status="ok",
             voice_available=turn_service.voice_available,
-            text_fallback_available=turn_service.voice_available,
+            # Now genuinely independent of the speech credential: a typed
+            # turn is answered in writing when there is no TTS vendor, so
+            # this is no longer the same boolean wearing a second name.
+            text_fallback_available=True,
         )
 
     @app.post("/v1/voice/turn", response_model=VoiceTurnResponse)

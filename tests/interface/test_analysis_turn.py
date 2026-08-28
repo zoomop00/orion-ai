@@ -368,6 +368,7 @@ class TestOrdinaryTurnsAreUnchanged:
         assert set(body) == {
             "transcript",
             "response_text",
+            "spoken",
             "audio_base64",
             "audio_format",
             "audio_media_type",

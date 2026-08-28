@@ -81,6 +81,7 @@ describe("requestTextTurn — the wire", () => {
     expect(turn).toEqual({
       transcript: "hello orion",
       responseText: "Hello. I'm ORION.",
+      spoken: true,
       audioBase64: WAV_BASE64,
       audioFormat: "wav",
       audioMediaType: "audio/wav",
@@ -271,6 +272,7 @@ describe("parseTurn — the response is not trusted", () => {
       "audioFormat",
       "audioMediaType",
       "responseText",
+      "spoken",
       "state",
       "transcript",
     ]);

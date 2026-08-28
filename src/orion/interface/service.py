@@ -333,7 +333,13 @@ class VoiceTurnService:
         except ValueError as exc:
             raise VoiceInterfaceError(VoiceInterfaceFault.INVALID_TEXT) from exc
 
-        self._require_voice()
+        # DELIBERATELY NO `_require_voice()` HERE. A typed question has
+        # already skipped speech-to-text; requiring a *text-to-speech*
+        # credential in order to answer it in writing made every capability
+        # in this repository -- analysis, risk, macro -- unreachable without
+        # a speech vendor. When the credential is present the turn is spoken
+        # exactly as before; when it is absent ORION answers in text and says
+        # so, rather than refusing with `voice_unavailable`.
         with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
             return self._run(
                 audio_input=InMemoryAudioInput(_NO_AUDIO_SENTINEL),
@@ -372,12 +378,21 @@ class VoiceTurnService:
             else StaticResponseProvider()
         )
 
+        # Speech is wired only when this deployment has the credential for
+        # it. `run_audio_turn` still calls `_require_voice()` first -- a
+        # spoken question cannot be transcribed without Deepgram either way
+        # -- so an unspoken runtime is only ever reached from the text path.
+        speaks = bool(self._deepgram_api_key)
         runtime = VoiceRuntime(
             audio_input=audio_input,
             transcription=transcription,
             response_provider=response_provider,
-            synthesis=DeepgramSpeechSynthesisProvider(self._deepgram_api_key, client=client),
-            audio_output=InMemoryAudioOutput(),
+            synthesis=(
+                DeepgramSpeechSynthesisProvider(self._deepgram_api_key, client=client)
+                if speaks
+                else None
+            ),
+            audio_output=InMemoryAudioOutput() if speaks else None,
         )
 
         try:
@@ -536,13 +551,27 @@ def _to_response(
     voice model. None of it is copied out. `base64.b64encode` is the only
     thing done to the audio — no transcode, no resample, no rewrap.
     """
-    audio = result.speech.audio
+    speech = result.speech
+    if speech is None:
+        # An unspoken turn. Every audio field is absent rather than empty:
+        # there is no zero-length base64 string to mistake for audio, and a
+        # client branches on one boolean instead of guessing from a length.
+        return VoiceTurnResponse(
+            transcript=result.transcript.text,
+            response_text=result.response_text,
+            spoken=False,
+            state=state,
+            analysis=analysis,
+        )
+
+    audio = speech.audio
     return VoiceTurnResponse(
         transcript=result.transcript.text,
         response_text=result.response_text,
+        spoken=True,
         audio_base64=base64.b64encode(audio).decode("ascii"),
-        audio_format=result.speech.format,
-        audio_media_type=_MEDIA_TYPE_BY_FORMAT.get(result.speech.format, _FALLBACK_MEDIA_TYPE),
+        audio_format=speech.format,
+        audio_media_type=_MEDIA_TYPE_BY_FORMAT.get(speech.format, _FALLBACK_MEDIA_TYPE),
         audio_bytes=len(audio),
         state=state,
         analysis=analysis,

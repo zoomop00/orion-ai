@@ -57,7 +57,9 @@ def test_health_reports_voice_unavailable_when_no_credential_is_configured() -> 
         body = client.get("/health").json()
 
     assert body["voice_available"] is False
-    assert body["text_fallback_available"] is False
+    # True even with no speech credential: a typed turn is answered in
+    # writing rather than refused. That is the whole point of the field.
+    assert body["text_fallback_available"] is True
 
 
 # --------------------------------------------------------------- happy paths
@@ -75,13 +77,15 @@ def test_text_fallback_returns_a_complete_turn(
     assert body["audio_format"] == "wav"
     assert body["audio_media_type"] == "audio/wav"
     assert body["state"] == "idle"
-    # Phase 5.2 adds exactly one field, and it is null on an ordinary turn.
-    # Kept as an exact set rather than a subset check: the point of this
-    # assertion has always been that the response surface cannot grow
+    assert body["spoken"] is True
+    # Phase 5.2 added `analysis`, null on an ordinary turn; this phase adds
+    # `spoken`. Kept as an exact set rather than a subset check: the point of
+    # this assertion has always been that the response surface cannot grow
     # without someone noticing.
     assert set(body) == {
         "transcript",
         "response_text",
+        "spoken",
         "audio_base64",
         "audio_format",
         "audio_media_type",
@@ -260,14 +264,42 @@ def test_text_at_exactly_the_transcript_limit_is_accepted(
     assert response.json()["transcript"] == "a" * 2000
 
 
-def test_missing_credential_returns_service_unavailable(
+def test_a_spoken_turn_still_needs_a_speech_credential(
     deepgram: respx.MockRouter,
 ) -> None:
+    """The audio endpoint is unchanged: without Deepgram there is no way to
+    transcribe what was said, so it still refuses rather than guessing."""
     with TestClient(create_app(VoiceTurnService(""))) as client:
-        response = client.post(TEXT_URL, json={"text": "hello"})
+        response = client.post(AUDIO_URL, content=UPLOAD_WAV, headers=WAV_HEADERS)
 
     assert response.status_code == 503
     assert response.json()["error"] == "voice_unavailable"
+    assert deepgram.calls.call_count == 0
+
+
+def test_a_typed_turn_is_answered_in_writing_without_a_speech_credential(
+    deepgram: respx.MockRouter,
+) -> None:
+    """The change this phase exists for.
+
+    Before it, a deployment with no TTS vendor could not use ORION at all --
+    not the analysis, not risk, not macro -- because answering a typed
+    question insisted on speaking the answer.
+    """
+    with TestClient(create_app(VoiceTurnService(""))) as client:
+        response = client.post(TEXT_URL, json={"text": "hello orion"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["spoken"] is False
+    assert len(body["response_text"]) > 0
+    assert body["transcript"] == "hello orion"
+    # Absent, not empty: there is no zero-length base64 to mistake for audio.
+    for field in ("audio_base64", "audio_format", "audio_media_type", "audio_bytes"):
+        assert body[field] is None
+    # The turn ends in IDLE rather than SPEAKING, which is a path Mission 9's
+    # state graph already permitted.
+    assert body["state"] == "idle"
     assert deepgram.calls.call_count == 0
 
 
