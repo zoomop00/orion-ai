@@ -1,0 +1,140 @@
+# Supply-chain and secret scanning (Mission 12.2).
+#
+# Deliberately a separate workflow from ci.yml. The Mission 0-12.1 quality
+# gates -- ruff, format, mypy, pytest + coverage, the interface smoke check,
+# and the four frontend gates -- are not touched by this file, so nothing here
+# can weaken, reorder or accidentally skip them. This workflow only adds
+# checks, and every check reads a lock file rather than resolving dependencies
+# of its own: uv.lock and frontend/package-lock.json are the source of truth.
+#
+# Nothing in this workflow writes to the repository, installs an unpinned
+# third-party tool, or runs an installer script piped from the network.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # gitleaks-action scans the whole repository on workflow_dispatch and
+  # schedule events, and only the pushed / pull-request commit range
+  # otherwise. This trigger is how the owner asks for the full-history scan
+  # on demand without waiting for a commit.
+  workflow_dispatch:
+
+# Least privilege by default; the jobs below narrow no further because none of
+# them needs to write anything.
+permissions:
+  contents: read
+
+jobs:
+  python-dependency-audit:
+    name: Python dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      # --frozen forbids re-locking, so the audited set is exactly what
+      # uv.lock pins and a drifting resolver cannot quietly audit a different
+      # tree than the one CI installs. The file is written to RUNNER_TEMP,
+      # outside the checkout, so a generated requirements file can never end
+      # up staged or committed.
+      - name: Export locked dependencies
+        run: >
+          uv export --frozen --all-extras --all-groups
+          --no-emit-project --no-hashes
+          --output-file "$RUNNER_TEMP/requirements-audit.txt"
+
+      # pip-audit is run through `uv tool run` at a pinned version: it is a CI
+      # tool, not a dependency of ORION, so it stays out of pyproject.toml and
+      # uv.lock entirely. --no-deps audits precisely the exported pins instead
+      # of letting pip-audit resolve a set of its own; --strict fails the job
+      # if any package could not be audited, rather than reporting a false
+      # all-clear.
+      - name: Audit locked dependencies
+        run: >
+          uv tool run --from pip-audit==2.10.1 pip-audit
+          --requirement "$RUNNER_TEMP/requirements-audit.txt"
+          --no-deps --strict --progress-spinner off
+
+  npm-dependency-audit:
+    name: npm dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # No `npm ci`. `npm audit` resolves the tree straight from
+      # package-lock.json, so the audit sees the locked versions and no
+      # package install script ever executes on the runner.
+      - name: Audit locked dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+  dependency-review:
+    name: Dependency review
+    # Reviews the dependency delta a pull request introduces; there is no
+    # delta to review on a push to main.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # Informational, and only because of an account-side prerequisite rather
+    # than anything about this repository's dependencies: the dependency
+    # review API needs the dependency graph enabled, which on a private
+    # repository also requires GitHub Advanced Security. Until then the action
+    # fails with a 403 that says nothing about the pull request, and blocking
+    # every pull request on an unavailable API is not a security control. The
+    # two audit jobs above are hard gates and cover the same ground from the
+    # lock files. Delete this line once the owner has enabled it -- see
+    # docs/DECISIONS.md.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # Same bar as `npm audit --audit-level=high`, so a dependency change
+          # is not blocked by one job and waved through by another.
+          fail-on-severity: high
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans commits, not the working tree. A secret that was
+          # committed and later deleted is still leaked, so the scan needs the
+          # history rather than a shallow checkout.
+          fetch-depth: 0
+
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          # Used to read the repository owner's account type (the action needs
+          # a licence key for organizations, none for user accounts) and for
+          # nothing else here.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pin the scanner as well as the action. Left unset the action
+          # installs its own default version, so the ruleset -- and therefore
+          # the finding set -- could change without any diff in this file.
+          # 8.30.1 is the version the Mission 12.2 audit ran locally.
+          GITLEAKS_VERSION: 8.30.1
+          # No SARIF artifact. On a real leak the artifact would be a second,
+          # separately downloadable copy of the secret; findings belong in the
+          # job log and the run summary, which is where they still appear.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+          # Pull-request comments would require pull-requests: write. This job
+          # keeps contents: read.
+          GITLEAKS_ENABLE_COMMENTS: false

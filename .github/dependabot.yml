@@ -1,0 +1,49 @@
+# Dependabot version updates (Mission 12.2).
+#
+# This file only governs *version* update pull requests. Dependabot alerts and
+# Dependabot security updates are repository settings, not committed files, and
+# still need the owner to switch them on -- see docs/DECISIONS.md.
+#
+# Nothing here upgrades anything on its own: every update arrives as a pull
+# request, which runs the full CI workflow plus the security workflow before it
+# can land.
+version: 2
+
+updates:
+  # Python. The `uv` ecosystem reads pyproject.toml *and* uv.lock, so a
+  # proposed bump is the same resolution `uv sync` would produce locally --
+  # unlike `pip`, which would only see the ranges in pyproject.toml and leave
+  # the lock file behind.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Dev tooling (ruff, mypy, pytest and friends) moves often and cannot
+      # reach production; one pull request for the set keeps the runtime
+      # dependencies -- the ones that need reading carefully -- separate and
+      # individually reviewable.
+      python-dev-tooling:
+        dependency-type: development
+
+  # Frontend. The lock file lives in frontend/, so the ecosystem is rooted
+  # there rather than at the repository root.
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      frontend-dev-tooling:
+        dependency-type: development
+
+  # The security workflow pins third-party actions by commit SHA. A SHA pin is
+  # only a security improvement if something keeps it current -- otherwise it
+  # is a frozen copy of whatever was current the day it was written, security
+  # fixes included. This entry is that something.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

@@ -3596,3 +3596,123 @@ to Mission 11.2. Seven mutations — a leaked slot, a decremented window counter
 window that never resets, each endpoint left unguarded, an environment-readable
 ceiling, and the two faults swapped — were each caught by between one and six
 tests, and every mutated file was restored byte-identically.
+
+## 2026-08-28 — Mission 12.2: supply-chain and secret scanning, in CI only
+
+**Every quality gate ORION has is about code it wrote; none of them looked at
+code it merely trusts.** `ruff`, `mypy`, `pytest` and the frontend gates all
+read `src/` and `frontend/src/`. Nothing read `uv.lock` or
+`frontend/package-lock.json`, which between them pin 54 Python distributions and
+the whole npm tree, and nothing looked for a credential in the history at all —
+and this repository handles five provider API keys. This phase adds four checks
+over those two blind spots and changes nothing else. No runtime code, no
+frontend source, no provider, no risk/decision/paper/memory code; no auth, no
+logging, no persistence, no telemetry.
+
+**A separate workflow, so the existing gates could not be touched by accident.**
+The scanners live in `.github/workflows/security.yml` and
+`.github/workflows/ci.yml` is byte-identical to Mission 12.1. Adding jobs to
+`ci.yml` would have meant editing the file that carries ruff, formatting, mypy,
+pytest + coverage, the interface entrypoint smoke check and the four frontend
+gates; a separate file cannot weaken, reorder or skip any of them. Both files
+validate against the published GitHub Actions workflow schema, and
+`.github/dependabot.yml` against the Dependabot 2.0 schema.
+
+**Lock files are the source of dependency truth, in both ecosystems.**
+`uv export --frozen` forbids re-locking, so pip-audit is handed exactly the set
+`uv.lock` pins rather than a set some resolver picked on the runner; `--no-deps`
+stops pip-audit resolving its own tree on top, and `--strict` fails the job when
+a package could not be audited instead of reporting a quiet all-clear. The
+export is written to `$RUNNER_TEMP`, outside the checkout, so no generated
+requirements file can end up staged. On the frontend,
+`npm audit --audit-level=high` reads `package-lock.json` directly — the job
+deliberately does not run `npm ci`, which means the audit sees the locked tree
+*and* no package install script ever executes on the runner.
+
+**pip-audit is a CI tool, not an ORION dependency.** It is invoked through
+`uv tool run --from pip-audit==2.10.1`, in its own ephemeral environment. Adding
+it to `[dependency-groups] dev` would have put a scanner and its transitive
+dependencies into `uv.lock` — enlarging the very attack surface being measured,
+and making the audited tree different from the shipped one. `pyproject.toml`,
+`uv.lock`, `frontend/package.json` and `frontend/package-lock.json` are
+unchanged by this phase.
+
+**Gitleaks, pinned twice, and no allowlist.** Secret scanning is
+`gitleaks/gitleaks-action` pinned to the commit SHA of v3.0.0, with
+`GITLEAKS_VERSION: 8.30.1` pinning the scanner binary as well — left unset the
+action installs its own default (8.24.3), so the ruleset, and therefore the
+finding set, could change with no diff in this repository. `fetch-depth: 0`,
+because a secret that was committed and later deleted is still leaked. The
+result that mattered: gitleaks 8.30.1 with its **default** ruleset scans all 29
+commits and reports zero findings, including the deliberate fixtures
+(`sk-live-supersecret-1234567890` in three provider suites,
+`dg-live-supersecret-1234567890` in the two Deepgram suites, and the
+`test-anthropic-key` / `test-twelvedata-key` settings fixtures). So no
+`.gitleaks.toml` was added. That is the narrowest possible configuration —
+there is no allowlist to be wrong about, and no path exclusion that could hide a
+real secret under `tests/` later. The fixtures stay exactly as they are: they
+exist to prove ORION never leaks a key into an error message, and deleting them
+would delete that proof. If a future ruleset ever does flag them, the fix is an
+allowlist of those two exact literal strings — never a rule or a path exclusion.
+
+**Artifacts and comments are off, on purpose.**
+`GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false`, because on a real leak the SARIF
+artifact would be a second, separately downloadable copy of the secret; findings
+appear in the job log and the run summary instead. `GITLEAKS_ENABLE_COMMENTS:
+false`, because pull-request comments need `pull-requests: write`, and every job
+in the workflow holds `contents: read` and nothing more.
+
+**Dependency review runs, but informationally, and for an account reason rather
+than a code reason.** `actions/dependency-review-action` (pinned to the v5.0.0
+SHA, `fail-on-severity: high` to match the npm audit bar) needs the dependency
+review API, which needs the dependency graph enabled — and on a private
+repository, GitHub Advanced Security. Without it the action returns 403, which
+says nothing about the pull request's dependencies, and blocking every pull
+request on an unavailable API is not a security control. The job therefore
+carries `continue-on-error: true` with that reason written above it, and the two
+lock-file audits are the hard gates. Deleting that one line is the whole change
+once the owner enables it.
+
+**No vulnerability was found, so nothing was upgraded.** pip-audit over all 54
+locked distributions reports no known vulnerabilities against both the PyPI
+advisory service and OSV; `npm audit --audit-level=high` reports 0. Both audits
+therefore ship as hard gates from the first run — the "make the first scan
+informational" escape hatch was not needed and was not used. Had there been a
+finding it would be named here; a dependency bump to turn CI green is a
+separate, reviewed change, never a side effect of adding a scanner.
+
+**Dependabot covers the drift a one-off scan cannot.** Three ecosystems: `uv` at
+the root (it reads `uv.lock`, unlike `pip`, which would only see the ranges in
+`pyproject.toml` and leave the lock behind), `npm` under `/frontend` where the
+lock actually lives, and `github-actions` — because a SHA-pinned action is only
+an improvement if something keeps it current, and this workflow pins two. Dev
+tooling is grouped per ecosystem so the runtime dependencies, the ones worth
+reading line by line, arrive as their own pull requests. Nothing merges itself:
+every Dependabot pull request runs both workflows first.
+
+**Still owner-side, and deliberately not faked in a committed file:** GitHub
+secret scanning and push protection, Dependabot alerts, Dependabot security
+updates, and the dependency graph (plus Advanced Security while the repository
+is private) are repository/account settings with no file representation. This
+phase adds none of them and claims none of them; `.github/dependabot.yml`
+governs *version* update pull requests only.
+
+**Deliberately not in this phase:** `SecretStr` hardening, the broken
+`orion.cli` entrypoint, and every other Mission 12 item. SHA-pinning the
+first-party `actions/*` and `astral-sh/setup-uv` references already in `ci.yml`
+was also left alone — that would edit the existing quality workflow, and the
+`github-actions` Dependabot entry now maintains those tags.
+
+**Files added:** `.github/workflows/security.yml`, `.github/dependabot.yml`.
+**Files modified:** this document only. No application file, no test, and no
+dependency manifest was touched, and no dependency was added.
+
+**Verification:** `pytest` 1440 passed (unchanged from Mission 12.1), `ruff
+check .`, `ruff format --check .` (172 files), `mypy src --strict` (80 files),
+the import-hygiene plus interface security/rate-limit suites (151 passed) and
+the interface entrypoint smoke check all clean. Frontend 509 tests, `typecheck`,
+`lint` and a clean production build. Both scanners were run locally against this
+commit — pip-audit 2.10.1 over the exported lock, against the PyPI and OSV
+services, and gitleaks 8.30.1 over the full history, its download checksum
+verified against the release manifest — and both pinned action SHAs were
+confirmed against their tags.
