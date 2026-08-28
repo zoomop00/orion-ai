@@ -67,6 +67,8 @@ const AUDIO_FILE = "orion-audio.ts";
 const MIC_FILE = "orion-microphone.ts";
 /** The single file allowed to build a Web Audio graph. */
 const ANALYSER_FILE = "orion-analyser.ts";
+/** The single file that validates a server-sent analysis. */
+const ANALYSIS_FILE = "orion-analysis.ts";
 
 const forbid = (pattern: RegExp, why: string, allowIn: readonly string[] = []): void => {
   for (const { path, name, text } of CODE) {
@@ -191,6 +193,46 @@ describe("frontend source safety", () => {
     forbid(/createObjectURL/, "a recording must never be given a URL", [AUDIO_FILE]);
     forbid(/FileReader/, "a recording is never read into anything that can be kept");
     forbid(/\.srcObject/, "the user's own microphone is never attached to a media element");
+  });
+
+  it("validates a server-sent analysis in exactly one file, and renders none of it", () => {
+    // Phase 5.3 accepts a new, much larger object from the backend. The
+    // validator is confined the same way the network, playback, capture and
+    // Web Audio boundaries already are, and it is a pure function: no fetch,
+    // no DOM, no clock, no storage. Nothing renders it yet — Phase 5.4 does —
+    // so no component may reach for it either.
+    requireIn(ANALYSIS_FILE, /export function parseAnalysis/, "the analysis boundary should own the parser");
+    requireIn(ANALYSIS_FILE, /OrionAnalysisError/, "rejections must have their own detail-free error");
+    forbid(/parseAnalysis\s*\(/, "only the API client may invoke the analysis parser", [
+      ANALYSIS_FILE,
+      API_FILE,
+    ]);
+  });
+
+  it("keeps the analysis parser free of every capability it does not need", () => {
+    const parser = CODE.find(({ name }) => name === ANALYSIS_FILE);
+    expect(parser, `${ANALYSIS_FILE} is missing`).toBeDefined();
+    const text = parser?.text ?? "";
+
+    for (const [pattern, why] of [
+      [/fetch\s*\(/, "the parser makes no request"],
+      [/document\./, "the parser touches no DOM"],
+      [/window\./, "the parser touches no browser globals"],
+      [/new\s+Date\s*\(\s*\)/, "the parser reads no clock"],
+      [/Math\.random/, "the parser invents nothing"],
+      [/JSON\.parse/, "the parser is handed a parsed value, never a string"],
+    ] as const) {
+      expect(text, `${ANALYSIS_FILE}: ${why}`).not.toMatch(pattern);
+    }
+  });
+
+  it("accepts exactly one capability status for news and macro", () => {
+    // "not_connected" is the only status the backend can emit and the only
+    // one this build can represent. A second literal appearing here would
+    // mean the client had started claiming a data source that does not exist.
+    const parser = CODE.find(({ name }) => name === ANALYSIS_FILE);
+    const statuses = parser?.text.match(/"(not_connected|connected|partial|available_news)"/g) ?? [];
+    expect(new Set(statuses)).toEqual(new Set(['"not_connected"']));
   });
 
   it("uses no randomness, so nothing simulates data and hydration stays stable", () => {

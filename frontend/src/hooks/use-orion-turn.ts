@@ -10,6 +10,7 @@ import {
   requestTextTurn,
   type OrionTurn,
 } from "@/lib/orion-api";
+import type { OrionAnalysis } from "@/lib/orion-analysis";
 import { OrionAudioError, messageForAudioFailure, playTurnAudio } from "@/lib/orion-audio";
 import {
   OrionMicrophoneError,
@@ -61,6 +62,16 @@ export interface OrionTurnSnapshot {
   readonly transcript: string | null;
   /** What ORION said back. Also rendered as text only. */
   readonly responseText: string | null;
+  /**
+   * The analysis this turn produced, or `null` — which is every ordinary
+   * turn, and every turn before this one finished.
+   *
+   * Carried, not acted on. Phase 5.3 validates it at the API boundary and
+   * puts it here; Phase 5.4 draws it. It deliberately adds no state: an
+   * analysis is a *result* of the `thinking` -> `speaking` sequence the four
+   * visual states already describe, not a fifth thing ORION can be doing.
+   */
+  readonly analysis: OrionAnalysis | null;
   /** A calm, frontend-authored sentence. Never a server or exception string. */
   readonly error: string | null;
   /** True from submission (or from asking for the microphone) until rest. */
@@ -71,7 +82,12 @@ type TurnAction =
   | { readonly type: "arming" }
   | { readonly type: "listening" }
   | { readonly type: "submitted" }
-  | { readonly type: "heard"; readonly transcript: string; readonly responseText: string }
+  | {
+      readonly type: "heard";
+      readonly transcript: string;
+      readonly responseText: string;
+      readonly analysis: OrionAnalysis | null;
+    }
   | { readonly type: "speaking" }
   | { readonly type: "settled" }
   | { readonly type: "failed"; readonly message: string }
@@ -81,6 +97,7 @@ const INITIAL: OrionTurnSnapshot = {
   visualState: "idle",
   transcript: null,
   responseText: null,
+  analysis: null,
   error: null,
   busy: false,
 };
@@ -95,6 +112,7 @@ function reduce(snapshot: OrionTurnSnapshot, action: TurnAction): OrionTurnSnaps
         visualState: "idle",
         transcript: null,
         responseText: null,
+        analysis: null,
         error: null,
         busy: true,
       };
@@ -105,13 +123,19 @@ function reduce(snapshot: OrionTurnSnapshot, action: TurnAction): OrionTurnSnaps
         visualState: "thinking",
         transcript: null,
         responseText: null,
+        analysis: null,
         error: null,
         busy: true,
       };
     case "heard":
       // Deliberately does NOT touch `visualState`. The response has arrived
       // but no sound has been made yet, so ORION is still thinking.
-      return { ...snapshot, transcript: action.transcript, responseText: action.responseText };
+      return {
+        ...snapshot,
+        transcript: action.transcript,
+        responseText: action.responseText,
+        analysis: action.analysis,
+      };
     case "speaking":
       return { ...snapshot, visualState: "speaking" };
     case "settled":
@@ -125,6 +149,7 @@ function reduce(snapshot: OrionTurnSnapshot, action: TurnAction): OrionTurnSnaps
         visualState: "idle",
         transcript: null,
         responseText: null,
+        analysis: null,
         error: action.message,
         busy: false,
       };
@@ -236,6 +261,9 @@ export function useOrionTurn(): OrionTurnController {
         type: "heard",
         transcript: turn.transcript,
         responseText: turn.responseText,
+        // Already validated in full by `parseTurn`; nothing here inspects,
+        // reshapes or renders it.
+        analysis: turn.analysis,
       });
 
       await playTurnAudio(turn, {

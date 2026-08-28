@@ -72,6 +72,10 @@ export function turnFixture(overrides: Partial<OrionTurn> = {}): OrionTurn {
     audioMediaType: "audio/wav",
     audioBytes: WAV.length,
     state: "idle",
+    // Phase 5.3: an ordinary turn carries no analysis, which is what every
+    // fixture here represents. A turn that does have one is built by
+    // `tests/orion-analysis.test.ts`, where the shape is the subject.
+    analysis: null,
     ...overrides,
   };
 }

@@ -1,10 +1,13 @@
 /**
  * The one place the browser talks to ORION.
  *
- * Every field, status code and failure mode here was read off the Phase 2
+ * Every field, status code and failure mode here was read off the
  * implementation (`src/orion/interface/schemas.py`, `service.py`, `app.py`),
- * not assumed. The server returns exactly seven fields; this module accepts
- * exactly those seven and rejects anything else.
+ * not assumed. Phase 5.2 added one optional field to that response —
+ * `analysis` — so the shape this module accepts is seven required fields
+ * plus one that is usually absent. Validating it is `orion-analysis.ts`'s
+ * job, not this file's: see that module for why it lives next door rather
+ * than in here.
  *
  * WHY NATIVE `fetch`, AND WHY NOTHING ELSE. One POST to one endpoint with a
  * JSON body needs no client library. `axios` would add a dependency, a
@@ -36,6 +39,8 @@
  * belongs in a browser console that screenshots, extensions and screen
  * recordings can read.
  */
+
+import { parseAnalysis, type OrionAnalysis } from "./orion-analysis";
 
 /** Phase 2 binds `127.0.0.1` and defaults to port 8000. See the module docstring. */
 export const ORION_API_BASE = "http://127.0.0.1:8000";
@@ -160,6 +165,13 @@ export interface OrionTurn {
   readonly audioMediaType: string;
   readonly audioBytes: number;
   readonly state: string;
+  /**
+   * The analysis this turn produced, or `null` for every ordinary
+   * conversational turn — which is most of them. Validated in full by
+   * `parseAnalysis`; a malformed one fails the whole turn rather than
+   * arriving half-populated.
+   */
+  readonly analysis: OrionAnalysis | null;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -216,6 +228,17 @@ export function parseTurn(value: unknown): OrionTurn {
   const expectedEncodedLength = 4 * Math.ceil(audioBytes / 3);
   if (audioBase64.length !== expectedEncodedLength) throw new OrionApiError("malformed");
 
+  // Absent, null, or a complete valid analysis — never a partial one. The
+  // rejection is flattened into this module's own failure vocabulary so a
+  // caller still has exactly one kind of error to handle, and so no field
+  // name or offending value can ride out on an error the interface renders.
+  let analysis: OrionAnalysis | null;
+  try {
+    analysis = parseAnalysis(value["analysis"]);
+  } catch {
+    throw new OrionApiError("malformed");
+  }
+
   return {
     transcript,
     responseText,
@@ -224,6 +247,7 @@ export function parseTurn(value: unknown): OrionTurn {
     audioMediaType,
     audioBytes,
     state,
+    analysis,
   };
 }
 

@@ -86,6 +86,10 @@ describe("requestTextTurn — the wire", () => {
       audioMediaType: "audio/wav",
       audioBytes: WAV.length,
       state: "idle",
+      // Phase 5.3: an ordinary turn carries no analysis. Asserted as part of
+      // the exact shape rather than separately, so the field cannot start
+      // arriving unnoticed on turns that should not have one.
+      analysis: null,
     });
   });
 
@@ -261,6 +265,7 @@ describe("parseTurn — the response is not trusted", () => {
     const turn = parseTurn(turnPayload({ injected_html: "<script>alert(1)</script>" }));
 
     expect(Object.keys(turn).sort()).toEqual([
+      "analysis",
       "audioBase64",
       "audioBytes",
       "audioFormat",
@@ -396,5 +401,111 @@ describe("requestAudioTurn — the spoken wire", () => {
     await expect(
       requestAudioTurn(recording(), { signal: controller.signal }),
     ).rejects.toMatchObject({ failure: "cancelled" });
+  });
+});
+
+describe("parseTurn — the optional analysis", () => {
+  const analysisPayload = (): Record<string, unknown> => ({
+    analysis_id: "analysis-XAUUSD-1h-2026-08-28T05:00:00+00:00",
+    symbol: "XAUUSD",
+    timeframe: "1h",
+    as_of: "2026-08-28T05:00:00Z",
+    analyzed_at: "2026-08-28T05:37:42.115557Z",
+    last_price: 2520.6,
+    bar_count: 120,
+    structure: {
+      trend: "bullish",
+      volatility: "low",
+      nearest_support: null,
+      nearest_resistance: null,
+      swing_high_count: 0,
+      swing_low_count: 0,
+    },
+    momentum: {
+      rsi: 62.5,
+      ema_fast: 2510.4,
+      ema_slow: 2495.3,
+      sma_slow: 2495.3,
+      atr: 2.5,
+      rsi_length: 14,
+      ema_fast_length: 20,
+      ema_slow_length: 50,
+    },
+    news: { status: "not_connected", detail: "No news source is connected in this build." },
+    macro: { status: "not_connected", detail: "No macro source is connected in this build." },
+    risk: {
+      availability: "no_portfolio_store",
+      outcome: null,
+      reason_codes: [],
+      failed_controls: [],
+      portfolio_as_of: null,
+    },
+    confidence: 0.55,
+    risk_level: "medium",
+    conclusion: {
+      action: "wait",
+      direction: "none",
+      rationale: "Nothing decisive here yet.",
+      reason_codes: ["all_rules_passed"],
+    },
+  });
+
+  it("is null when the server omits the field entirely", () => {
+    // Every Phase 2/3 response looked exactly like this, which is what makes
+    // the new field backwards compatible rather than a breaking change.
+    expect(parseTurn(turnPayload()).analysis).toBeNull();
+  });
+
+  it("is null when the server sends it explicitly as null", () => {
+    expect(parseTurn(turnPayload({ analysis: null })).analysis).toBeNull();
+  });
+
+  it("carries a valid analysis through onto the turn", () => {
+    const turn = parseTurn(turnPayload({ analysis: analysisPayload() }));
+
+    expect(turn.analysis).not.toBeNull();
+    expect(turn.analysis?.symbol).toBe("XAUUSD");
+    expect(turn.analysis?.conclusion.action).toBe("wait");
+    expect(turn.analysis?.risk.availability).toBe("no_portfolio_store");
+    expect(turn.analysis?.news.status).toBe("not_connected");
+  });
+
+  it("fails the whole turn when the analysis is malformed, rather than dropping it", () => {
+    // Fail-closed and whole: a half-populated report cannot be told apart
+    // from "ORION found nothing", and only one of those would be true.
+    for (const broken of [
+      { ...analysisPayload(), confidence: 42 },
+      { ...analysisPayload(), symbol: "<script>" },
+      { ...analysisPayload(), timeframe: "hourly" },
+      { ...analysisPayload(), structure: null },
+      { ...analysisPayload(), news: { status: "connected", detail: "x" } },
+      "not an object",
+      42,
+      [],
+    ]) {
+      expect(() => parseTurn(turnPayload({ analysis: broken }))).toThrow(OrionApiError);
+    }
+  });
+
+  it("reports a malformed analysis in this module's own failure vocabulary", () => {
+    let caught: unknown;
+    try {
+      parseTurn(turnPayload({ analysis: { ...analysisPayload(), symbol: "LEAKED-SECRET-abc" } }));
+    } catch (cause) {
+      caught = cause;
+    }
+
+    expect(caught).toBeInstanceOf(OrionApiError);
+    expect((caught as OrionApiError).failure).toBe("malformed");
+    // The analysis parser's own error, and the offending value, stop here.
+    expect((caught as OrionApiError).message).toBe("malformed");
+    expect(String(caught)).not.toContain("LEAKED");
+    expect(String(caught)).not.toContain("OrionAnalysisError");
+  });
+
+  it("still validates every other field when an analysis is present", () => {
+    expect(() =>
+      parseTurn(turnPayload({ analysis: analysisPayload(), audio_bytes: -1 })),
+    ).toThrow(OrionApiError);
   });
 });
