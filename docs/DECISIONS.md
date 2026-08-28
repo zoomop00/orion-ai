@@ -3407,3 +3407,79 @@ setting) and this document.
 a clean production build, byte-identical to Phase 5.5 apart from the one
 config setting. No Mission 0-10 source file was touched; `pyproject.toml`,
 `uv.lock`, `package.json` and `package-lock.json` are unchanged.
+
+## 2026-08-28 — Mission 11.2: investigated, and deliberately deferred
+
+**No connector is implemented, and the empty allowlist stays empty.** Mission
+11.2 asked whether a concrete read-only connector would improve ORION enough to
+justify building one. The investigation found none, so `CONNECTOR_ALLOWLIST`
+remains `()` and `src/orion/connectors/` remains an unused contract. This entry
+is the whole deliverable; no source file, test, dependency or frontend file was
+touched.
+
+**The decisive finding was that ORION's two declared gaps are not the same kind
+of gap.** `orchestrator/analysis.py` tells every user both "no news source is
+connected" and "no macro source is connected". Only the first is a missing
+capability. `FinnhubEconomicCalendarProvider` (Mission 7 v1) and
+`ClaudeMacroAnalystProvider` (Mission 8 v1) are both built, both tested — 142
+tests across `tests/research/` and `tests/analysts/` — and simply not
+constructed anywhere outside their own packages. "Macro is not connected" is a
+*wiring* statement, not a capability statement, and the gate is deliberate:
+`tests/orchestrator/test_import_hygiene.py` bans `orion.analysts` and
+`orion.research` from the orchestrator precisely so wiring them in is a visible
+edit rather than a quiet import.
+
+**Those two are providers, not connectors, and must stay that way.** Routing
+either through the Mission 11.1 contract would wrap an abstraction that already
+delivers everything the contract promises — a narrow fixed call shape, no
+model-chosen endpoint, provenance in the type (`DataSourceMeta`,
+`EconomicCalendarSourceMeta`), fail-closed errors and AST-proven import
+isolation — changing no behaviour and adding one indirection. If and when they
+are switched on, it is through their own Mission 7/8 path, with its own
+approval, not through `orion.connectors`.
+
+**News and sentiment are real gaps, and they belong to Missions 7 and 8.** The
+brief assigns news, economic calendar, macro data and sentiment to Mission 7
+(§13) and the News Analyst to Mission 8 (§14); §19's connector candidates are a
+different list entirely — GitHub, browser, documentation, databases,
+notifications, development tools — none of which sits in ORION's analysis
+chain. Building a news data layer under a Mission 11 connector heading would be
+the "ungoverned data-layer expansion disguised as just the analyst" that the
+Mission 8 v1 entry already refused. It also needs no connector abstraction to be
+done safely: `claude_macro_provider.py` already demonstrates the pattern for
+untrusted external text — fenced `<untrusted_external_data>`, never in the
+system prompt, size-capped, no tools bound, and a closed output schema with no
+field able to encode a direction, a tool call, code or a URL.
+
+**Three candidates were rejected on security grounds alone, and the 11.1
+contract already makes each unrepresentable.** Browser/web research requires
+arbitrary URL fetching — `ConnectorSpec` has no URL field and is
+`extra="forbid"`. Notifications are a WRITE — `Capability` has no `WRITE`
+member, so `Capability("write")` raises. GitHub tooling needs a write-capable
+credential to serve a developer rather than ORION's output.
+
+**Mission 11.3 (MCP runtime) remains deferred, and is weaker than before.** A
+protocol for invoking connectors has nothing to invoke while the allowlist is
+empty. The Next.js development MCP server disabled in Mission 11.1 was
+re-verified along four independent links: our `experimental.mcpServer: false`
+wins the config merge (user config is spread last), blocks the
+`__NEXT_EXPERIMENTAL_MCP_SERVER` escalation (which fires only when the value is
+`undefined`), and leaves the middleware gate falsy so `/_next/mcp` is never
+mounted. Confirmed statically; no dev server was probed.
+
+**Reopening criteria — all four, not any one:**
+
+1. A genuinely new external data requirement that no existing provider covers.
+2. Measurable value to ORION's analysis output, stated before implementation.
+3. No duplication of an existing narrow provider, and not a Mission 7/8
+   responsibility wearing a Mission 11 label.
+4. A strictly read-only, provenance-bearing implementation with a hardcoded
+   endpoint, no model-selected URL or tool, and no untrusted text reaching a
+   prompt without a closed analyst output schema in front of it.
+
+**Verification baseline, unchanged by this entry:** `pytest` 1389 passed, `ruff
+check .`, `ruff format --check .` (170 files), `mypy src --strict` (79 files),
+and the import-hygiene plus interface-security suites (109 passed) all clean.
+Frontend 509 tests, `typecheck`, `lint` and a clean production build.
+
+**Files modified:** this document only.
