@@ -259,7 +259,12 @@ def create_app(
     configuration surface.
     """
     turn_service = service or VoiceTurnService(
-        get_settings().deepgram_api_key,
+        # The one place this process unwraps the Deepgram credential.
+        # `Settings.deepgram_api_key` is a `SecretStr` precisely so that a
+        # `Settings` caught in a traceback frame cannot print it; the plain
+        # value exists here only as the argument to the service that builds
+        # the Deepgram HTTP providers.
+        get_settings().deepgram_api_key.get_secret_value(),
         analysis_factory=analysis_factory or _default_analysis_factory,
     )
     turn_limiter = limiter or TurnLimiter()

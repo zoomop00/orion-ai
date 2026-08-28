@@ -62,6 +62,10 @@ def analysis_available(settings: Settings) -> bool:
     Booleans only — never a key, never its length, never a prefix, matching
     `orion.interface.schemas.HealthResponse.voice_available`'s identical
     discipline.
+
+    `SecretStr` is tested for truthiness rather than unwrapped: an empty one is
+    already falsy, so answering "is this configured?" never has to materialise
+    the credential at all.
     """
     return bool(settings.twelve_data_api_key) and bool(settings.anthropic_api_key)
 
@@ -86,10 +90,16 @@ def build_analysis_service(
     if not analysis_available(settings):
         return None
 
+    # `.get_secret_value()` appears exactly here and as the argument itself:
+    # the plain credential is never bound to a local, never stored on this
+    # module, and exists only for as long as the provider's constructor takes
+    # to hand it to its HTTP client / SDK.
     return AnalysisService(
-        market_data=TwelveDataProvider(settings.twelve_data_api_key, settings.twelve_data_base_url),
+        market_data=TwelveDataProvider(
+            settings.twelve_data_api_key.get_secret_value(), settings.twelve_data_base_url
+        ),
         reasoning_provider=ClaudeReasoningProvider(
-            settings.anthropic_api_key,
+            settings.anthropic_api_key.get_secret_value(),
             settings.anthropic_model,
             settings.anthropic_effort,
         ),

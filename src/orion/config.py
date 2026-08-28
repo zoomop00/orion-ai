@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from orion.data.validation import DEFAULT_MAX_STALENESS_BARS
@@ -28,12 +28,32 @@ KillSwitch = Literal["engaged", "disengaged"]
 
 
 class Settings(BaseSettings):
-    """Runtime configuration, loaded from environment variables / `.env`."""
+    """Runtime configuration, loaded from environment variables / `.env`.
+
+    EVERY CREDENTIAL IS A `SecretStr`, AND THAT IS LOAD-BEARING. `Settings`
+    holds four provider API keys at once, and as plain `str` fields all four
+    appeared in full in `repr(settings)`, `str(settings)`, `model_dump()` and
+    `model_dump_json()` -- which is to say in any traceback frame that happened
+    to hold a `Settings`, any debugger, any `print`, and any future code that
+    serialised configuration for a diagnostic. `SecretStr` renders as
+    `SecretStr('**********')` in all four, so the leak is closed by the type
+    rather than by everyone downstream remembering.
+
+    Reading a credential therefore takes an explicit `.get_secret_value()`, and
+    the only places that call it are the two composition roots
+    (`orion.orchestrator.wiring`, `orion.interface.app`), immediately as an
+    argument to the provider that needs it. Truthiness still works unwrapped --
+    `bool(SecretStr(""))` is `False` -- so "is this configured?" never has to
+    materialise the value at all.
+
+    Nothing else changes: `.env` and environment loading, aliases, defaults and
+    every non-credential field are exactly as they were.
+    """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # --- AI reasoning provider ---
-    anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    anthropic_api_key: SecretStr = Field(default=SecretStr(""), alias="ANTHROPIC_API_KEY")
 
     # Model identifier is configuration only. Changing the recommended Claude
     # model must never require touching orion.reasoning.claude_provider — only
@@ -46,20 +66,20 @@ class Settings(BaseSettings):
     anthropic_effort: ReasoningEffort = Field(default="medium", alias="ANTHROPIC_EFFORT")
 
     # --- Market data provider ---
-    twelve_data_api_key: str = Field(default="", alias="TWELVE_DATA_API_KEY")
+    twelve_data_api_key: SecretStr = Field(default=SecretStr(""), alias="TWELVE_DATA_API_KEY")
     twelve_data_base_url: str = Field(
         default="https://api.twelvedata.com", alias="TWELVE_DATA_BASE_URL"
     )
 
     # --- Economic calendar provider (Mission 7 research data layer) ---
-    finnhub_api_key: str = Field(default="", alias="FINNHUB_API_KEY")
+    finnhub_api_key: SecretStr = Field(default=SecretStr(""), alias="FINNHUB_API_KEY")
     finnhub_base_url: str = Field(default="https://finnhub.io/api/v1", alias="FINNHUB_BASE_URL")
 
     # --- Voice STT/TTS provider (Mission 9 Phase 2, Deepgram Nova-3/Aura-2) ---
     # Header-based auth (Authorization: Token ...) -- no base URL setting, unlike
     # Twelve Data/Finnhub, since orion.voice.deepgram_stt/deepgram_tts hardcode
     # Deepgram's fixed API host. See docs/DECISIONS.md.
-    deepgram_api_key: str = Field(default="", alias="DEEPGRAM_API_KEY")
+    deepgram_api_key: SecretStr = Field(default=SecretStr(""), alias="DEEPGRAM_API_KEY")
 
     # --- Decision memory ---
     orion_db_path: str = Field(default="./orion.db", alias="ORION_DB_PATH")
