@@ -2975,3 +2975,208 @@ bundled `whatwg-fetch` polyfill; it appears nowhere in `src/`, which is what
 the source-safety rule scans.) Backend — `pytest` 1035 passed, `ruff check .`,
 `ruff format --check .` and `mypy src` all clean and identical to the
 pre-Phase-4 baseline.
+
+## 2026-08-28 — Mission 10 Phase 5.1: the orchestrator core, at last
+
+**M2-Q9 is answered.** That entry approved shipping *no* orchestrator and no
+`pipeline.py`, on the grounds that building one is its own mission rather
+than a side effect of another. Twenty-seven references across this document
+have pointed here since: `decide()` and `review()` take a caller-supplied
+`analysis_id`/`now`/`policy`/`portfolio` precisely because "no orchestrator
+exists yet to mint them," and Mission 9's `ResponseProvider` was built as an
+empty seam for exactly this. `src/orion/orchestrator/` is that caller. It is
+Phase 5.1 of a five-part Mission 10 Phase 5, split because one commit
+containing an unproven orchestrator *and* a rewritten frontend is a commit
+nobody can review.
+
+**A new package, not a new function in an old one.** The composition root
+imports the engines; the engines must never import it. That direction is the
+whole reason this is a package rather than a helper bolted onto
+`orion.interface` or `orion.voice`, and it is enforced rather than intended:
+`tests/orchestrator/test_import_hygiene.py` AST-parses both halves — nothing
+in Missions 0–9 imports `orion.orchestrator`, and `orion.orchestrator`
+imports no vendor SDK, transport, framework, persistence library, logger or
+id-minting module. Deleting this package must leave Missions 0–9 exactly as
+they were, and that is now a checked property.
+
+**It could not have lived in `orion.voice`, and that is not a stylistic
+claim.** `tests/voice/test_import_hygiene.py` forbids `orion.voice` from
+importing `orion.data`, `orion.analysis`, `orion.decision`, `orion.risk` and
+seven more. An analysis-backed `ResponseProvider` is therefore *impossible*
+inside that package. `orion.orchestrator.response.AnalysisResponseProvider`
+implements Mission 9's ABC from outside it, and a dedicated test asserts the
+only `orion.voice` modules this package may touch are `response` (the ABC)
+and `schemas` (the `Transcript` that ABC is handed) — not the runtime, not
+the state machine, not the Deepgram providers, not audio I/O.
+
+**It composes; it computes nothing.** Every step is an existing function
+called with existing arguments: `fetch_ohlcv` → `validate_snapshot` →
+`build_evidence` → `ReasoningProvider.reason` → `decide` → `review`. No
+indicator maths, no rule, no control, no threshold and no second opinion
+about anything an engine already decides. `orion.backtest.engine.run_backtest`
+is the precedent followed deliberately closely — same chain, same fail-closed
+posture, same refusal to mint an identifier from `uuid4()` — differing only
+in running once against live data instead of repeatedly against history, and
+in stopping at the verdict instead of executing it. `analysis_id` is derived
+as `analysis-{symbol}-{timeframe}-{evidence.as_of}`, so re-asking the same
+question before a new bar closes yields the same identifier.
+
+**The intent parser is deterministic, and that is a security decision before
+it is an engineering one.** `orion.orchestrator.intent` is a closed-vocabulary
+token matcher: no LLM, no regex over user-supplied patterns, no network, no
+clock, no randomness. `transcript.text` is untrusted external content, and
+asking a language model "what did they want?" would put that text inside a
+prompt — the exact surface `StaticResponseProvider` was written to avoid
+having. Nothing the user typed ever leaves the module: `Intent.symbol` is a
+value *looked up in* the alias table and returned from it, never a substring
+of the input, so the string that eventually reaches a vendor URL can only be
+one this codebase chose. A test asserts the resolved symbol is not a slice of
+the utterance, and fourteen hostile inputs (prompt injection, shell
+metacharacters, JNDI, RTL override, CJK, emoji, 100k characters) are proven
+to raise nothing and leak nothing.
+
+**XAUUSD only, and unrecognised-but-plausible requests are refused.**
+`orion.data.twelvedata_provider._SYMBOL_MAP` knows exactly one symbol and
+Missions 0–1 are XAUUSD-only, so listing aliases for instruments the data
+layer cannot fetch would produce an `Intent` guaranteed to fail one call
+later — a worse failure than not recognising the request, because it looks
+like it worked. "analyze bitcoin" is therefore `UNKNOWN`, not a resolved
+intent. **Timeframe is not parsed at all**: `DEFAULT_TIMEFRAME` (H1) is used
+for every analysis and "on the daily" in the utterance does not change it,
+with a test saying so explicitly. Which chart ORION analyses is a policy
+choice about what ORION *is*, not a per-utterance option, and making it
+user-steerable is a product decision that has not been taken.
+
+**Fail-closed, never fail-soft.** `MarketDataProviderError`,
+`ReasoningProviderError`, `DecisionEngineError` and `RiskGuardianError` are
+never caught in `run_analysis`; they propagate and abort. Market data that
+fails `validate_snapshot` raises `AnalysisDataQualityError` rather than being
+analysed anyway with a caveat attached — an analysis that silently dropped a
+stage would produce a report that *looks* complete while missing the stage
+that mattered. The staleness threshold is read from `RiskPolicy.max_staleness_bars`
+rather than chosen a second time, so this layer and
+`orion.risk.controls.evidence_is_fresh` can never disagree about what "stale"
+means. **A known and accepted consequence:** on a weekend, or during a vendor
+outage, gold data is genuinely stale and every analysis will refuse. That is
+correct — the Risk Guardian would veto regardless — and softening it belongs
+to the HTTP layer that owns the fault vocabulary, not here.
+
+**Risk is the one place absence is handled softly, and only because absence
+is reportable there.** A missing or unreadable paper account is not an
+analysis failure: structure, momentum, reasoning and the proposal are all
+still real. So it becomes an explicit `RiskAvailability` reason
+(`NO_PORTFOLIO_STORE` / `PORTFOLIO_UNAVAILABLE` / `PORTFOLIO_SYMBOL_MISMATCH`)
+and the guardian is simply not consulted. **What never happens is inventing an
+account.** A fabricated flat portfolio at the configured starting balance
+would make the position-size, exposure, daily/weekly-loss and drawdown
+controls evaluate a fiction while presenting as authoritative — precisely
+what `orion.paper.store.PortfolioStoreError`'s own docstring forbids papering
+over. `RiskPanel`'s validator makes `verdict is not None` if and only if
+availability is `AVAILABLE`, so the fabricated case is unconstructible rather
+than merely undone.
+
+**Marking to market is required, and is not laundering.** `review()`
+independently re-verifies that `equity` equals cash plus the open position's
+unrealised P&L at `evidence.last_price`, raising `PortfolioIntegrityError`
+otherwise, so the loaded state must be marked forward before review — a pure
+projection that is never saved. That projection sets `as_of` to now, which
+would otherwise hide how old the stored record actually was, so `RiskPanel`
+carries `portfolio_as_of` holding the *stored* timestamp. A test asserts the
+panel reports the stored value, not the projection's.
+
+**News and macro are NOT_CONNECTED, structurally.** No news provider and no
+News Analyst exist anywhere in this codebase — the Mission 7 v1 and Mission 8
+v1 entries above both record that deferral and why — and the Macro Analyst
+path is deliberately out of Phase 5.1's approved scope. `NotConnectedPanel`
+is how both are reported, and it carries **no list, no mapping, no number and
+no timestamp**: only a single-member status enum and a fixed sentence chosen
+at development time. There is nowhere in the schema to put a fabricated
+headline or an invented macro reading, which is a stronger guarantee than a
+convention that nobody does. A test asserts the exact field set, so adding one
+is a deliberate, visible act. `CapabilityStatus` has one member on purpose —
+a two-member enum would imply a `CONNECTED` case this build can reach.
+
+**The report reuses domain models rather than re-declaring them.**
+`AnalysisReport` embeds `Evidence`, `ReasoningOutput`, `ProposedDecision` and
+`RiskVerdict` whole, exactly as `orion.voice.runtime.VoiceTurnResult` embeds a
+full `Transcript` and `SynthesizedSpeech`. A parallel set of flattened panels
+restating `trend`/`rsi`/`confidence` would be a second copy of every field in
+the system, free to drift the moment either side is edited. Reducing it to a
+client-visible allowlist is the HTTP boundary's job when one exists — see
+`orion.interface.schemas.VoiceTurnResponse`, which already performs exactly
+that reduction for a `VoiceTurnResult`. The brief's seven requested fields map
+onto the structure directly: structure and momentum from `evidence`,
+confidence and conclusion from `reasoning`/`decision`, risk from `risk`, and
+news/macro from their `NotConnectedPanel`s.
+
+**`respond()` still returns `str`; the report is captured, not returned.**
+Widening Mission 9's ABC to carry structure would be a Mission 9 change made
+for a Mission 10 convenience. Instead the completed `AnalysisReport` is held
+on the provider instance and read back through `last_report`. That is safe
+because of how `orion.interface.service.VoiceTurnService._run` already works:
+it constructs every provider fresh, per request, sharing nothing between
+calls. `last_report` is cleared at the *start* of every `respond`, so a failed
+or unrecognised turn can never leave the previous turn's analysis sitting
+there looking current — tested from both directions.
+
+**No clock anywhere in the package.** `now` is always a parameter, and
+`AnalysisResponseProvider` uses `transcript.transcribed_at` — a real,
+provenance-stamped timestamp that arrived with the input — so `respond` stays
+a pure function of its argument plus the injected service, exactly like every
+engine underneath it. An AST test proves no `now()`/`utcnow()`/`today()`/
+`time()`/`monotonic()` call exists in any file.
+
+**Zero persistence, zero configuration, zero credentials.** The portfolio
+store is only ever `load()`ed; no journal is touched. `FakePortfolioStore.save`
+and `.initialize` raise `AssertionError` in the test suite, so a single write
+anywhere in the chain fails outright. `orion.config` is on the banned-import
+list: reading the environment belongs to the composition root *above* this one
+(`orion.interface.app` already plays that role), and keeping it out is what
+lets the whole package be constructed and fully tested with no `.env`, no
+credential and no network. **No new dependency was added.**
+
+**Failure is never a verdict, and never leaks.** Every way an analysis can
+fail becomes a `ResponseProviderError` carrying one fixed message and no
+report — never a spoken guess, never a neutral "conditions look mixed", never
+a report with empty fields. The cause is chained for a debugger and discarded
+for the user, because a `MarketDataProviderError` may name a vendor, a URL, a
+status code or a credential. Tests assert that an error containing
+`sk-live-...`, an Anthropic URL and a 401 produces a message containing none
+of them.
+
+**Nothing is wired up yet, and that is asserted positively.** Phase 5.1 builds
+the orchestrator; Phase 5.2 connects it. `orion.interface.service` still
+constructs Mission 9's `StaticResponseProvider`, and a hygiene test requires
+that file to name `StaticResponseProvider` and *not* name
+`AnalysisResponseProvider` — so "the HTTP surface is unchanged" is a checked
+fact rather than a claim in a commit message. **No frontend file, no HTTP
+file, and no Mission 0–9 source file was touched.**
+
+**Deliberately deferred to later Phase 5 sub-phases, or beyond:** the Macro
+Analyst / Finnhub / second Anthropic call (5.1 scope decision); the HTTP
+surface and the `analysis` field on `VoiceTurnResponse` (5.2); the frontend
+contract (5.3); the cinematic analysis view (5.4); decision-journal
+persistence and Mission 5 reflection wiring (5.5, if approved); news and
+sentiment data layers; symbols beyond XAUUSD; user-selectable timeframes;
+streaming/WebSockets; and authentication. The broken
+`[project.scripts] orion = "orion.cli:main"` entrypoint (`orion.cli` does not
+exist) was found during the Phase 5 investigation and is **tracked separately,
+not fixed here**.
+
+**Files added:** `src/orion/orchestrator/{__init__,schemas,intent,analysis,
+response}.py` and `tests/orchestrator/{__init__,conftest,test_intent,
+test_schemas,test_analysis,test_response,test_import_hygiene}.py`. **Files
+modified:** this document only.
+
+**Verification:** `pytest` 1174 passed (1035 before this phase, 139 added),
+`ruff check .`, `ruff format --check .` (159 files), `mypy src` (75 files) and
+`mypy tests/orchestrator` (7 files) all clean. The CI interface-entrypoint
+smoke check still resolves all three routes, and `import orion.orchestrator`
+succeeds with no environment and no credential present. Frontend — 279 tests,
+`typecheck`, `lint` all green and byte-identical to the Phase 4 baseline; no
+`frontend/` file, `pyproject.toml` or `uv.lock` was touched. Every test double
+implements the real ABC (`MarketDataProvider`, `ReasoningProvider`,
+`PortfolioStore`) rather than a `unittest.mock` stand-in, and nothing between
+`fetch_ohlcv` and the finished report is stubbed: real validation, real
+indicators, real structure, the real Decision Engine and the real Risk
+Guardian run on every test in the analysis suite.
