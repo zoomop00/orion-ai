@@ -86,14 +86,18 @@ def test_every_runtime_ends_idle_and_none_are_reused(
 
 
 def test_concurrent_requests_do_not_share_a_runtime(
-    client: TestClient, deepgram: respx.MockRouter, runtimes: list[VoiceRuntime]
+    isolation_client: TestClient, deepgram: respx.MockRouter, runtimes: list[VoiceRuntime]
 ) -> None:
     """Sixteen overlapping turns, sixteen private state machines.
 
     A shared runtime would surface as `VoiceRuntimeBusyError` -> HTTP 409
     from whichever request lost the race, so an all-200 result is a real
     signal here, not merely an absence of exceptions.
+
+    Runs on `isolation_client` so Mission 12.1's turn ceiling cannot be the
+    thing producing a 409 — see that fixture. The assertions are unchanged.
     """
+    client = isolation_client
     request_count = 16
 
     def one_turn(index: int) -> int:
@@ -109,9 +113,13 @@ def test_concurrent_requests_do_not_share_a_runtime(
 
 
 def test_concurrent_requests_return_their_own_transcripts(
-    client: TestClient, deepgram: respx.MockRouter
+    isolation_client: TestClient, deepgram: respx.MockRouter
 ) -> None:
-    """Cross-talk would show up as one request receiving another's words."""
+    """Cross-talk would show up as one request receiving another's words.
+
+    On `isolation_client` for the same reason as the test above.
+    """
+    client = isolation_client
 
     def one_turn(index: int) -> tuple[int, str]:
         response = client.post(TEXT_URL, json={"text": f"utterance {index}"})

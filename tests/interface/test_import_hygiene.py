@@ -395,3 +395,85 @@ def test_the_interface_never_touches_hardware_audio() -> None:
         assert "MicrophoneAudioInput" not in code, source_path.name
         assert "SpeakerAudioOutput" not in code, source_path.name
         assert "sounddevice" not in code, source_path.name
+
+
+# ---------------------------------------------- Mission 12.1: the limiter ---
+
+# Everything `limits.py` is allowed to import. An allowlist rather than a
+# denylist, because this module is small enough to enumerate and its whole
+# value is that it does almost nothing: a limiter that grew a network call, a
+# file handle or a settings read would be a new trust boundary hiding inside a
+# safety feature.
+_LIMITS_ALLOWED_IMPORTS = {
+    "__future__",
+    "threading",
+    "contextlib",
+    "time",
+    "collections.abc",
+    "orion.interface.service",
+}
+
+
+def _limits_file() -> Path:
+    path = _src_dir() / "interface" / "limits.py"
+    assert path.is_file(), "orion/interface/limits.py is missing"
+    return path
+
+
+def test_the_limiter_imports_only_what_a_counter_needs() -> None:
+    assert _imported_modules(_limits_file()) <= _LIMITS_ALLOWED_IMPORTS
+
+
+def test_the_limiter_reads_no_configuration_and_no_environment() -> None:
+    """The ceiling must not be raisable by editing `.env` on the host.
+
+    A security limit that configuration can widen is a default, not a limit.
+    `orion.config` is unreachable from here (the allowlist above already says
+    so); this states the security claim in the terms someone grepping for it
+    would use.
+    """
+    code = _code_without_comments_or_strings(_limits_file())
+    for forbidden in ("os.environ", "getenv", "get_settings", "Settings", "dotenv"):
+        assert forbidden not in code, f"limits.py reads configuration via {forbidden}"
+
+
+def test_the_limiter_has_no_filesystem_database_or_network_capability() -> None:
+    code = _code_without_comments_or_strings(_limits_file())
+    for forbidden in (
+        "open(",
+        "Path(",
+        "sqlite3",
+        "sqlalchemy",
+        "httpx",
+        "requests",
+        "socket",
+        "logging",
+        "pickle",
+        "json.dump",
+    ):
+        assert forbidden not in code, f"limits.py reaches for {forbidden}"
+
+
+def test_the_limiter_persists_nothing() -> None:
+    """No write of any kind — the state is three numbers on one object."""
+    code = _code_without_comments_or_strings(_limits_file())
+    for forbidden in ("write(", "flush(", "mkdir", "unlink", "os.path"):
+        assert forbidden not in code, f"limits.py persists via {forbidden}"
+
+
+def test_the_ceilings_are_literal_constants_not_computed_at_import() -> None:
+    """`MAX_*`/`WINDOW_SECONDS` must be plain literals.
+
+    A ceiling derived from a call — an environment read, a CPU count, a
+    settings lookup — could differ between machines, which is exactly what a
+    security constant must not do.
+    """
+    tree = ast.parse(_limits_file().read_text(encoding="utf-8"))
+    found: dict[str, ast.expr] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            found[node.targets[0].id] = node.value
+
+    for name in ("MAX_CONCURRENT_TURNS", "MAX_TURNS_PER_WINDOW", "WINDOW_SECONDS"):
+        assert name in found, f"{name} is not a module-level constant"
+        assert isinstance(found[name], ast.Constant), f"{name} is computed, not literal"

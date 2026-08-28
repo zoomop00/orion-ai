@@ -155,6 +155,10 @@ class VoiceInterfaceFault(StrEnum):
     TRANSCRIPTION_FAILED = "transcription_failed"
     SYNTHESIS_FAILED = "synthesis_failed"
     RUNTIME_BUSY = "runtime_busy"
+    # Mission 12.1. Distinct from RUNTIME_BUSY on purpose: "ORION is already
+    # handling a turn" is a statement about right now, and would be untrue when
+    # the per-window budget is spent while nothing at all is running.
+    RATE_LIMITED = "rate_limited"
     TURN_FAILED = "turn_failed"
 
 
@@ -205,6 +209,11 @@ FAULT_RESPONSES: dict[VoiceInterfaceFault, tuple[int, str, str]] = {
         409,
         "runtime_busy",
         "ORION is already handling a turn.",
+    ),
+    VoiceInterfaceFault.RATE_LIMITED: (
+        429,
+        "rate_limited",
+        "ORION has handled too many turns just now. Try again shortly.",
     ),
     VoiceInterfaceFault.TURN_FAILED: (
         500,

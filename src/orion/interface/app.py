@@ -5,6 +5,7 @@ handlers, and a `run()` that can only ever bind to loopback.
         -> _BodySizeLimitMiddleware   (reject oversized bodies at the socket)
         -> CORSMiddleware             (explicit localhost allowlist, no "*")
         -> route                      (content-type / shape validation)
+        -> TurnLimiter.slot()         (concurrency + per-window ceiling)
         -> VoiceTurnService           (fresh VoiceRuntime, per request)
         -> Mission 9 voice pipeline
         -> HTTP response
@@ -12,13 +13,20 @@ handlers, and a `run()` that can only ever bind to loopback.
 LOCALHOST ONLY, AND NOT MERELY BY DOCUMENTATION. `run()` hardcodes
 `_BIND_HOST = "127.0.0.1"` and exposes no host parameter, so the supported
 way to start this server cannot be pointed at `0.0.0.0` by passing an
-argument. **This service has no authentication, no authorization, no rate
-limiting and no TLS. Exposing it beyond loopback — a public bind address, a
-port forward, a reverse proxy, a tunnel, a container port mapping — is NOT
-supported and would hand anyone who can reach it unlimited use of ORION's
-paid Deepgram credential.** Authentication and production hardening are
-explicitly deferred (see `docs/DECISIONS.md`); until they exist, loopback is
+argument. **This service has no authentication, no authorization and no TLS.
+Exposing it beyond loopback — a public bind address, a port forward, a reverse
+proxy, a tunnel, a container port mapping — is NOT supported.** Authentication
+is explicitly deferred (see `docs/DECISIONS.md`); until it exists, loopback is
 the security boundary.
+
+RATE LIMITED SINCE MISSION 12.1, WHICH THIS PARAGRAPH USED TO DENY. Loopback
+bounds who may call; it never bounded how often, and one turn fans out to as
+many as four third-party calls, three of them metered. `orion.interface.limits.
+TurnLimiter` now caps both concurrent turns and turns started per window, in
+process memory, with the slot taken immediately before the only call that can
+reach a vendor. It is a cost ceiling rather than an access control: it does not
+make exposing this service beyond loopback safe, and nothing above changed about
+that.
 
 SIZE BEFORE SUBSTANCE. `_BodySizeLimitMiddleware` is the innermost of the
 two middlewares but still runs before any route, any Pydantic model and any
@@ -56,6 +64,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from orion.config import get_settings
+from orion.interface.limits import TurnLimiter
 from orion.interface.schemas import (
     ACCEPTED_AUDIO_CONTENT_TYPES,
     MAX_REQUEST_BODY_BYTES,
@@ -222,6 +231,7 @@ def create_app(
     service: VoiceTurnService | None = None,
     *,
     analysis_factory: AnalysisServiceFactory | None = None,
+    limiter: TurnLimiter | None = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -239,11 +249,20 @@ def create_app(
     `Settings` into concrete providers — this package still may not import
     `orion.decision`, `orion.risk` or `orion.paper`, and
     `tests/interface/test_import_hygiene.py` fails the build if it ever does.
+
+    `limiter` is the Mission 12.1 seam, and exists only so tests can drive
+    small, fast ceilings. It reads nothing from the environment and is never
+    reachable from a request: the default is a `TurnLimiter` built from the
+    module constants in `orion.interface.limits`, which is the *only* place
+    those ceilings are set. A caller passing a permissive limiter is the same
+    class of act as passing a fake `service` — it is a test seam, not a
+    configuration surface.
     """
     turn_service = service or VoiceTurnService(
         get_settings().deepgram_api_key,
         analysis_factory=analysis_factory or _default_analysis_factory,
     )
+    turn_limiter = limiter or TurnLimiter()
 
     app = FastAPI(
         title="ORION voice interface",
@@ -295,16 +314,26 @@ def create_app(
             raise VoiceInterfaceError(VoiceInterfaceFault.UNSUPPORTED_MEDIA_TYPE)
 
         audio = await request.body()
+        # Mission 12.1: the slot is taken here, immediately before the only
+        # call that can reach a paid vendor, and never earlier. A request
+        # refused for its content type or its size costs nothing, so it must
+        # not spend a turn from the window budget either.
+        #
         # `run_turn` is synchronous and blocks on two network round trips.
         # Running it in a worker thread keeps the event loop free, and
         # gives concurrent requests genuinely separate execution — each
         # with its own VoiceRuntime, which is the point.
-        return await run_in_threadpool(turn_service.run_audio_turn, audio)
+        with turn_limiter.slot():
+            return await run_in_threadpool(turn_service.run_audio_turn, audio)
 
     @app.post("/v1/voice/turn/text", response_model=VoiceTurnResponse)
     async def voice_turn_text(payload: TextTurnRequest) -> VoiceTurnResponse:
         """One typed turn: skips speech-to-text, still really speaks."""
-        return await run_in_threadpool(turn_service.run_text_turn, payload.text)
+        # Same ceiling, same placement. A typed turn skips speech-to-text but
+        # still reaches Twelve Data, Anthropic and speech synthesis, so it is
+        # not the cheap endpoint it looks like.
+        with turn_limiter.slot():
+            return await run_in_threadpool(turn_service.run_text_turn, payload.text)
 
     return app
 

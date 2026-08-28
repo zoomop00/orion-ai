@@ -3483,3 +3483,116 @@ and the import-hygiene plus interface-security suites (109 passed) all clean.
 Frontend 509 tests, `typecheck`, `lint` and a clean production build.
 
 **Files modified:** this document only.
+
+## 2026-08-28 — Mission 12.1: a turn ceiling, in process memory
+
+**The Mission 12 audit's P0, and only that.** Loopback bounds who may call ORION;
+it never bounded how often. One turn fans out to as many as four third-party
+calls — Deepgram speech-to-text, Twelve Data bars, Anthropic reasoning, Deepgram
+speech synthesis — three of them metered. Until now the only ceiling on that
+fan-out was AnyIO's default worker limiter, measured at 40 and belonging to the
+framework rather than to ORION, so one local process could hold forty turns in
+flight and drive roughly forty paid provider calls per second. `orion.interface.
+limits.TurnLimiter` replaces that with an ORION-owned ceiling: at most
+`MAX_CONCURRENT_TURNS = 2` turns at once, and at most
+`MAX_TURNS_PER_WINDOW = 30` started per `WINDOW_SECONDS = 60`. Nothing else from
+the Mission 12 checklist is implemented here.
+
+**Taken immediately before the only call that can reach a vendor, and never
+earlier.** In both route handlers the slot wraps exactly the `run_in_threadpool`
+call. A request refused for its content type (415), its shape (422) or its size
+(413) costs nothing, so it must not spend a turn from the budget either —
+otherwise cheap junk could deny service to a real turn while saving no money. The
+converse matters more and is the phase's whole point: a refused turn reaches no
+provider at all, which is asserted directly against the `respx` call counters.
+
+**Two ceilings, two different refusals, and only one new word.** Saturating
+concurrency is exactly what `RUNTIME_BUSY` ("ORION is already handling a turn",
+409) already described, so it is reused unchanged. The per-window cap needed one
+new member: refusing because thirty turns have already run this minute is not the
+same statement, and reusing the busy fault would have had the interface say
+something untrue while handling zero turns. `RATE_LIMITED` (429) is that single
+addition — a fixed sentence in `FAULT_RESPONSES`, never composed at runtime,
+leaving the vocabulary closed and `set(FAULT_RESPONSES) == set(VoiceInterfaceFault)`
+still true. The frontend needed no change: `failureForStatus` already maps every
+non-502/503 status to `rejected`, which renders the calm sentence "ORION could not
+accept that request."
+
+**Process-local, because that is the honest unit here.** No Redis, no database, no
+distributed coordination, no per-client keying, no IP map, no session, no header
+inspection. On a loopback service with no authentication there is no trustworthy
+client identity to key on, and inventing one — hashing a source address, minting a
+cookie — would add tracking state to a service whose interface promises the user
+that nothing is recorded. Per-process is also the unit that actually bounds vendor
+spend, which is what this phase is for. Distributed limiting is deferred until
+there is something distributed to limit; today there is one process on one
+machine.
+
+**A fixed window, not a sliding one or a token bucket.** Two integers and a float:
+it cannot grow, cannot leak, needs no background task, no eviction policy and no
+per-client bookkeeping. The known cost is the boundary burst — up to twice the
+per-window figure across two adjacent windows — accepted because the concurrency
+ceiling still bounds what those turns can do at any instant. `time.monotonic` is
+used rather than a wall clock, so an NTP correction stepping time backwards cannot
+silently widen the window.
+
+**The limits are constants, and deliberately not configuration.** They are not
+read from `Settings`, `.env` or any environment variable. A security ceiling that
+can be raised by editing a file on the machine being protected is a default, not a
+ceiling. The `TurnLimiter` constructor accepts them only so tests can drive small,
+fast values, and `create_app` passes none; a hygiene test AST-asserts the three
+module constants are literals rather than computed, and another asserts the module
+imports nothing capable of reading configuration. Three further tests prove a
+caller cannot widen the ceiling through a request body, a query parameter or a
+header.
+
+**Fail closed, including on its own inputs.** A zero or negative ceiling raises at
+construction rather than producing a limiter that permits everything. Every
+rejection raises `VoiceInterfaceError`, rendered by the existing handlers with no
+detail — no remaining count, no window, no reset time, no `X-RateLimit-*` header,
+asserted. The slot is released in a `finally`, because a limiter that leaks
+capacity under provider failure eventually refuses everything, which is a denial of
+service dressed as a safety feature.
+
+**Zero persistence is unchanged, and re-proved with the limiter in the path.**
+Three counters on one object owned by one app. Nothing opens a file, touches a
+database or writes a byte; `tests/interface/test_security.py`'s filesystem
+assertion is re-run in the new suite over a burst that is mostly *refusals*, and
+still finds an empty directory. Restarting the process resets the limiter because
+there is nowhere for the state to survive. The interface's promise to the user —
+"Nothing is recorded, stored or logged" — is untouched, and no logging was added.
+
+**Two Phase 2 tests were re-pointed, not weakened.**
+`test_concurrent_requests_do_not_share_a_runtime` and
+`test_concurrent_requests_return_their_own_transcripts` drive sixteen overlapping
+turns to prove *runtime isolation* — a property about the service, not about how
+many turns ORION permits, and one that predates this ceiling by several missions.
+They now run on an `isolation_client` fixture whose limiter is sized for the
+scenario, so a 409 can only mean the bug they were written to catch. Every
+assertion in both is unchanged, and the shipped ceiling is proven separately, and
+proven to equal the module constants, in `tests/interface/test_rate_limit.py`.
+
+**Deliberately not in this phase:** authentication, authorization, structured
+logging, request IDs, persistence, telemetry, usage/cost tracking, `SecretStr`
+hardening, the broken `orion.cli` entrypoint, and every other Mission 12 item. The
+deployment model is unchanged: loopback only, and this is a cost ceiling rather
+than an access control — it does not make exposing the service beyond loopback
+safe, and `app.py`'s docstring now says exactly that instead of claiming there is
+no rate limiting at all.
+
+**Files added:** `src/orion/interface/limits.py`,
+`tests/interface/test_rate_limit.py`. **Files modified:**
+`src/orion/interface/app.py` (import, one constructor parameter, two `with`
+blocks, docstring), `src/orion/interface/service.py` (one enum member, one
+`FAULT_RESPONSES` row), `tests/interface/conftest.py` (one fixture),
+`tests/interface/test_service.py` (two tests re-pointed at it),
+`tests/interface/test_import_hygiene.py` (five limiter assertions), and this
+document. No dependency was added.
+
+**Verification:** `pytest` 1440 passed (1389 before, 51 added), `ruff check .`,
+`ruff format --check .` (172 files), `mypy src --strict` (80 files) all clean.
+Frontend 509 tests, `typecheck`, `lint` and a clean production build, byte-identical
+to Mission 11.2. Seven mutations — a leaked slot, a decremented window counter, a
+window that never resets, each endpoint left unguarded, an environment-readable
+ceiling, and the two faults swapped — were each caught by between one and six
+tests, and every mutated file was restored byte-identically.

@@ -26,6 +26,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from orion.interface.app import create_app
+from orion.interface.limits import TurnLimiter
 from orion.interface.service import VoiceTurnService
 
 FAKE_DEEPGRAM_KEY = "dg-test-key-ZZQQ7788-not-a-real-credential"
@@ -76,6 +77,26 @@ def client(service: VoiceTurnService) -> Iterator[TestClient]:
     Deepgram key and one that does not.
     """
     with TestClient(create_app(service)) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def isolation_client(service: VoiceTurnService) -> Iterator[TestClient]:
+    """A client whose turn ceiling is raised well above the scenario.
+
+    Two Phase 2 tests prove *runtime isolation* — sixteen overlapping turns
+    must produce sixteen private `VoiceRuntime`s and sixteen uncrossed
+    transcripts. That property is about the service, not about how many turns
+    ORION permits, and it predates Mission 12.1's ceiling by several missions.
+    Running them against the default `TurnLimiter` would make them assert the
+    limiter instead, so they get one sized for the scenario. Every assertion
+    in those tests is unchanged; only the ceiling they run beneath is.
+
+    The default ceiling itself is proven separately, and proven to be exactly
+    the module constants, in `tests/interface/test_rate_limit.py`.
+    """
+    limiter = TurnLimiter(max_concurrent=32, max_per_window=1_000)
+    with TestClient(create_app(service, limiter=limiter)) as test_client:
         yield test_client
 
 
