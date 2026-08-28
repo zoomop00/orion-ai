@@ -38,6 +38,13 @@ cp .env.example .env
 uv run orion analyze XAUUSD
 ```
 
+One analysis of XAUUSD on the 1h chart — market data, validation, deterministic
+analysis, AI reasoning, the decision engine and the Risk Guardian — printed to the
+terminal. It needs `ANTHROPIC_API_KEY` and `TWELVE_DATA_API_KEY`; without them it says
+so and exits non-zero. **It never places an order**, and it writes nothing to disk — no
+paper account is opened, so the risk panel honestly reports `no_portfolio_store`.
+`orion --help` lists the commands.
+
 ## Development
 
 ```bash
@@ -134,8 +141,8 @@ src/orion/
     reasoning/        # AI reasoning provider abstraction + Claude implementation + structured schemas
     risk/             # independent deterministic Risk Guardian (can veto the AI's proposal)
     memory/           # append-only SQLite decision journal
-    pipeline.py       # wires the above into one auditable run
-    cli.py            # `orion analyze <symbol>` entrypoint
+    orchestrator/     # Mission 10 Phase 5.1 - wires the above into one auditable analysis
+    cli.py            # `orion analyze <symbol>` - the console entrypoint
 
     interface/        # Mission 10 Phase 2 - localhost HTTP adapter over the voice runtime
     voice/            # Mission 9 - STT/TTS providers, audio I/O, the voice state machine
