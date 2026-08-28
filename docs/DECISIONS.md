@@ -3288,3 +3288,122 @@ separately and is deliberately not fixed here.
 **Files modified:** this document only. No source file, no test, no
 dependency manifest, and no frontend file was touched. `pyproject.toml` and
 `uv.lock` are unchanged; no dependency was added or removed.
+
+## 2026-08-28 — Mission 11.1: connector contracts, an empty allowlist, and one
+MCP server switched off
+
+**Contracts only. No connector, no MCP, no tool-calling.** `src/orion/
+connectors/` ships `Capability`, `ConnectorSpec`, `ConnectorSource`,
+`ConnectorResult`, `ConnectorError` and a registry whose allowlist is empty.
+There is no connector implementation, no client, no transport, no MCP server,
+no MCP client and no mechanism by which a model could invoke anything. The
+Mission 11 audit found no candidate connector with demonstrated value to
+ORION's analysis chain, so the honest deliverable is the shape a future
+connector must fit and nothing occupying it.
+
+**The audit's most useful finding was not about ORION's code.** Next.js 16.3.3
+vendors `@modelcontextprotocol/sdk` and ships a development MCP server whose
+`experimental.mcpServer` flag defaults to **`true`** (`defaultConfig.
+experimental` in `next/dist/server/config-shared.js`). With it on, `next dev`
+mounts an unauthenticated JSON-RPC endpoint at `/_next/mcp`; Next constructs
+the transport with only `{ sessionIdGenerator: undefined }`, so
+`enableDnsRebindingProtection` takes the SDK's default of `false` and neither
+`allowedHosts` nor `allowedOrigins` is set — no `Origin` check, no `Host`
+check. Its nine tools disclose the absolute project path, the dev log file
+path, the route table, compilation errors and server-action source filenames.
+It is development-only (attached in `hot-reloader-turbopack`/`-webpack`, absent
+from `next-server`/`base-server`) and cannot reach ORION's backend,
+credentials, engines or risk system. Whether a browser could actually drive it
+was **not** tested and is not claimed.
+
+It is switched off anyway, in `frontend/next.config.ts`, and that is the whole
+frontend change: **`experimental: { mcpServer: false }`**. The brief's §19 rule
+is an *explicit allowlist*, and an MCP server nobody in this project chose,
+evaluated or allowlisted is precisely what that rule exists to prevent. A
+framework default is not a decision. `tests/connectors/test_import_hygiene.py`
+asserts the flag stays false, so re-enabling it is a visible act.
+
+**READ is the only capability that exists.** `Capability` has one member, for
+the reason `CapabilityStatus` has one: a two-member enum would imply a `WRITE`
+case this build can reach. Because `WRITE` and `EXECUTE` are not members, a
+connector that writes or acts is not "forbidden by policy" — it is
+unrepresentable, and `Capability("write")` raises. Granting one later must be
+an edit to that enum with an entry in this document behind it.
+
+**The allowlist is code, not configuration.** `CONNECTOR_ALLOWLIST` is a module
+constant built at import time through `build_allowlist`, which rejects
+duplicates. It is deliberately not read from `Settings`, an environment
+variable or a file, so enabling a connector cannot be done by editing `.env` on
+a deployed machine. The shipped empty tuple goes through the same validator a
+real one will. `require_connector` therefore refuses every input, including
+every name the brief lists as a possibility (`github`, `browser`, `database`,
+`notifications`, ...) — those are candidates, and none was approved.
+
+**Nothing here can reach the Decision Engine or the Risk Guardian, and that is
+structural.** The package imports no other ORION package at all — not
+`orion.config`, `orion.risk`, `orion.decision`, `orion.paper` or `orion.memory`
+— and no network, filesystem, database, subprocess, logging, dynamic-import or
+vendor module. An AST hygiene test proves each claim from the source rather
+than from `sys.modules`, in the same idiom `tests/risk/` and
+`tests/orchestrator/` already use. A separate test proves nothing in Missions
+0-10 imports `orion.connectors`, so deleting this package would leave the rest
+of ORION byte-identical — which is what makes shipping an empty contract layer
+a safe act rather than a commitment.
+
+**Provenance is unconstructible-without.** A `ConnectorResult` requires a
+`ConnectorSource` naming the connector and a timezone-aware `retrieved_at`,
+mirroring `DataSourceMeta` and `EconomicCalendarSourceMeta`. A naive timestamp
+is refused: it cannot be compared to a bar's `as_of` without guessing a zone,
+and guessing is what this layer exists to refuse.
+
+**No caller-provided URL, no caller-provided credential — by absence, not by
+validation.** `ConnectorSpec`'s fields are exactly `{name, capability,
+description}` and the model is `extra="forbid"`, so `url`, `base_url`,
+`endpoint`, `token` and `api_key` are refused by name. A future connector must
+hardcode its endpoint the way `orion.voice.deepgram_stt` does, **not** read a
+base URL from the environment the way `TwelveDataProvider` and
+`FinnhubEconomicCalendarProvider` do — `TWELVE_DATA_BASE_URL` and
+`FINNHUB_BASE_URL` are free-form env-overridable strings with no scheme check
+and no host allowlist, and that pattern is deliberately not inherited here.
+
+**Errors are detail-free and fail closed.** `ConnectorError.__init__` takes no
+parameter, so there is no argument position in which a connector name, a URL, a
+query string or a vendor's error text could be placed — the same discipline as
+`ResponseProviderError` and `OrionApiError`, and the reason `orion.http_errors`
+exists at all after a real HIGH-severity key-in-URL leak in this repository.
+`require_connector` raises `from None`, so no cause stays reachable through a
+traceback. The one error that *does* carry detail is `build_allowlist`'s
+duplicate `ValueError`: `specs` is written in this repository by a developer
+and validated at import time, so it can only ever name a string typed here and
+never reaches a user.
+
+**Where connector output would enter, when one exists.** As validated evidence
+upstream of reasoning, the way `MarketSnapshot` and `EconomicCalendarSnapshot`
+already do — never as a tool a model may call. Nothing in this package provides
+a mechanism for the latter, which is the point: it is what stops a connector
+silently becoming a trading authority.
+
+**Deliberately not done here:** no Python MCP SDK was adopted (it would pull
+`sse-starlette`, which `tests/interface/test_import_hygiene.py` bans by name);
+no dependency was added or removed; no provider implementation was touched; the
+broken `[project.scripts] orion = "orion.cli:main"` entrypoint remains tracked
+separately. **Recorded as a separate future hardening item, not done in 11.1:**
+the four API keys in `orion.config.Settings` are plain `str`, not `SecretStr`.
+Nothing currently dumps, logs or reprs `Settings`, and `describe_http_error`
+covers the URL-leak path, but a `model_dump()` would expose them in plaintext.
+That change touches Mission 0-10 source and belongs to its own reviewed task.
+
+**Mission 11.2 (one read-only connector, only if a concrete need is identified)
+and any MCP runtime remain unapproved.**
+
+**Files added:** `src/orion/connectors/{__init__,schemas,errors}.py`,
+`tests/connectors/{__init__,conftest,test_schemas,test_registry,
+test_import_hygiene}.py`. **Files modified:** `frontend/next.config.ts` (one
+setting) and this document.
+
+**Verification:** `pytest` 1389 passed (1220 before, 169 added), `ruff check
+.`, `ruff format --check .` (170 files), `mypy src --strict` (79 files) and
+`mypy tests/connectors` all clean. Frontend 509 tests, `typecheck`, `lint` and
+a clean production build, byte-identical to Phase 5.5 apart from the one
+config setting. No Mission 0-10 source file was touched; `pyproject.toml`,
+`uv.lock`, `package.json` and `package-lock.json` are unchanged.
