@@ -8,23 +8,42 @@ whatever the test process happened to import first.
 The direction being protected is one-way, and it is the whole reason this
 package exists as a separate package at all:
 
+    orion.interface     ->  orion.orchestrator        (Phase 5.2, and only it)
     orion.orchestrator  ->  orion.{data,analysis,decision,risk,paper,reasoning}
-    orion.orchestrator  ->  orion.voice        (the ResponseProvider ABC only)
-    nothing             ->  orion.orchestrator
+    orion.orchestrator  ->  orion.voice               (the ResponseProvider seam)
+    no engine           ->  orion.orchestrator
 
 `orion.voice` is forbidden by its own hygiene test from importing any
 engine, so an analysis-backed `ResponseProvider` cannot live there. It lives
 here instead, and this file is what keeps the arrow from ever reversing —
-deleting this package must leave Missions 0-9 exactly as they were, which is
-only true while nothing points back at it.
+deleting this package must leave Missions 0-9's *engines* exactly as they
+were, which is only true while none of them points back at it.
+
+PHASE 5.2 NARROWED THE INBOUND RULE RATHER THAN DROPPING IT. Phase 5.1
+allowed nothing at all to import this package, because nothing needed to.
+The HTTP adapter now does, and that is the whole point of 5.2 — but it is
+the *only* thing that may. Every engine, the voice runtime included, still
+must not, so the layering the rest of this repo's hygiene tests protect is
+unchanged: `orion.interface` may call the orchestrator, and it still may not
+reach `orion.decision`/`orion.risk`/`orion.paper` itself.
 
 The outbound bans matter as much as the inbound one. This is a composition
 root, and composition roots attract everything: a credential read, a logger,
 a database handle, a web framework, a uuid. Each is banned here and belongs
-to the layer that already owns it — `orion.config` reads the environment,
-`orion.interface` owns the HTTP framework, `orion.memory` owns SQLAlchemy,
-and the concrete vendor providers own their SDKs. This package receives
-constructed objects and nothing else.
+to the layer that already owns it — `orion.interface` owns the HTTP
+framework, `orion.memory` owns SQLAlchemy, and the concrete vendor providers
+own their SDKs.
+
+ONE FILE MAY READ CONFIGURATION, AND ONLY ONE. Phase 5.2 needs something to
+turn `Settings` into constructed providers, and `orion.interface` is
+forbidden from being that something (see its own hygiene test's
+"an HTTP handler is one edit away from making trading decisions"). So
+`wiring.py` does it, and `_ALLOWED_EXTRA_IMPORTS_BY_FILE` below is the
+carve-out — the same per-file allowlist idiom `tests/voice/test_import_
+hygiene.py` uses for `sounddevice` and the frontend's source-safety test uses
+for `fetch`. Every other module in this package still may not read the
+environment, and `__init__.py` deliberately does not re-export `wiring`, so
+`import orion.orchestrator` still costs no vendor SDK.
 """
 
 from __future__ import annotations
@@ -81,10 +100,20 @@ DISALLOWED_ORION_SUBPACKAGES = {
     "orion.research",
 }
 
+# The per-file carve-out. `wiring.py` is the one place allowed to read
+# `Settings`, because something has to and `orion.interface` may not.
+_ALLOWED_EXTRA_ORION_IMPORTS_BY_FILE: dict[str, set[str]] = {
+    "wiring.py": {"orion.config"},
+}
+
 DANGEROUS_CALL_NAMES = {"exec", "eval", "compile"}
 DANGEROUS_MODULES = {"subprocess", "os"}
 
-MISSION_0_9_PACKAGES = [
+# Everything that must never import the orchestrator. `interface` is
+# deliberately absent from this list and asserted separately below: it is the
+# one permitted importer, and stating that as its own test makes the
+# exception visible rather than a hole in a list.
+ENGINE_PACKAGES = [
     "data",
     "analysis",
     "research",
@@ -97,7 +126,6 @@ MISSION_0_9_PACKAGES = [
     "reflection",
     "backtest",
     "voice",
-    "interface",
 ]
 
 
@@ -144,6 +172,7 @@ def test_orchestrator_imports_no_vendor_sdk_transport_or_persistence() -> None:
 def test_orchestrator_reads_no_configuration_and_no_out_of_scope_package() -> None:
     offenders: dict[str, set[str]] = {}
     for source_path in _source_files():
+        allowed = _ALLOWED_EXTRA_ORION_IMPORTS_BY_FILE.get(source_path.name, set())
         found = {
             module
             for module in _imported_modules(source_path)
@@ -151,10 +180,47 @@ def test_orchestrator_reads_no_configuration_and_no_out_of_scope_package() -> No
                 module == package or module.startswith(package + ".")
                 for package in DISALLOWED_ORION_SUBPACKAGES
             )
+            and module not in allowed
         }
         if found:
             offenders[source_path.name] = found
     assert not offenders, f"orion.orchestrator imports out-of-scope packages: {offenders}"
+
+
+def test_only_the_wiring_file_reads_configuration() -> None:
+    """`wiring.py` may import `orion.config`; nothing else in the package may.
+
+    The inverse assertion matters as much as the ban: if the carve-out ever
+    stops being used, it should be deleted rather than left standing as a
+    permission nobody needs.
+    """
+    for source_path in _source_files():
+        reads_config = any(
+            module == "orion.config" or module.startswith("orion.config.")
+            for module in _imported_modules(source_path)
+        )
+        if source_path.name == "wiring.py":
+            assert reads_config, "wiring.py should be the file that reads Settings"
+        else:
+            assert not reads_config, f"{source_path.name} must not read configuration"
+
+
+def test_importing_the_package_costs_no_vendor_sdk() -> None:
+    """`__init__.py` must not re-export `wiring`.
+
+    `wiring.py` pulls in the Twelve Data and Anthropic providers, and through
+    them `httpx` and `anthropic`. Keeping it off the package's front door
+    means `import orion.orchestrator` stays as cheap and as credential-free
+    as Phase 5.1 made it, and makes the one file with vendor reach visible at
+    every call site that wants it.
+    """
+    init = _package_dir() / "__init__.py"
+    found = {
+        module
+        for module in _imported_modules(init)
+        if module == "orion.orchestrator.wiring" or module.endswith(".wiring")
+    }
+    assert not found, f"__init__.py re-exports the wiring module: {found}"
 
 
 def test_orchestrator_touches_orion_voice_only_for_the_response_seam() -> None:
@@ -197,13 +263,13 @@ def test_orchestrator_has_no_exec_eval_or_subprocess_calls() -> None:
     assert not offenders, f"orion.orchestrator contains dangerous calls/imports: {offenders}"
 
 
-def test_no_mission_0_9_package_imports_the_orchestrator() -> None:
-    # The inbound half. Missions 0-9 must be exactly as they were: an
-    # engine, the voice runtime or the HTTP adapter importing this package
-    # would make the orchestrator un-deletable and would invert the layering
-    # every other hygiene test in this repo protects.
+def test_no_engine_package_imports_the_orchestrator() -> None:
+    # The inbound half. Every engine and the voice runtime must be exactly as
+    # they were: an import in this direction would invert the layering every
+    # other hygiene test in this repo protects, and would make the
+    # orchestrator un-deletable from underneath them.
     offenders: dict[str, set[str]] = {}
-    for package_name in MISSION_0_9_PACKAGES:
+    for package_name in ENGINE_PACKAGES:
         package_dir = _repo_src_dir() / package_name
         if not package_dir.is_dir():
             continue
@@ -215,14 +281,43 @@ def test_no_mission_0_9_package_imports_the_orchestrator() -> None:
             }
             if found:
                 offenders[str(source_path.relative_to(_repo_src_dir().parent))] = found
-    assert not offenders, f"a Mission 0-9 package imports orion.orchestrator: {offenders}"
+    assert not offenders, f"an engine package imports orion.orchestrator: {offenders}"
 
 
-def test_the_orchestrator_is_still_unwired_in_phase_5_1() -> None:
-    # Phase 5.1 builds the orchestrator; Phase 5.2 connects it. Until then
-    # `orion.interface` must still construct Mission 9's static provider, so
-    # that "the HTTP surface is unchanged" is a checked fact rather than a
-    # claim in a commit message.
+def test_the_http_adapter_is_the_only_thing_wired_to_the_orchestrator() -> None:
+    """Phase 5.2's arrow, asserted from both ends.
+
+    `orion.interface` must reach the orchestrator (otherwise nothing analyses)
+    and must still not reach the engines directly (otherwise an HTTP handler
+    is one edit away from a trade decision). Both halves are checked here so
+    the exception carved out of the inbound rule above stays exactly as wide
+    as it was meant to be.
+    """
+    interface_dir = _repo_src_dir() / "interface"
+    imported: set[str] = set()
+    for source_path in sorted(interface_dir.rglob("*.py")):
+        imported |= _imported_modules(source_path)
+
+    assert any(module.startswith("orion.orchestrator") for module in imported), (
+        "orion.interface should reach the orchestrator in Phase 5.2"
+    )
+    forbidden = {
+        module
+        for module in imported
+        if any(
+            module == f"orion.{package}" or module.startswith(f"orion.{package}.")
+            for package in ENGINE_PACKAGES
+            if package != "voice"
+        )
+    }
+    assert not forbidden, f"orion.interface reaches an engine directly: {forbidden}"
+
+
+def test_the_static_response_provider_is_still_the_fallback() -> None:
+    """Wiring the orchestrator in must not delete the path that existed
+    before it. A deployment with no Twelve Data or Anthropic credential still
+    answers ordinary turns exactly as Phase 3 did, and the service is the
+    file that has to say so."""
     service = (_repo_src_dir() / "interface" / "service.py").read_text(encoding="utf-8")
     assert "StaticResponseProvider" in service
-    assert "AnalysisResponseProvider" not in service
+    assert "AnalysisResponseProvider" in service

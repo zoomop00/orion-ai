@@ -69,7 +69,10 @@ def test_runtime_is_not_retained_on_the_service(
     client.post(TEXT_URL, json={"text": "hello"})
 
     assert vars(service) == before
-    assert set(vars(service)) == {"_deepgram_api_key"}
+    # Phase 5.2 adds one attribute, and it is a factory rather than an
+    # instance: nothing a turn produced is reachable from the service after
+    # the request, which is the property this test exists to protect.
+    assert set(vars(service)) == {"_deepgram_api_key", "_analysis_factory"}
 
 
 def test_every_runtime_ends_idle_and_none_are_reused(

@@ -2,14 +2,36 @@
 
 This module is an ADAPTER, not the ORION orchestrator. It knows how to
 assemble Mission 9's five injected dependencies into a `VoiceRuntime`, run
-exactly one turn, and reduce the result to a wire shape. It knows nothing
-about market data, evidence, reasoning, risk, portfolios, memory or
-reflection, and it must stay that way: the real orchestrator (which decides
-*what* ORION does with what it heard) is later work, and building a
-half-version of it here would put decision-making in an HTTP handler. The
-one thing standing between "user said something" and "ORION replies" is
-still `orion.voice.response.StaticResponseProvider`, which by design never
-reads the transcript at all.
+exactly one turn, and reduce the result to a wire shape. It still knows
+nothing about market data, evidence, reasoning, risk or portfolios, and it
+must stay that way — `tests/interface/test_import_hygiene.py` forbids this
+package from importing `orion.decision`/`orion.risk`/`orion.paper` outright,
+because "the moment it can reach them, an HTTP handler is one edit away from
+making trading decisions."
+
+WHAT CHANGED IN PHASE 5.2 IS WHO ANSWERS, NOT WHAT THIS FILE KNOWS. The
+orchestrator built in Phase 5.1 now exists, so the thing standing between
+"user said something" and "ORION replies" can be
+`orion.orchestrator.response.AnalysisResponseProvider` instead of
+`StaticResponseProvider`. This module hands it a transcript and receives a
+sentence plus, sometimes, an `AnalysisReport`; it never calls `decide()` or
+`review()` and could not if it wanted to. When no `AnalysisService` is
+supplied — no Twelve Data key, no Anthropic key, or a caller that simply did
+not wire one — behaviour is byte-identical to Phase 2/3: `StaticResponseProvider`,
+no analysis, `analysis: null`.
+
+THE ANALYSIS PROVIDER IS BUILT PER REQUEST, LIKE EVERYTHING ELSE HERE.
+`AnalysisResponseProvider` holds the completed report on itself so it can be
+read back after the turn (`ResponseProvider.respond` returns `str`, and
+widening Mission 9's ABC for a Mission 10 convenience was not on the table).
+That is only safe because a fresh one is constructed inside `_run` for every
+call and dropped when it returns — one request's analysis is unreachable
+from another's, structurally, for the same reason one request's
+`VoiceStateMachine` is. The `AnalysisService` itself is built per request too,
+through an injected factory: `orion.risk.policy.RiskPolicy.from_settings`
+documents that a policy must be built fresh each cycle from an uncached
+`get_settings()`, because that is what lets an operator engage the kill
+switch by editing `.env` without restarting the process.
 
 ONE RUNTIME PER REQUEST, ALWAYS. `run_audio_turn`/`run_text_turn` each
 construct a brand-new `VoiceRuntime` — and brand-new providers, and a
@@ -52,12 +74,25 @@ message.
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 
 import httpx
 
-from orion.interface.schemas import MAX_REQUEST_BODY_BYTES, VoiceTurnResponse
+from orion.interface.schemas import (
+    MAX_REQUEST_BODY_BYTES,
+    AnalysisSummary,
+    CapabilitySummary,
+    ConclusionSummary,
+    MomentumSummary,
+    RiskSummary,
+    StructureSummary,
+    VoiceTurnResponse,
+)
+from orion.orchestrator.analysis import AnalysisService
+from orion.orchestrator.response import AnalysisResponseProvider
+from orion.orchestrator.schemas import AnalysisReport
 from orion.voice.audio_input import AudioInputError, InMemoryAudioInput
 from orion.voice.audio_output import AudioOutputError, InMemoryAudioOutput
 from orion.voice.deepgram_stt import DeepgramTranscriptionProvider
@@ -93,6 +128,19 @@ _MEDIA_TYPE_BY_FORMAT = {
     "flac": "audio/flac",
 }
 _FALLBACK_MEDIA_TYPE = "application/octet-stream"
+
+# Builds one request-scoped `AnalysisService`, or returns `None` when this
+# deployment cannot analyse. A callable rather than an instance so the
+# `RiskPolicy` inside it is rebuilt per request — see the module docstring.
+AnalysisServiceFactory = Callable[[], AnalysisService | None]
+
+# `orion.risk.schemas.ControlStatus.FAILED.value`, restated as a literal
+# because `tests/interface/test_import_hygiene.py` forbids this package from
+# importing `orion.risk` at all — the rule that keeps an HTTP handler from
+# ever being one edit away from a trade decision. A test asserts this string
+# still equals the enum member it mirrors, so the two cannot drift apart
+# silently.
+_FAILED_CONTROL_STATUS = "failed"
 
 
 class VoiceInterfaceFault(StrEnum):
@@ -211,13 +259,28 @@ class VoiceTurnService:
     testable with no environment at all.
     """
 
-    def __init__(self, deepgram_api_key: str) -> None:
+    def __init__(
+        self,
+        deepgram_api_key: str,
+        analysis_factory: AnalysisServiceFactory | None = None,
+    ) -> None:
         self._deepgram_api_key = deepgram_api_key
+        self._analysis_factory = analysis_factory
 
     @property
     def voice_available(self) -> bool:
         """Whether a credential is present. A boolean — never the key."""
         return bool(self._deepgram_api_key)
+
+    @property
+    def analysis_available(self) -> bool:
+        """Whether this service was wired to analyse at all.
+
+        A boolean about wiring, not about credentials — the factory itself
+        decides whether the keys it needs are present, and returns `None` if
+        they are not. Never a key, never its length, never a prefix.
+        """
+        return self._analysis_factory is not None
 
     def run_audio_turn(self, audio: bytes) -> VoiceTurnResponse:
         """Transcribe `audio`, answer it, and speak the answer.
@@ -288,10 +351,21 @@ class VoiceTurnService:
         a raw message is most likely to contain something that should not
         cross this boundary, so it is the case that most needs flattening.
         """
+        # Fresh for this request and unreachable from any other. When no
+        # factory was supplied, or it declines for want of credentials, this
+        # is exactly the Phase 2/3 provider and nothing below behaves
+        # differently.
+        analysis_service = self._analysis_factory() if self._analysis_factory else None
+        response_provider = (
+            AnalysisResponseProvider(analysis_service)
+            if analysis_service is not None
+            else StaticResponseProvider()
+        )
+
         runtime = VoiceRuntime(
             audio_input=audio_input,
             transcription=transcription,
-            response_provider=StaticResponseProvider(),
+            response_provider=response_provider,
             synthesis=DeepgramSpeechSynthesisProvider(self._deepgram_api_key, client=client),
             audio_output=InMemoryAudioOutput(),
         )
@@ -309,10 +383,119 @@ class VoiceTurnService:
         except Exception as exc:
             raise VoiceInterfaceError(VoiceInterfaceFault.TURN_FAILED) from exc
 
-        return _to_response(result, state=runtime.state.value)
+        report = (
+            response_provider.last_report
+            if isinstance(response_provider, AnalysisResponseProvider)
+            else None
+        )
+        try:
+            analysis = _to_analysis_summary(report) if report is not None else None
+        except Exception as exc:
+            # The reduction below re-validates every bound independently of
+            # the engines that produced the values. A report that cannot
+            # satisfy those bounds is one this boundary refuses to serialise
+            # at all — a failed turn, never a response with a field quietly
+            # dropped or clamped into range.
+            raise VoiceInterfaceError(VoiceInterfaceFault.TURN_FAILED) from exc
+
+        return _to_response(result, state=runtime.state.value, analysis=analysis)
 
 
-def _to_response(result: VoiceTurnResult, *, state: str) -> VoiceTurnResponse:
+def _to_analysis_summary(report: AnalysisReport) -> AnalysisSummary:
+    """Reduce a full `AnalysisReport` to the client-visible allowlist.
+
+    Every field is named explicitly. There is no `model_dump()` here and no
+    loop over `report`'s attributes, which is the point: a field added to
+    `AnalysisReport` — a new provenance ref, a vendor identifier, a debug
+    payload — reaches a browser only if someone writes a line here to put it
+    there. The model identifier, the prompt version, the evidence
+    fingerprint, the engine and guardian versions and the risk-policy content
+    hash all exist on `report` and all stop at this function, exactly as
+    `_to_response` already drops the STT/TTS vendor detail from a
+    `VoiceTurnResult`.
+
+    Enum members become `.value` strings, and `AnalysisSummary`'s own bounds
+    re-check every one of them. If any value could not have come from an
+    engine, construction raises and the caller turns the whole turn into a
+    clean failure rather than serialising it.
+
+    Nothing is filled in. `IndicatorSnapshot`'s `None`s stay `None`, a risk
+    panel with no verdict stays a risk panel with no verdict, and the two
+    `NotConnectedPanel`s become `CapabilitySummary`s whose only possible
+    status is `"not_connected"`.
+    """
+    evidence = report.evidence
+    indicators = evidence.indicators
+    structure = evidence.structure
+    reasoning = report.reasoning
+    decision = report.decision
+    verdict = report.risk.verdict
+
+    return AnalysisSummary(
+        analysis_id=report.analysis_id,
+        symbol=report.symbol,
+        timeframe=report.timeframe.value,
+        as_of=evidence.as_of,
+        analyzed_at=report.analyzed_at,
+        last_price=evidence.last_price,
+        bar_count=evidence.bar_count,
+        structure=StructureSummary(
+            trend=structure.trend.value,
+            volatility=structure.volatility.value,
+            nearest_support=structure.nearest_support,
+            nearest_resistance=structure.nearest_resistance,
+            swing_high_count=structure.swing_high_count,
+            swing_low_count=structure.swing_low_count,
+        ),
+        momentum=MomentumSummary(
+            rsi=indicators.rsi,
+            ema_fast=indicators.ema_fast,
+            ema_slow=indicators.ema_slow,
+            sma_slow=indicators.sma_slow,
+            atr=indicators.atr,
+            rsi_length=indicators.rsi_length,
+            ema_fast_length=indicators.ema_fast_length,
+            ema_slow_length=indicators.ema_slow_length,
+        ),
+        news=CapabilitySummary(detail=report.news.detail),
+        macro=CapabilitySummary(detail=report.macro.detail),
+        risk=RiskSummary(
+            availability=report.risk.availability.value,
+            outcome=verdict.outcome.value if verdict is not None else None,
+            reason_codes=(
+                tuple(code.value for code in verdict.reason_codes) if verdict is not None else ()
+            ),
+            # Only the controls that actually failed. A passing control is
+            # not news, and shipping all fourteen every time would make the
+            # one that matters harder to find, not easier.
+            failed_controls=(
+                tuple(
+                    outcome.control.value
+                    for outcome in verdict.control_outcomes
+                    if outcome.status.value == _FAILED_CONTROL_STATUS
+                )
+                if verdict is not None
+                else ()
+            ),
+            portfolio_as_of=report.risk.portfolio_as_of,
+        ),
+        confidence=reasoning.confidence,
+        risk_level=reasoning.risk_level.value,
+        conclusion=ConclusionSummary(
+            action=decision.action.value,
+            direction=decision.direction.value,
+            rationale=reasoning.rationale,
+            reason_codes=tuple(code.value for code in decision.reason_codes),
+        ),
+    )
+
+
+def _to_response(
+    result: VoiceTurnResult,
+    *,
+    state: str,
+    analysis: AnalysisSummary | None = None,
+) -> VoiceTurnResponse:
     """Reduce a full `VoiceTurnResult` to the client-visible allowlist.
 
     `result.transcript` carries the STT vendor's name, model identifier,
@@ -329,4 +512,5 @@ def _to_response(result: VoiceTurnResult, *, state: str) -> VoiceTurnResponse:
         audio_media_type=_MEDIA_TYPE_BY_FORMAT.get(result.speech.format, _FALLBACK_MEDIA_TYPE),
         audio_bytes=len(audio),
         state=state,
+        analysis=analysis,
     )

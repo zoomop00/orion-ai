@@ -38,7 +38,10 @@ forbids outright; metadata-in-headers hits the ~8 KB header ceiling once a
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from orion.voice.audio_input import MAX_AUDIO_INPUT_BYTES
 
@@ -69,6 +72,21 @@ ACCEPTED_AUDIO_CONTENT_TYPES = frozenset(
 )
 
 
+# Independent ceilings for every string and list that crosses this boundary
+# as part of an analysis. Deliberately restated rather than imported from the
+# engines that produce them: this layer must never be the looser of the two,
+# and a value that could not have come from an engine must not be
+# serialisable here at all. `MAX_RATIONALE_CHARS` matches
+# `orion.reasoning.schemas.ReasoningVerdict.rationale`'s own 400-character
+# cap; the rest are generous bounds on closed enum vocabularies.
+MAX_RATIONALE_CHARS = 400
+MAX_DETAIL_CHARS = 200
+MAX_CODE_CHARS = 64
+MAX_SYMBOL_CHARS = 16
+MAX_ID_CHARS = 128
+MAX_CODE_LIST = 32
+
+
 class TextTurnRequest(BaseModel):
     """The text-fallback request body: one field, no local rules.
 
@@ -85,6 +103,155 @@ class TextTurnRequest(BaseModel):
         description="What the user said, as text. Validated by "
         "orion.voice.schemas.Transcript, not here — see the module docstring."
     )
+
+
+# ---------------------------------------------------------------- analysis --
+#
+# Phase 5.2's addition, and the same allowlist discipline `VoiceTurnResponse`
+# already applies to a `VoiceTurnResult`.
+#
+# `orion.orchestrator.schemas.AnalysisReport` embeds whole domain objects:
+# `ReasoningOutput` carries the model identifier, the prompt version and a
+# 64-character evidence fingerprint; `ProposedDecision` carries an engine
+# version and two provenance refs; `RiskVerdict` carries a guardian version
+# and a policy content hash. None of that belongs in a browser. A client
+# needs what ORION found, not which model ORION happens to use this month —
+# which is both an information-disclosure reduction and the thing that keeps
+# the client from depending on internals we intend to be swappable.
+#
+# So these models are a flat, closed, independently-bounded projection built
+# by `orion.interface.service`, not a re-export. Nothing here imports
+# `orion.orchestrator`: the enums arrive as plain strings with their own
+# length caps, so a renamed member upstream is caught by a test rather than
+# silently reshaping the wire contract. Every numeric field states its real
+# range, so a value that could not have come from an engine cannot be
+# serialised at all.
+
+
+class CapabilitySummary(BaseModel):
+    """A capability the brief asks for that this build does not have.
+
+    `status` is a `Literal`, not a string: `"not_connected"` is the only
+    value this type can hold, so no code path — present or future — can
+    report news or macro as connected without changing this declaration.
+    There is deliberately no list, mapping, number or timestamp field, so
+    there is nowhere for a fabricated headline to go.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["not_connected"] = "not_connected"
+    detail: str = Field(min_length=1, max_length=MAX_DETAIL_CHARS)
+
+
+class StructureSummary(BaseModel):
+    """Market structure, as `orion.analysis.structure` computed it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trend: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    volatility: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    # `None` means "no level found", never zero and never a guess.
+    nearest_support: float | None = Field(default=None, gt=0)
+    nearest_resistance: float | None = Field(default=None, gt=0)
+    swing_high_count: int = Field(ge=0)
+    swing_low_count: int = Field(ge=0)
+
+
+class MomentumSummary(BaseModel):
+    """Indicator readings. Every value is optional for one reason only:
+    `orion.analysis.indicators.IndicatorSnapshot` uses `None` for "not enough
+    data", and that absence is forwarded rather than filled in."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rsi: float | None = Field(default=None, ge=0, le=100)
+    ema_fast: float | None = Field(default=None, gt=0)
+    ema_slow: float | None = Field(default=None, gt=0)
+    sma_slow: float | None = Field(default=None, gt=0)
+    atr: float | None = Field(default=None, ge=0)
+    rsi_length: int = Field(gt=0)
+    ema_fast_length: int = Field(gt=0)
+    ema_slow_length: int = Field(gt=0)
+
+
+class RiskSummary(BaseModel):
+    """The Risk Guardian's answer, or an explicit reason there isn't one.
+
+    `outcome` is present if and only if a real verdict was produced. The
+    validator makes "available but no outcome" and "unavailable with an
+    outcome" both unconstructible, so a client can branch on `availability`
+    without also defending against a contradictory payload.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    availability: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    outcome: str | None = Field(default=None, min_length=1, max_length=MAX_CODE_CHARS)
+    reason_codes: tuple[str, ...] = Field(default=(), max_length=MAX_CODE_LIST)
+    failed_controls: tuple[str, ...] = Field(default=(), max_length=MAX_CODE_LIST)
+    portfolio_as_of: datetime | None = None
+
+    @model_validator(mode="after")
+    def _check_risk_summary_invariants(self) -> RiskSummary:
+        available = self.availability == "available"
+        if available and self.outcome is None:
+            raise ValueError("availability is 'available' but no outcome is present")
+        if not available and self.outcome is not None:
+            raise ValueError(
+                f"availability is {self.availability!r} but an outcome is present; "
+                "an outcome may only accompany an available risk review"
+            )
+        for code in (*self.reason_codes, *self.failed_controls):
+            if not code or len(code) > MAX_CODE_CHARS:
+                raise ValueError(f"reason/control code {code!r} is empty or too long")
+        return self
+
+
+class ConclusionSummary(BaseModel):
+    """What ORION concluded, and the model's own sentence about why.
+
+    `rationale` is the one model-authored string that crosses this boundary.
+    It is bounded here independently of `orion.reasoning.schemas.
+    ReasoningVerdict`'s own 400-character cap — this layer must never be the
+    looser of the two — and it is data for a client to render as text, never
+    markup, a command or an instruction.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    action: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    direction: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    rationale: str = Field(min_length=1, max_length=MAX_RATIONALE_CHARS)
+    reason_codes: tuple[str, ...] = Field(default=(), max_length=MAX_CODE_LIST)
+
+
+class AnalysisSummary(BaseModel):
+    """One completed analysis, reduced to what a client actually needs.
+
+    Maps onto the seven fields `ORION_MASTER_ENGINEERING_BRIEF_V2.md` §16
+    asks the interface to transform around: market structure, momentum, news,
+    macro, risk, confidence, conclusion.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    analysis_id: str = Field(min_length=1, max_length=MAX_ID_CHARS)
+    symbol: str = Field(min_length=1, max_length=MAX_SYMBOL_CHARS)
+    timeframe: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    as_of: datetime = Field(description="Timestamp of the most recent bar analysed.")
+    analyzed_at: datetime
+    last_price: float = Field(gt=0)
+    bar_count: int = Field(ge=1)
+
+    structure: StructureSummary
+    momentum: MomentumSummary
+    news: CapabilitySummary
+    macro: CapabilitySummary
+    risk: RiskSummary
+    confidence: float = Field(ge=0.0, le=1.0)
+    risk_level: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    conclusion: ConclusionSummary
 
 
 class VoiceTurnResponse(BaseModel):
@@ -112,6 +279,14 @@ class VoiceTurnResponse(BaseModel):
         description="The voice runtime's state after the turn, read from Mission 9's "
         "VoiceStateMachine — the one authoritative state machine. This interface owns "
         "no state of its own and never invents a value for this field."
+    )
+    analysis: AnalysisSummary | None = Field(
+        default=None,
+        description="Present only when the turn was an analysis request that completed. "
+        "Absent (null) for every ordinary conversational turn, which is what keeps this "
+        "field backwards compatible with every Phase 3/4 client: they ignore unknown "
+        "fields and never see one. Never partially populated — a failed analysis is a "
+        "failed turn, not a response with empty panels.",
     )
 
 

@@ -66,10 +66,13 @@ from orion.interface.schemas import (
 )
 from orion.interface.service import (
     FAULT_RESPONSES,
+    AnalysisServiceFactory,
     VoiceInterfaceError,
     VoiceInterfaceFault,
     VoiceTurnService,
 )
+from orion.orchestrator.analysis import AnalysisService
+from orion.orchestrator.wiring import build_analysis_service
 
 # The only address `run()` will ever bind. Not a parameter, not a setting.
 _BIND_HOST = "127.0.0.1"
@@ -83,6 +86,22 @@ CORS_ALLOWED_ORIGINS = (
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 )
+
+
+def _default_analysis_factory() -> AnalysisService | None:
+    """Build one request-scoped `AnalysisService` from the environment.
+
+    Settings are re-read per call rather than captured once, because
+    `orion.risk.policy.RiskPolicy.from_settings` documents that requirement
+    directly: a policy cached for the process lifetime would mean engaging
+    the kill switch required a restart, and `get_settings()` is deliberately
+    uncached precisely so it does not.
+
+    Returns `None` when the credentials an analysis needs are absent, which
+    is how a deployment with only a Deepgram key keeps serving ordinary
+    conversational turns exactly as it did in Phase 3.
+    """
+    return build_analysis_service(get_settings())
 
 
 def _fault_response(fault: VoiceInterfaceFault) -> JSONResponse:
@@ -199,7 +218,11 @@ async def _handle_unexpected_error(request: Request, exc: Exception) -> Response
     return _fault_response(VoiceInterfaceFault.TURN_FAILED)
 
 
-def create_app(service: VoiceTurnService | None = None) -> FastAPI:
+def create_app(
+    service: VoiceTurnService | None = None,
+    *,
+    analysis_factory: AnalysisServiceFactory | None = None,
+) -> FastAPI:
     """Build the application.
 
     `service` is injectable so tests can supply a known credential and
@@ -208,8 +231,19 @@ def create_app(service: VoiceTurnService | None = None) -> FastAPI:
     environment (`orion.config`). This function is the composition root —
     the only reason `orion.interface` may import `orion.config` at all,
     while `orion.voice` still may not.
+
+    `analysis_factory` is the Phase 5.2 seam and is used only when `service`
+    is not supplied: a caller that builds its own `VoiceTurnService` already
+    decided what that service can do. The default reaches
+    `orion.orchestrator.wiring`, which is the one module allowed to turn
+    `Settings` into concrete providers — this package still may not import
+    `orion.decision`, `orion.risk` or `orion.paper`, and
+    `tests/interface/test_import_hygiene.py` fails the build if it ever does.
     """
-    turn_service = service or VoiceTurnService(get_settings().deepgram_api_key)
+    turn_service = service or VoiceTurnService(
+        get_settings().deepgram_api_key,
+        analysis_factory=analysis_factory or _default_analysis_factory,
+    )
 
     app = FastAPI(
         title="ORION voice interface",

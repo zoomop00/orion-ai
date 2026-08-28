@@ -75,6 +75,10 @@ def test_text_fallback_returns_a_complete_turn(
     assert body["audio_format"] == "wav"
     assert body["audio_media_type"] == "audio/wav"
     assert body["state"] == "idle"
+    # Phase 5.2 adds exactly one field, and it is null on an ordinary turn.
+    # Kept as an exact set rather than a subset check: the point of this
+    # assertion has always been that the response surface cannot grow
+    # without someone noticing.
     assert set(body) == {
         "transcript",
         "response_text",
@@ -83,7 +87,9 @@ def test_text_fallback_returns_a_complete_turn(
         "audio_media_type",
         "audio_bytes",
         "state",
+        "analysis",
     }
+    assert body["analysis"] is None
 
 
 def test_text_fallback_never_calls_speech_to_text(

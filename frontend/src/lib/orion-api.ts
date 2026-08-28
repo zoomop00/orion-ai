@@ -73,12 +73,22 @@ export const ACCEPTED_RECORDING_MEDIA_TYPES: readonly string[] = [
 export const MAX_AUDIO_REQUEST_BYTES = 25 * 1024 * 1024;
 
 /**
- * A whole turn is one Deepgram text-to-speech round trip behind a 30-second
- * server-side timeout, so the client waits a little longer than the server
- * before giving up — otherwise the browser would report a failure for a
- * request that was still going to succeed.
+ * How long the browser waits for a turn before giving up.
+ *
+ * Raised from 45s for Phase 5.2, because a turn can now be an *analysis*: a
+ * Deepgram transcription, a market-data fetch, a model call and a
+ * text-to-speech round trip, each behind its own server-side timeout (30s,
+ * 10s, 60s, 30s respectively). Those per-vendor timeouts were deliberately
+ * not raised — a hung vendor call must not hold a worker three times as
+ * long — so the only party that had to become more patient is this one.
+ * 90 seconds sits above the realistic worst case while still failing rather
+ * than hanging forever if the backend stops answering.
+ *
+ * An ordinary conversational turn is unaffected: it still completes in the
+ * same second or two it always did, and a longer ceiling costs nothing when
+ * the response arrives early.
  */
-export const REQUEST_TIMEOUT_MS = 45_000;
+export const REQUEST_TIMEOUT_MS = 90_000;
 
 /**
  * A browser-memory ceiling on the decoded audio, not a mirror of any server
