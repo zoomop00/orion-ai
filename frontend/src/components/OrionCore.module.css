@@ -214,14 +214,23 @@
 
 /*
  * A circular energy waveform. --envelope scales every bar, the travelling
- * motion is a fixed staggered keyframe. Phase 4 replaces --envelope with a
- * measured audio amplitude and nothing else here has to change.
+ * motion is a fixed staggered keyframe.
+ *
+ * Phase 4 drives --envelope from a real AnalyserNode, which is why the easing
+ * is a variable rather than a constant. 900ms is right for a *state* change,
+ * where the envelope moves once and should glide; it is completely wrong for
+ * a value arriving sixty times a second, where it would smear a voice into a
+ * slow swell arriving a second late. The component sets --envelope-ease short
+ * whenever a measured amplitude is driving this, because the smoothing has
+ * already been done properly in `audio-envelope.ts` -- doing it twice, once
+ * with a filter and once with a transition, is how a waveform ends up feeling
+ * disconnected from the sound it is supposed to be showing.
  */
 .wave {
   position: absolute;
   inset: 0;
   opacity: calc(0.16 + 0.84 * var(--envelope));
-  transition: opacity 900ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity var(--envelope-ease, 900ms) cubic-bezier(0.22, 1, 0.36, 1);
   pointer-events: none;
 }
 
@@ -235,7 +244,7 @@
   transform-origin: 50% 0%;
   transform: rotate(var(--angle)) translateY(calc(var(--stage) * 0.183))
     scaleY(calc(0.08 + var(--envelope) * var(--weight)));
-  transition: transform 900ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform var(--envelope-ease, 900ms) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .bar {
@@ -410,5 +419,17 @@
 
   .particle {
     transform: rotate(var(--angle)) translateX(calc(var(--radius) * var(--stage)));
+  }
+
+  /*
+   * The waveform still reacts to real sound here, deliberately. It is the
+   * only thing on screen that tells a user ORION can actually hear them, so
+   * removing it would take away information rather than motion. What reduced
+   * motion gets instead is the slow easing back: the bars breathe with the
+   * voice rather than tracking every syllable, and the travelling keyframe
+   * above is already switched off.
+   */
+  .stage {
+    --envelope-ease: 600ms;
   }
 }

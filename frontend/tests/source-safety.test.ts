@@ -8,21 +8,27 @@ import { describe, expect, it } from "vitest";
 /**
  * Committed guarantees about what the frontend source may and may not do.
  *
- * PHASE 3 NARROWED TWO RULES RATHER THAN DROPPING THEM. Phase 1 forbade
+ * EACH PHASE NARROWS RULES RATHER THAN DROPPING THEM. Phase 1 forbade
  * `fetch` and audio APIs outright, because a frontend-only prototype had no
- * business with either. Phase 3 genuinely needs both — one HTTP call and one
- * `<audio>` element — so the ban becomes a per-file allowlist: `fetch` may
- * appear only in `orion-api.ts`, media playback only in `orion-audio.ts`, and
- * nowhere else in the tree. That is stronger than deleting the rules, and it
- * mirrors the Python side's `_ALLOWED_EXTRA_IMPORTS_BY_FILE` exactly: a
- * component that starts calling the backend directly, or a hook that starts
- * constructing `Audio` objects, still fails the build.
+ * business with either. Phase 3 genuinely needed both — one HTTP call and one
+ * `<audio>` element — so the ban became a per-file allowlist: `fetch` may
+ * appear only in `orion-api.ts`, media playback only in `orion-audio.ts`.
+ * Phase 4 does the same for the two capabilities it adds: `getUserMedia` and
+ * `MediaRecorder` may appear only in `orion-microphone.ts`, and
+ * `AudioContext`/`AnalyserNode` only in `orion-analyser.ts`. Four capabilities,
+ * four files, each with an inverse assertion proving the carve-out is used.
+ * That is stronger than deleting the rules, and it mirrors the Python side's
+ * `_ALLOWED_EXTRA_IMPORTS_BY_FILE` exactly: a component that starts calling
+ * the backend directly, a hook that starts constructing `Audio` objects, or a
+ * stylesheet-adjacent helper that quietly opens a microphone, still fails the
+ * build.
  *
- * Everything Phase 1 banned that Phase 3 does not need — storage, cookies,
- * WebSockets, credentials, randomness, HTML injection sinks, microphone
- * access — remains banned everywhere with no exceptions. Phase 4's
- * `AudioContext`/`AnalyserNode` are banned too, so "no audio-reactive
- * visualization yet" is a property of the source rather than a promise.
+ * Everything Phase 1 banned that no later phase needs — storage, cookies,
+ * WebSockets, credentials, randomness, HTML injection sinks, permission
+ * probing — remains banned everywhere with no exceptions. Phase 4 adds bans
+ * of its own: no camera, no frequency-domain analysis (an RMS envelope is
+ * the whole signal-processing budget, see `audio-envelope.ts`), and no path
+ * by which a recording could be given a URL, written to disk or replayed.
  *
  * This mirrors the import-hygiene tests the Python side already uses
  * (the `test_import_hygiene.py` files): a committed guarantee rather than an
@@ -57,6 +63,10 @@ const CODE = FILES.filter(({ path }) => path.endsWith(".ts") || path.endsWith(".
 const API_FILE = "orion-api.ts";
 /** The single file allowed to touch media playback. */
 const AUDIO_FILE = "orion-audio.ts";
+/** The single file allowed to claim a capture device. */
+const MIC_FILE = "orion-microphone.ts";
+/** The single file allowed to build a Web Audio graph. */
+const ANALYSER_FILE = "orion-analyser.ts";
 
 const forbid = (pattern: RegExp, why: string, allowIn: readonly string[] = []): void => {
   for (const { path, name, text } of CODE) {
@@ -125,17 +135,62 @@ describe("frontend source safety", () => {
     forbid(/Bearer\s/i, "no bearer tokens in the frontend");
   });
 
-  it("requests no device permissions, in this phase or by accident", () => {
-    forbid(/getUserMedia/, "microphone capture belongs to Phase 4");
-    forbid(/MediaRecorder/, "microphone capture belongs to Phase 4");
-    forbid(/navigator\.permissions/, "no permission prompts in this phase");
+  it("claims a capture device from exactly one file", () => {
+    forbid(/getUserMedia/, "only the microphone boundary may claim a device", [MIC_FILE]);
+    forbid(/MediaRecorder/, "only the microphone boundary may record", [MIC_FILE]);
+    requireIn(MIC_FILE, /getUserMedia/, "the microphone boundary should own the request");
+    requireIn(MIC_FILE, /MediaRecorder/, "the microphone boundary should own the recorder");
   });
 
-  it("performs no audio analysis, so nothing can claim to be audio-reactive", () => {
-    forbid(/AudioContext/, "audio-reactive visualization belongs to Phase 4");
-    forbid(/AnalyserNode/, "audio-reactive visualization belongs to Phase 4");
-    forbid(/createMediaElementSource/, "audio-reactive visualization belongs to Phase 4");
-    forbid(/getByteFrequencyData|getFloatTimeDomainData/, "no audio analysis in this phase");
+  it("never probes permission state behind the user's back", () => {
+    forbid(/navigator\.permissions/, "permission is asked for by gesture, never queried");
+  });
+
+  it("asks for audio only, never a camera", () => {
+    forbid(/video:\s*true/, "this interface has no use for a camera");
+    forbid(/getDisplayMedia/, "no screen capture");
+    forbid(/enumerateDevices/, "no device enumeration, which is a fingerprinting surface");
+    requireIn(MIC_FILE, /video:\s*false/, "the capture request should refuse video explicitly");
+  });
+
+  it("releases the microphone and bounds the recording, in the boundary itself", () => {
+    requireIn(MIC_FILE, /getTracks\(\)/, "every track must be reachable to be stopped");
+    requireIn(MIC_FILE, /track\.stop\(\)/, "tracks must actually be stopped");
+    requireIn(
+      MIC_FILE,
+      /MAX_RECORDING_SECONDS = 30/,
+      "the ceiling must match Mission 9's MAX_RECORDING_SECONDS",
+    );
+    requireIn(MIC_FILE, /clearTimeout\(limitTimer\)/, "the ceiling timer must be cleared");
+  });
+
+  it("analyses audio from exactly one file, and releases what it builds", () => {
+    forbid(/AudioContext/, "only the analyser may build a Web Audio graph", [ANALYSER_FILE]);
+    forbid(/createAnalyser/, "only the analyser may build a Web Audio graph", [ANALYSER_FILE]);
+    forbid(/createMediaElementSource/, "only the analyser may reroute playback", [ANALYSER_FILE]);
+    forbid(/createMediaStreamSource/, "only the analyser may tap a stream", [ANALYSER_FILE]);
+    requireIn(ANALYSER_FILE, /createAnalyser/, "the analyser should own the node");
+    requireIn(ANALYSER_FILE, /context\.close\(\)/, "the context must be closed");
+    requireIn(ANALYSER_FILE, /node\.disconnect\(\)/, "every node must be disconnected");
+    requireIn(ANALYSER_FILE, /cancelAnimationFrame/, "the frame loop must be cancellable");
+  });
+
+  it("keeps the analysis to a time-domain envelope, not an FFT", () => {
+    forbid(/getFloatTimeDomainData|getByteTimeDomainData/, "time-domain reads belong to the analyser", [
+      ANALYSER_FILE,
+    ]);
+    forbid(/getByteFrequencyData/, "frequency analysis is deliberately not done");
+    forbid(/getFloatFrequencyData/, "frequency analysis is deliberately not done");
+    forbid(/frequencyBinCount/, "frequency analysis is deliberately not done");
+    forbid(/createScriptProcessor|audioWorklet/i, "no custom DSP nodes");
+  });
+
+  it("never turns a recording into something that outlives the turn", () => {
+    // `createObjectURL` is already confined to the playback boundary, which
+    // is what stops a captured recording from being given a URL at all.
+    forbid(/createObjectURL/, "a recording must never be given a URL", [AUDIO_FILE]);
+    forbid(/FileReader/, "a recording is never read into anything that can be kept");
+    forbid(/\.srcObject/, "the user's own microphone is never attached to a media element");
   });
 
   it("uses no randomness, so nothing simulates data and hydration stays stable", () => {

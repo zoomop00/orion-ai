@@ -2830,3 +2830,148 @@ contains exactly one origin — `http://127.0.0.1:8000` — and zero
 occurrences of `deepgram`, `anthropic`, `api_key`, `Authorization`,
 `Bearer`, `localStorage`, `sessionStorage`, `indexedDB`, `document.cookie`,
 `getUserMedia`, `MediaRecorder`, `AnalyserNode` or `AudioContext`.
+
+## 2026-08-28 — Mission 10 Phase 4: the microphone, and a core that reacts to real sound
+
+**The seam declared in Phase 1 is finally driven, and it did not have to
+move.** `OrionCore`'s `amplitude` prop and `playTurnAudio`'s `onStart(element)`
+callback were written three phases ago with this in mind, and Phase 4 connects
+both without changing either signature. That is the whole return on declaring a
+seam early: the diff is additive.
+
+**Four capabilities, four boundary files, four allowlist entries.**
+`getUserMedia`/`MediaRecorder` live only in `lib/orion-microphone.ts`;
+`AudioContext`/`AnalyserNode` only in `lib/orion-analyser.ts`; `fetch` still
+only in `orion-api.ts`; media playback still only in `orion-audio.ts`.
+`tests/source-safety.test.ts` enforces each ban everywhere else *and* asserts
+the carve-out file really uses it — the same shape as the Python side's
+`_ALLOWED_EXTRA_IMPORTS_BY_FILE`. New bans were added rather than only
+narrowed: no camera (`video: false` is asserted, and `video: true`,
+`getDisplayMedia` and `enumerateDevices` are forbidden outright), no
+frequency-domain analysis, no `createScriptProcessor`/`audioWorklet`, no
+`FileReader`, no `srcObject`, and no `createObjectURL` outside the playback
+boundary — which is what makes "a recording can never be given a URL, written
+to disk or replayed" a property of the source rather than a promise.
+
+**RMS, not an FFT — and the brief asked for exactly that.**
+`lib/audio-envelope.ts` is pure arithmetic with no browser dependency at all:
+root-mean-square over a block of time-domain samples, mapped through a
+-62..-12 dBFS window, smoothed by an asymmetric one-pole filter (45 ms attack,
+260 ms release) whose coefficient is derived from real elapsed milliseconds.
+Logarithmic because speech sits near -30 dBFS and a linear mapping would barely
+move the bars; asymmetric because one time constant either lags the start of a
+word or strobes on every glottal pulse; frame-rate independent because a
+dropped frame must not change the shape of the envelope. Because it touches
+nothing, its 24 tests assert exact numbers against synthetic audio — a
+full-scale sine's RMS is 1/sqrt(2), one time constant covers exactly 1 - 1/e of
+the remaining distance, and two 16 ms steps equal one 32 ms step to twelve
+decimal places.
+
+**The two Web Audio graphs have different shapes for different reasons.** The
+microphone chain ends in a *zero* gain node wired to the destination: a graph
+with no sink is not reliably pulled by every engine, and a live microphone
+connected to the speakers at any other gain is an instant feedback howl. The
+playback chain *must* reach the destination, because `createMediaElementSource`
+permanently reroutes the element and an analyser that did not forward it would
+silence ORION. Every step is wrapped: if the graph cannot be built — no Web
+Audio, an element already routed, no `getFloatTimeDomainData` — the monitor
+returns inert, closes the context it opened, and the core falls back to its
+fixed per-state constant. **A failure to visualise sound can never break the
+turn producing it.**
+
+**Still four visual states, still one state machine.** No state was added.
+Phase 4 simply *reaches* `listening`, which Phase 1 declared and Phase 3 left
+to the development controls. The reducer in `use-orion-turn.ts` gained two
+actions (`arming`, `listening`) and the amplitude lives in its own `useState`
+outside that reducer — the lifecycle and the loudness are different things, and
+threading a 60 Hz signal through the lifecycle reducer would blur them. The
+backend's `VoiceStateMachine` remains the only authority on the protocol.
+
+**`arming` exists because honesty costs a state, not a lie.** While the
+permission prompt is open the interface is locked but the core stays at rest,
+because ORION is not listening yet. Claiming LISTENING during the prompt would
+have been one line shorter and false.
+
+**The recording ceiling lives in the boundary, not in the caller.**
+`MAX_RECORDING_SECONDS = 30` matches
+`orion.voice.audio_input.MAX_RECORDING_SECONDS`, and `MAX_RECORDING_BYTES`
+matches its `MAX_AUDIO_INPUT_BYTES` (which is also the interface's
+`MAX_REQUEST_BODY_BYTES`). The values are restated rather than imported — this
+is a different runtime with no access to the Python constants — and the timer
+that enforces the ceiling stops the recorder *itself*, so a caller that forgets
+to stop cannot leave a microphone open. Every exit path releases every track in
+a `finally`: normal stop, ceiling, recorder error, empty result, oversized
+result, cancellation, and unmount during the permission prompt.
+
+**The spoken turn reuses the Phase 2 endpoint unchanged.** `requestAudioTurn`
+posts the recording as raw bytes to `POST /v1/voice/turn`, which has existed
+since Phase 2 and already accepts `audio/webm`, `audio/ogg` and `audio/mp4`.
+**No backend file was touched.** The `Content-Type` can only ever be a literal
+from `orion-api.ts`: `MediaRecorder` labels its own output
+`audio/webm;codecs=opus`, and that string is discarded — the `Blob` is rebuilt
+with one of three constants and the header value is checked against a closed
+allowlist before the request is made. Empty and oversized recordings are
+refused before a byte goes on the wire. The shared request path (timeout,
+abort forwarding, `credentials: "omit"`, never reading an error body, response
+validation) was extracted rather than copied, because two copies of a security
+property is one copy that will eventually be edited alone.
+
+**One performance decision worth recording.** The four generated layers in
+`OrionCore` (26 particles, 44 bars, 4 rings, 7 lattice nodes and their chords)
+are now wrapped in `useMemo` with empty dependencies. Their markup is
+byte-for-byte Phase 1's; the memo exists so an envelope update at 60 Hz
+re-renders one element's inline style instead of reconciling ~120 nodes. The
+envelope is also quantised to two decimals so React bails out entirely on
+frames where nothing perceptible changed.
+
+**Three assertions changed because they encoded facts Phase 4 made false**, and
+each was replaced rather than deleted: the microphone button no longer claims
+"no microphone is connected", the disclosure line no longer says "no microphone
+yet", and Phase 3's "asks for no microphone even when the mic affordance is
+used" became "asks for no microphone on a *typed* turn" — which is the property
+that file was written to protect and which still holds from keystroke to
+silence. No existing test was weakened to let the implementation pass.
+
+**Live verification status — stated precisely.** There is still no
+`DEEPGRAM_API_KEY` and no `.env` on this machine, so **a successful
+vendor-backed spoken turn was never observed and is not claimed**. Browser
+automation was unavailable this session, so **no real microphone was opened, no
+permission prompt was seen, and no waveform was watched moving on a screen**;
+the entire microphone and Web Audio path is proven against mocks that model the
+platform's contract, not against a browser. Desktop/mobile layout, audible
+playback and the visual reaction to a real voice remain the founder's to
+confirm. What *is* proven here: the envelope arithmetic against synthetic
+audio, the device lifecycle and its release on every failure path, the
+permission-denial and recording-error paths, the analyser's graph shape and its
+teardown, and that hostile transcript text arriving from a *spoken* turn still
+reaches no HTML sink.
+
+**Explicitly still deferred:** streaming (WebSocket/SSE), interruption and
+barge-in, voice-activity detection and silence-triggered auto-stop,
+conversation history, the dynamic-information system, any Mission 0-8
+orchestration, authentication, and any deployment beyond loopback.
+
+**Files added:** `frontend/src/lib/{audio-envelope.ts, orion-analyser.ts,
+orion-microphone.ts}`, `frontend/tests/{audio-envelope.test.ts,
+orion-analyser.test.ts, orion-microphone.test.ts, orion-voice-turn.test.tsx}`,
+`frontend/tests/support/media-harness.ts`. **Files modified:**
+`frontend/src/lib/orion-api.ts` (the audio turn plus the shared request path),
+`frontend/src/hooks/use-orion-turn.ts`, `frontend/src/components/OrionCore.tsx`
+(memoised layers, same markup), `frontend/src/components/OrionInterface.tsx`
+and its stylesheet, `frontend/src/app/layout.tsx` and `frontend/package.json`
+(stale Phase 1 descriptions), the `source-safety`, `orion-api`, `orion-core`,
+`orion-interface` and `orion-turn` test files, and `README.md`. **No Python
+source and no Phase 2 backend file was touched.**
+
+**Verification:** frontend — 278 tests passing across 11 files (162 before this
+phase, 116 added), `npm run typecheck`, `npm run lint` and a clean
+`npm run build` all green. The compiled client bundle was searched and contains
+exactly one ORION origin — `http://127.0.0.1:8000` — and zero occurrences of
+`deepgram`, `anthropic`, `api_key`, `Authorization`, `Bearer`, `localStorage`,
+`sessionStorage`, `indexedDB`, `document.cookie`, `getDisplayMedia`,
+`enumerateDevices`, `createScriptProcessor`, `getByteFrequencyData` or
+`srcObject`. (`FileReader` appears three times, all inside Next.js's own
+bundled `whatwg-fetch` polyfill; it appears nowhere in `src/`, which is what
+the source-safety rule scans.) Backend — `pytest` 1035 passed, `ruff check .`,
+`ruff format --check .` and `mypy src` all clean and identical to the
+pre-Phase-4 baseline.

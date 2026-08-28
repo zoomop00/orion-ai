@@ -16,12 +16,19 @@ import styles from "./OrionInterface.module.css";
  * 10's brief is explicit that the UI *is* ORION — every panel added here is
  * a panel competing with the thing the user is supposed to be looking at.
  *
- * PHASE 3 ADDS ONE THING: a single command line. Not a chat log, not
+ * PHASE 3 ADDED ONE THING: a single command line. Not a chat log, not
  * message bubbles, not a transcript history, not a sidebar, not a card. One
  * input and one send affordance, both visually subordinate to the core. The
  * last exchange is shown as two lines in the readout that already existed —
  * what ORION heard, and what ORION said — and it is replaced by the next
  * turn rather than accumulated.
+ *
+ * PHASE 4 ADDS NO SURFACE AT ALL. The microphone button was already here;
+ * it now does what it always looked like it did. There is no waveform
+ * widget, no level meter, no recording timer and no permission banner —
+ * the core *is* the level meter, and it is driven by `amplitude` below. The
+ * one thing that changed shape is the button's own label, which used to
+ * disclaim a microphone that now exists.
  *
  * ALL BACKEND TEXT IS RENDERED AS TEXT. `transcript` and `responseText` are
  * interpolated as JSX children, which React escapes. There is no
@@ -30,10 +37,23 @@ import styles from "./OrionInterface.module.css";
  * displayed rather than executed.
  */
 export function OrionInterface() {
-  const { visualState, transcript, responseText, error, busy, submit, setVisualState } =
-    useOrionTurn();
+  const {
+    visualState,
+    transcript,
+    responseText,
+    error,
+    busy,
+    amplitude,
+    capturing,
+    submit,
+    startListening,
+    stopListening,
+    setVisualState,
+  } = useOrionTurn();
   const profile = profileFor(visualState);
-  const listening = visualState === "listening";
+  // The permission prompt is open: busy, but ORION is not listening yet and
+  // the interface does not pretend otherwise.
+  const arming = busy && !capturing && visualState === "idle";
 
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -58,9 +78,10 @@ export function OrionInterface() {
     [draft, busy, submit],
   );
 
-  const toggleListening = useCallback(() => {
-    setVisualState(listening ? "idle" : "listening");
-  }, [listening, setVisualState]);
+  const toggleMicrophone = useCallback(() => {
+    if (capturing) stopListening();
+    else startListening();
+  }, [capturing, startListening, stopListening]);
 
   const sendDisabled = busy || draft.trim().length === 0;
 
@@ -77,11 +98,11 @@ export function OrionInterface() {
           <span className={styles.wordmark}>ORION</span>
           <span className={styles.tagline}>Autonomous Market Intelligence</span>
         </div>
-        <span className={styles.build}>Mission 10 &middot; Phase 3 &middot; live text turn</span>
+        <span className={styles.build}>Mission 10 &middot; Phase 4 &middot; live voice turn</span>
       </header>
 
       <section className={styles.centre}>
-        <OrionCore state={visualState} />
+        <OrionCore state={visualState} amplitude={amplitude ?? undefined} />
       </section>
 
       <footer className={styles.footer}>
@@ -152,14 +173,20 @@ export function OrionInterface() {
             type="button"
             className={styles.mic}
             data-testid="orion-mic"
-            aria-pressed={listening}
-            disabled={busy}
+            data-capturing={capturing}
+            aria-pressed={capturing}
+            aria-busy={arming}
+            // Enabled while capturing, because this is the control that ends
+            // the recording; locked whenever a turn is running without one.
+            disabled={busy && !capturing}
             aria-label={
-              listening
-                ? "Leave the listening state. No microphone is connected in this prototype."
-                : "Enter the listening state. No microphone is connected in this prototype."
+              capturing
+                ? "Stop listening and send what ORION heard."
+                : arming
+                  ? "Waiting for microphone permission."
+                  : "Listen. ORION will ask for permission to use the microphone."
             }
-            onClick={toggleListening}
+            onClick={toggleMicrophone}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
               <path
@@ -205,8 +232,9 @@ export function OrionInterface() {
         </div>
 
         <p className={styles.disclosure}>
-          Local prototype &mdash; talks only to ORION on this machine. No microphone yet, nothing
-          stored.
+          Local prototype &mdash; talks only to ORION on this machine. The microphone runs only
+          while you are speaking a turn, and is released the moment you stop. Nothing is
+          recorded, stored or logged.
         </p>
       </footer>
     </main>

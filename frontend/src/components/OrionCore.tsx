@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, type CSSProperties } from "react";
+import { useMemo, useRef, type CSSProperties } from "react";
 
 import { useOrionTempo } from "@/hooks/use-orion-tempo";
 import { LATTICE_EDGES, LATTICE_NODES, PARTICLES, WAVE_BARS } from "@/lib/core-geometry";
@@ -44,17 +44,32 @@ const RINGS: readonly RingSpec[] = [
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 
+/** Easing for an envelope that moved because the *state* changed. */
+const STATE_ENVELOPE_EASE_MS = 900;
+
+/**
+ * Easing for an envelope arriving from a live `AnalyserNode`. Short, because
+ * `audio-envelope.ts` has already smoothed it; long enough to hide the step
+ * between two quantised values.
+ */
+const LIVE_ENVELOPE_EASE_MS = 90;
+
 export interface OrionCoreProps {
   readonly state: OrionVisualState;
   /**
    * 0..1 energy envelope for the circular waveform.
    *
-   * Left unset in Phase 1, in which case the state's own fixed constant is
-   * used. This prop is the seam for Phase 4: a real `AnalyserNode` reading
-   * ORION's actual TTS output can drive it per frame with no change to any
-   * markup or stylesheet below. It is not filled with random numbers in the
-   * meantime -- a fake amplitude would be indistinguishable from a real one on
-   * screen, which is precisely why it is not there.
+   * Declared in Phase 1 and left unset until Phase 4, in which case the
+   * state's own fixed constant is used. It is now driven per frame by
+   * `use-orion-turn` from a real `AnalyserNode`: the user's microphone while
+   * ORION is listening, ORION's own synthesized speech while it is speaking
+   * (see `lib/orion-analyser.ts`). Nothing fabricates it -- when analysis is
+   * unavailable the prop is simply absent and the per-state constant stands,
+   * because a fake amplitude would be indistinguishable from a real one on
+   * screen, which is precisely why there has never been one.
+   *
+   * The signature did not change to accommodate any of that, which was the
+   * point of declaring the seam three phases early.
    */
   readonly amplitude?: number | undefined;
 }
@@ -65,6 +80,7 @@ export function OrionCore({ state, amplitude }: OrionCoreProps) {
 
   useOrionTempo(stageRef, profile.tempo);
 
+  const measured = amplitude !== undefined;
   const envelope = clamp01(amplitude ?? profile.amplitude);
 
   const stageStyle: CoreStyle = {
@@ -73,22 +89,21 @@ export function OrionCore({ state, amplitude }: OrionCoreProps) {
     "--particle-energy": profile.particles,
     "--lattice-energy": profile.lattice,
     "--envelope": envelope,
+    // See the waveform section of the stylesheet: a state change should
+    // glide, a measured amplitude arriving every frame must not.
+    "--envelope-ease": measured ? `${LIVE_ENVELOPE_EASE_MS}ms` : `${STATE_ENVELOPE_EASE_MS}ms`,
   };
 
-  return (
-    <div
-      ref={stageRef}
-      className={styles.stage}
-      data-state={state}
-      data-envelope={envelope}
-      data-testid="orion-core"
-      role="img"
-      aria-label={`ORION core, ${profile.label.toLowerCase()}`}
-      style={stageStyle}
-    >
-      <div className={styles.aura} aria-hidden="true" />
-      <div className={styles.bloom} aria-hidden="true" />
-
+  /**
+   * The four generated layers depend on nothing but module constants, while
+   * `amplitude` now changes up to sixty times a second. Memoising them means
+   * an envelope update re-renders one element's inline style instead of
+   * reconciling ~120 particles, bars, rings and lattice nodes -- which is what
+   * makes driving the core from live audio affordable at all. The markup
+   * itself is byte-for-byte what Phase 1 wrote.
+   */
+  const particleField = useMemo(
+    () => (
       <div className={styles.particleField} data-testid="orion-particles" aria-hidden="true">
         {PARTICLES.map((particle, index) => (
           <span
@@ -108,7 +123,12 @@ export function OrionCore({ state, amplitude }: OrionCoreProps) {
           />
         ))}
       </div>
+    ),
+    [],
+  );
 
+  const ringField = useMemo(
+    () => (
       <div className={styles.ringField} data-testid="orion-rings" aria-hidden="true">
         {RINGS.map((ring, index) => (
           <div
@@ -145,7 +165,12 @@ export function OrionCore({ state, amplitude }: OrionCoreProps) {
           </div>
         ))}
       </div>
+    ),
+    [],
+  );
 
+  const lattice = useMemo(
+    () => (
       <svg
         className={styles.lattice}
         viewBox="-50 -50 100 100"
@@ -177,7 +202,12 @@ export function OrionCore({ state, amplitude }: OrionCoreProps) {
           ))}
         </g>
       </svg>
+    ),
+    [],
+  );
 
+  const wave = useMemo(
+    () => (
       <div className={styles.wave} data-testid="orion-wave" aria-hidden="true">
         {WAVE_BARS.map((bar, index) => (
           <span
@@ -194,6 +224,28 @@ export function OrionCore({ state, amplitude }: OrionCoreProps) {
           </span>
         ))}
       </div>
+    ),
+    [],
+  );
+
+  return (
+    <div
+      ref={stageRef}
+      className={styles.stage}
+      data-state={state}
+      data-envelope={envelope}
+      data-testid="orion-core"
+      role="img"
+      aria-label={`ORION core, ${profile.label.toLowerCase()}`}
+      style={stageStyle}
+    >
+      <div className={styles.aura} aria-hidden="true" />
+      <div className={styles.bloom} aria-hidden="true" />
+
+      {particleField}
+      {ringField}
+      {lattice}
+      {wave}
 
       <div className={styles.sphereWrap} aria-hidden="true">
         <div className={styles.sphere} data-testid="orion-sphere">

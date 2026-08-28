@@ -77,11 +77,12 @@ curl -s localhost:8000/v1/voice/turn/text \
   -H 'Content-Type: application/json' -d '{"text":"hello orion"}'
 ```
 
-## The ORION interface (Mission 10, Phases 1 and 3)
+## The ORION interface (Mission 10, Phases 1, 3 and 4)
 
 `frontend/` holds ORION's face: a full-screen cinematic core with four
-presentation states — idle, listening, thinking, speaking — and a single
-command line that really talks to the voice backend above.
+presentation states — idle, listening, thinking, speaking — a single command
+line, and a microphone. Both really talk to the voice backend above, and the
+core's waveform is driven by real audio.
 
 **To use it, run both halves.** In one terminal:
 
@@ -97,15 +98,21 @@ npm install
 npm run dev        # then open http://localhost:3000
 ```
 
-Type a command and press Enter. ORION goes to **thinking** for exactly as long
-as the request takes, then to **speaking** for exactly as long as the returned
-WAV actually plays, then back to **idle**. `DEEPGRAM_API_KEY` must be set in
-`.env` or the backend answers with a calm "voice is not configured" and the
-interface returns to idle.
+Type a command and press Enter, **or press the microphone button and speak**.
+ORION goes to **thinking** for exactly as long as the request takes, then to
+**speaking** for exactly as long as the returned WAV actually plays, then back
+to **idle**. `DEEPGRAM_API_KEY` must be set in `.env` or the backend answers
+with a calm "voice is not configured" and the interface returns to idle.
 
-The microphone button still only previews the listening *visual* — microphone
-capture and audio-reactive visualization are Phase 4. Nothing is stored: no
-history, no cookies, no browser storage, no logging of what you typed.
+The microphone is requested only when you press the button, and every track is
+released the moment you stop — press again to send, or let the 30-second
+ceiling (Mission 9's `MAX_RECORDING_SECONDS`) stop it for you. While you speak,
+the core's waveform is driven by a real `AnalyserNode` reading a smoothed RMS
+envelope of your voice; while ORION replies, the same envelope follows its
+actual speech. Nothing is stored: no recording is kept, written or replayed, no
+history, no cookies, no browser storage, no logging of what you typed or said.
+A browser with no microphone, or a refused permission, produces one calm
+sentence and an interface that is immediately usable again.
 
 ```bash
 npm run lint       # eslint
@@ -133,10 +140,12 @@ src/orion/
     interface/        # Mission 10 Phase 2 - localhost HTTP adapter over the voice runtime
     voice/            # Mission 9 - STT/TTS providers, audio I/O, the voice state machine
 
-frontend/             # Mission 10 Phases 1 + 3 - the ORION interface (Next.js)
+frontend/             # Mission 10 Phases 1 + 3 + 4 - the ORION interface (Next.js)
     src/state/        # typed presentation states (NOT a second voice state machine)
     src/components/   # the ORION core and the command surface it sits on
-    src/lib/          # core layout data, the API client, and the audio boundary
+    src/lib/          # core layout data, the API client, and four boundaries:
+                      #   playback, microphone capture, Web Audio analysis,
+                      #   and the pure RMS envelope that drives the waveform
     src/hooks/        # the turn lifecycle, and Web Animations tempo control
 ```
 

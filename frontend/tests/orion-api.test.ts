@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ACCEPTED_RECORDING_MEDIA_TYPES,
+  AUDIO_TURN_PATH,
+  MAX_AUDIO_REQUEST_BYTES,
   MAX_AUDIO_RESPONSE_BYTES,
   ORION_API_BASE,
   OrionApiError,
   TEXT_TURN_PATH,
   messageForFailure,
   parseTurn,
+  requestAudioTurn,
   requestTextTurn,
   type OrionFailure,
 } from "@/lib/orion-api";
@@ -272,5 +276,125 @@ describe("parseTurn — the response is not trusted", () => {
     const turn = parseTurn(turnPayload({ transcript: hostile }));
 
     expect(turn.transcript).toBe(hostile);
+  });
+});
+
+describe("requestAudioTurn — the spoken wire", () => {
+  const recording = (bytes = 2048, type = "audio/webm"): Blob =>
+    new Blob([new Uint8Array(bytes)], { type });
+
+  it("posts the raw recording to the Phase 2 audio endpoint on loopback", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(turnPayload()));
+
+    await requestAudioTurn(recording());
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:8000/v1/voice/turn");
+    expect(url).toBe(`${ORION_API_BASE}${AUDIO_TURN_PATH}`);
+    expect(init.method).toBe("POST");
+    // Raw bytes, not multipart: the backend reads the body directly.
+    expect(init.body).toBeInstanceOf(Blob);
+    expect(init.headers).toEqual({ "Content-Type": "audio/webm" });
+  });
+
+  it("carries the same credential and cache posture as the typed turn", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(turnPayload()));
+
+    await requestAudioTurn(recording());
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.credentials).toBe("omit");
+    expect(init.mode).toBe("cors");
+    expect(init.cache).toBe("no-store");
+    expect(init.referrerPolicy).toBe("no-referrer");
+    expect(JSON.stringify(init.headers)).not.toMatch(/authorization|api[_-]?key|bearer/i);
+  });
+
+  it("validates the response exactly as the typed turn does", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ transcript: "hi", nonsense: true }));
+
+    await expect(requestAudioTurn(recording())).rejects.toMatchObject({ failure: "malformed" });
+  });
+
+  it("classifies a refused recording by status, never by response text", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: "unsupported_media_type", detail: "tell the user this" }, 415),
+    );
+
+    await expect(requestAudioTurn(recording())).rejects.toMatchObject({ failure: "rejected" });
+    expect(messageForFailure("rejected")).not.toMatch(/tell the user this/);
+  });
+
+  it("refuses to put anything but its own media types on the wire", async () => {
+    // `audio/webm;codecs=opus` is exactly what `MediaRecorder` labels its own
+    // output with, and it is refused here on purpose: the header value must
+    // be a literal from `orion-api.ts`, not a string the platform composed.
+    // (Case is not in the list because `Blob` lower-cases `type` itself, so
+    // "AUDIO/WEBM" is genuinely one of ours by the time it arrives.)
+    for (const hostile of [
+      "text/html",
+      "audio/wav; charset=utf-8",
+      "audio/webm;codecs=opus",
+      "",
+    ]) {
+      await expect(requestAudioTurn(recording(2048, hostile))).rejects.toMatchObject({
+        failure: "rejected",
+      });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts every media type the microphone boundary can produce", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(turnPayload()));
+
+    for (const type of ACCEPTED_RECORDING_MEDIA_TYPES) {
+      fetchMock.mockResolvedValue(jsonResponse(turnPayload()));
+      await expect(requestAudioTurn(recording(1024, type))).resolves.toBeTruthy();
+    }
+  });
+
+  it("refuses an empty recording before making a request", async () => {
+    await expect(requestAudioTurn(recording(0))).rejects.toMatchObject({ failure: "rejected" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a recording larger than the server would accept anyway", async () => {
+    // The size is what is checked, so a sparse Blob of the right length is
+    // the honest fixture; allocating 25 MB to prove a `>` would not.
+    const oversized = { size: MAX_AUDIO_REQUEST_BYTES + 1, type: "audio/webm" } as Blob;
+
+    await expect(requestAudioTurn(oversized)).rejects.toMatchObject({ failure: "rejected" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("mirrors the server's own body ceiling", () => {
+    expect(MAX_AUDIO_REQUEST_BYTES).toBe(25 * 1024 * 1024);
+  });
+
+  it("reports an unreachable backend without leaking the platform's error", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch: ECONNREFUSED 127.0.0.1:8000"));
+
+    let caught: unknown;
+    try {
+      await requestAudioTurn(recording());
+    } catch (cause) {
+      caught = cause;
+    }
+
+    expect(caught).toBeInstanceOf(OrionApiError);
+    expect((caught as OrionApiError).message).toBe("unreachable");
+    expect(messageForFailure((caught as OrionApiError).failure)).not.toMatch(/ECONNREFUSED/);
+  });
+
+  it("is cancellable, like every other request", async () => {
+    const controller = new AbortController();
+    fetchMock.mockImplementation(() => {
+      controller.abort();
+      return Promise.reject(new DOMException("aborted", "AbortError"));
+    });
+
+    await expect(
+      requestAudioTurn(recording(), { signal: controller.signal }),
+    ).rejects.toMatchObject({ failure: "cancelled" });
   });
 });

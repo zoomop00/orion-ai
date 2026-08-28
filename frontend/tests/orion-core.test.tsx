@@ -47,6 +47,26 @@ describe("OrionCore", () => {
     );
   });
 
+  it("eases a state change slowly and a measured amplitude quickly", () => {
+    // A 900ms glide is right when the envelope moves once because the state
+    // changed, and completely wrong for a value arriving sixty times a
+    // second -- it would smear a voice into a swell arriving a second late.
+    const { rerender } = render(<OrionCore state="listening" />);
+    const core = screen.getByTestId("orion-core");
+    expect(core.style.getPropertyValue("--envelope-ease")).toBe("900ms");
+
+    rerender(<OrionCore state="listening" amplitude={0.4} />);
+    expect(core.style.getPropertyValue("--envelope-ease")).toBe("90ms");
+
+    // Zero is a measured value too, not "no measurement".
+    rerender(<OrionCore state="listening" amplitude={0} />);
+    expect(core.style.getPropertyValue("--envelope-ease")).toBe("90ms");
+    expect(core.style.getPropertyValue("--envelope")).toBe("0");
+
+    rerender(<OrionCore state="listening" />);
+    expect(core.style.getPropertyValue("--envelope-ease")).toBe("900ms");
+  });
+
   it("lets a caller override the waveform envelope, clamped to 0..1", () => {
     // This is the seam Phase 4 drives with real audio amplitude.
     const { rerender } = render(<OrionCore state="idle" amplitude={0.5} />);
@@ -57,6 +77,29 @@ describe("OrionCore", () => {
 
     rerender(<OrionCore state="idle" amplitude={-2} />);
     expect(screen.getByTestId("orion-core").style.getPropertyValue("--envelope")).toBe("0");
+  });
+
+  it("re-renders only the envelope when live audio drives it, frame after frame", () => {
+    // Phase 4 updates `amplitude` up to sixty times a second. The generated
+    // layers are memoised, so the DOM nodes must survive an envelope change
+    // untouched -- if they are rebuilt every frame the particle field is
+    // being reconciled at 60fps for no reason at all.
+    const { rerender } = render(<OrionCore state="listening" amplitude={0.1} />);
+    const core = screen.getByTestId("orion-core");
+    const particles = screen.getByTestId("orion-particles");
+    const bars = screen.getByTestId("orion-wave");
+    const firstBar = bars.firstElementChild;
+
+    for (const value of [0.2, 0.45, 0.9, 0.3, 0]) {
+      rerender(<OrionCore state="listening" amplitude={value} />);
+      expect(core.style.getPropertyValue("--envelope")).toBe(String(value));
+      expect(core.getAttribute("data-envelope")).toBe(String(value));
+    }
+
+    expect(screen.getByTestId("orion-particles")).toBe(particles);
+    expect(screen.getByTestId("orion-wave")).toBe(bars);
+    expect(bars.firstElementChild).toBe(firstBar);
+    expect(particles.children).toHaveLength(PARTICLES.length);
   });
 
   it("exposes the state to assistive technology instead of hiding it in pixels", () => {

@@ -43,6 +43,36 @@ export const ORION_API_BASE = "http://127.0.0.1:8000";
 export const TEXT_TURN_PATH = "/v1/voice/turn/text";
 
 /**
+ * Phase 4's spoken turn. Raw recorded bytes, not multipart — matching the
+ * Phase 2 route exactly (`orion.interface.app.voice_turn`), which reads the
+ * body as bytes and takes the container from the `Content-Type` header.
+ */
+export const AUDIO_TURN_PATH = "/v1/voice/turn";
+
+/**
+ * The only `Content-Type` values this client will ever put on a request.
+ *
+ * A closed allowlist rather than "whatever the `Blob` says": `MediaRecorder`
+ * chooses its own codec-decorated label, and a header value assembled from a
+ * platform-authored string is exactly the kind of thing that is fine until
+ * one browser puts something surprising in it. Every entry is already in
+ * `orion.interface.schemas.ACCEPTED_AUDIO_CONTENT_TYPES`.
+ */
+export const ACCEPTED_RECORDING_MEDIA_TYPES: readonly string[] = [
+  "audio/webm",
+  "audio/ogg",
+  "audio/mp4",
+];
+
+/**
+ * Mirrors `orion.interface.schemas.MAX_REQUEST_BODY_BYTES` (which is itself
+ * Mission 9's `MAX_AUDIO_INPUT_BYTES`). Checked here so an over-long
+ * recording is refused before it is put on the wire rather than after the
+ * server has read 25 MB of it.
+ */
+export const MAX_AUDIO_REQUEST_BYTES = 25 * 1024 * 1024;
+
+/**
  * A whole turn is one Deepgram text-to-speech round trip behind a 30-second
  * server-side timeout, so the client waits a little longer than the server
  * before giving up — otherwise the browser would report a failure for a
@@ -201,16 +231,19 @@ export interface TextTurnOptions {
 }
 
 /**
- * Ask ORION to answer `text`, and return the completed turn.
+ * The single request path both turn endpoints share.
  *
- * Throws `OrionApiError` and nothing else — a network failure, a CORS
- * rejection, a non-2xx status, unparseable JSON and an unexpected shape all
- * arrive as a classified failure rather than as a `TypeError` from deep
- * inside `fetch`.
+ * Extracted in Phase 4 rather than copied: the timeout, the abort
+ * forwarding, the credential and cache posture, the "never read the error
+ * body" rule and the response validation are security properties, and two
+ * copies of a security property is one copy that will eventually be edited
+ * alone. Only the path, the body and the content type differ.
  */
-export async function requestTextTurn(
-  text: string,
-  { signal, timeoutMs = REQUEST_TIMEOUT_MS }: TextTurnOptions = {},
+async function postTurn(
+  path: string,
+  body: BodyInit,
+  headers: Readonly<Record<string, string>>,
+  { signal, timeoutMs = REQUEST_TIMEOUT_MS }: TextTurnOptions,
 ): Promise<OrionTurn> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -221,10 +254,10 @@ export async function requestTextTurn(
 
   let response: Response;
   try {
-    response = await fetch(`${ORION_API_BASE}${TEXT_TURN_PATH}`, {
+    response = await fetch(`${ORION_API_BASE}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      headers,
+      body,
       signal: controller.signal,
       mode: "cors",
       // The backend sets `allow_credentials=False`; saying so on this side
@@ -257,4 +290,53 @@ export async function requestTextTurn(
   }
 
   return parseTurn(payload);
+}
+
+/**
+ * Ask ORION to answer `text`, and return the completed turn.
+ *
+ * Throws `OrionApiError` and nothing else — a network failure, a CORS
+ * rejection, a non-2xx status, unparseable JSON and an unexpected shape all
+ * arrive as a classified failure rather than as a `TypeError` from deep
+ * inside `fetch`.
+ */
+export async function requestTextTurn(
+  text: string,
+  options: TextTurnOptions = {},
+): Promise<OrionTurn> {
+  return postTurn(
+    TEXT_TURN_PATH,
+    JSON.stringify({ text }),
+    { "Content-Type": "application/json" },
+    options,
+  );
+}
+
+/**
+ * Send one recorded utterance and return the completed turn.
+ *
+ * The recording is refused here — before a byte is sent — if it is empty,
+ * larger than the server's own body ceiling, or labelled with anything
+ * outside `ACCEPTED_RECORDING_MEDIA_TYPES`. All three are the client
+ * declining to make a request that cannot succeed, and the last one is what
+ * keeps a platform-authored string out of a request header.
+ *
+ * The audio itself is never stored, never given an object URL and never
+ * played back; it exists as the `Blob` the caller passes in and is
+ * unreferenced the moment this resolves.
+ */
+export async function requestAudioTurn(
+  audio: Blob,
+  options: TextTurnOptions = {},
+): Promise<OrionTurn> {
+  if (audio.size === 0 || audio.size > MAX_AUDIO_REQUEST_BYTES) {
+    throw new OrionApiError("rejected");
+  }
+  if (!ACCEPTED_RECORDING_MEDIA_TYPES.includes(audio.type)) {
+    throw new OrionApiError("rejected");
+  }
+
+  // `audio.type` has just been proven to be one of our own constants, so
+  // this header value is a literal from this module in every reachable case.
+  return postTurn(AUDIO_TURN_PATH, audio, { "Content-Type": audio.type }, options);
 }

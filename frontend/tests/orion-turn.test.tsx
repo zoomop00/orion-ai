@@ -435,16 +435,52 @@ describe("backend text is data, never markup", () => {
   });
 });
 
-describe("no device capture happens in this phase", () => {
-  it("asks for no microphone even when the mic affordance is used", () => {
-    const getUserMedia = vi.fn();
-    vi.stubGlobal("navigator", { ...navigator, mediaDevices: { getUserMedia } });
+describe("no device capture happens on a typed turn", () => {
+  /**
+   * Phase 4 gave the microphone button a real microphone, so the Phase 3
+   * assertion that it asked for nothing is now a claim about a different
+   * button and lives in `orion-voice-turn.test.tsx`. What survives here is
+   * the property this file was actually written to protect: the *typed*
+   * path touches no device at any point, from keystroke to silence.
+   */
+  const withMicrophoneWatched = (): ReturnType<typeof vi.fn> => {
+    const getUserMedia = vi.fn(() => Promise.reject(new Error("never called")));
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia },
+    });
+    return getUserMedia;
+  };
+
+  it("asks for no microphone while typing, sending, speaking or failing", async () => {
+    const getUserMedia = withMicrophoneWatched();
     render(<OrionInterface />);
 
-    fireEvent.click(screen.getByTestId("orion-mic"));
+    type("hello orion");
+    submit();
+    await waitFor(() => expect(stateOf()).toBe("thinking"));
+    await waitFor(() => expect(harness.played).toHaveLength(1));
+
+    await act(async () => {
+      harness.startPlayback();
+    });
+    await waitFor(() => expect(stateOf()).toBe("speaking"));
+    await act(async () => {
+      harness.endPlayback();
+    });
+    await waitFor(() => expect(stateOf()).toBe("idle"));
 
     expect(getUserMedia).not.toHaveBeenCalled();
-    expect(stateOf()).toBe("listening");
+  });
+
+  it("asks for no microphone when the development controls are used", () => {
+    const getUserMedia = withMicrophoneWatched();
+    render(<OrionInterface />);
+
+    fireEvent.click(screen.getByTestId("state-listening"));
+    fireEvent.click(screen.getByTestId("state-advance"));
+
+    expect(getUserMedia).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

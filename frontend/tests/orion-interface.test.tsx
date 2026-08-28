@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { OrionInterface } from "@/components/OrionInterface";
@@ -46,19 +46,45 @@ describe("OrionInterface", () => {
     }
   });
 
-  it("toggles listening from the microphone affordance without claiming a microphone", () => {
+  /**
+   * Phase 1 and 3's microphone button previewed the listening *visual* and
+   * said so in its own label. Phase 4 made it real, so the assertion that it
+   * claimed no microphone would now be asserting a lie. It is replaced, not
+   * dropped: the button must still announce what it is about to do, and it
+   * must still come to rest when a browser cannot help. The granted-permission
+   * path lives in `orion-voice-turn.test.tsx`, which has the mocks for it.
+   */
+  it("offers a microphone honestly, and names the permission it will ask for", () => {
     render(<OrionInterface />);
     const mic = screen.getByTestId("orion-mic");
 
     expect(mic.getAttribute("aria-pressed")).toBe("false");
-    expect(mic.getAttribute("aria-label")).toMatch(/no microphone is connected/i);
+    expect(mic.getAttribute("aria-label")).toMatch(/permission to use the microphone/i);
+    expect(mic.getAttribute("aria-label")).not.toMatch(/no microphone is connected/i);
+  });
 
-    fireEvent.click(mic);
-    expect(stateOf("orion-interface")).toBe("listening");
-    expect(mic.getAttribute("aria-pressed")).toBe("true");
+  it("comes to rest with a calm sentence when the browser cannot record", async () => {
+    // jsdom has no `navigator.mediaDevices`, which is exactly the shape of a
+    // browser that cannot record. Nothing should throw, and nothing should
+    // claim to be listening.
+    render(<OrionInterface />);
 
-    fireEvent.click(mic);
+    fireEvent.click(screen.getByTestId("orion-mic"));
+
+    await waitFor(() => expect(screen.getByTestId("orion-error")).toBeTruthy());
+    expect(screen.getByTestId("orion-error").textContent).toMatch(/cannot record audio/i);
     expect(stateOf("orion-interface")).toBe("idle");
+    expect(screen.getByTestId("orion-mic")).toHaveProperty("disabled", false);
+  });
+
+  it("still previews every state from the development controls, with no device", () => {
+    render(<OrionInterface />);
+
+    fireEvent.click(screen.getByTestId("state-listening"));
+    expect(stateOf("orion-interface")).toBe("listening");
+    expect(stateOf("orion-core")).toBe("listening");
+    // A previewed listening state is not a claim to be capturing anything.
+    expect(screen.getByTestId("orion-mic").getAttribute("aria-pressed")).toBe("false");
   });
 
   it("announces state changes politely rather than silently", () => {
@@ -92,10 +118,15 @@ describe("OrionInterface", () => {
 
   it("states honestly what the prototype is and is not connected to", () => {
     render(<OrionInterface />);
-    // Phase 3 really does make a network call now, so the Phase 1 wording
-    // ("no network") would be a false claim and is replaced rather than
-    // quietly deleted.
+    // Each phase rewrites this line rather than letting it go stale. Phase 3
+    // replaced Phase 1's "no network"; Phase 4 replaces Phase 3's "no
+    // microphone yet", which is now false, and says what the microphone
+    // actually does instead.
     expect(screen.getByText(/talks only to ORION on this machine/i)).toBeTruthy();
-    expect(screen.getByText(/no microphone yet, nothing stored/i)).toBeTruthy();
+    const disclosure = screen.getByText(/talks only to ORION on this machine/i).textContent ?? "";
+    expect(disclosure).toMatch(/microphone runs only while you are speaking a turn/i);
+    expect(disclosure).toMatch(/released the moment you stop/i);
+    expect(disclosure).toMatch(/nothing is recorded, stored or logged/i);
+    expect(disclosure).not.toMatch(/no microphone yet/i);
   });
 });

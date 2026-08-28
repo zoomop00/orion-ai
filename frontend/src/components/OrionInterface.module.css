@@ -334,6 +334,26 @@
   transform: scale(1.04);
 }
 
+/*
+ * A live microphone gets a slow breath of its own, separate from anything
+ * the core is doing. It is deliberately NOT an audio-reactive element: the
+ * user's voice drives the core, and a second thing pulsing to the same
+ * signal would read as a glitch rather than as one instrument.
+ */
+.mic[data-capturing="true"] {
+  animation: micLive 2.4s ease-in-out infinite;
+}
+
+@keyframes micLive {
+  0%,
+  100% {
+    box-shadow: 0 0 20px rgb(var(--orion-accent-rgb) / 0.24);
+  }
+  50% {
+    box-shadow: 0 0 34px rgb(var(--orion-accent-rgb) / 0.44);
+  }
+}
+
 /* -------------------------------------------------- development controls -- */
 
 .dev {
@@ -493,7 +513,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .aurora {
+  .aurora,
+  .mic[data-capturing="true"] {
     animation: none;
   }
 }

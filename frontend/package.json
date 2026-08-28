@@ -2,7 +2,7 @@
   "name": "orion-frontend",
   "version": "0.1.0",
   "private": true,
-  "description": "ORION interface - Mission 10 Phase 1 visual prototype (frontend only, no backend integration).",
+  "description": "ORION interface - Mission 10 Phases 1, 3 and 4: the cinematic core, a live text turn, and microphone capture with audio-reactive visualization.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

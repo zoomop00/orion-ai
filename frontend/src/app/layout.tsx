@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "ORION",
-  description: "ORION - autonomous market intelligence. Mission 10 Phase 1 visual prototype.",
+  description: "ORION - autonomous market intelligence. Local voice interface prototype.",
 };
 
 export const viewport: Viewport = {
