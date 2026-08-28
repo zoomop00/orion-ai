@@ -3180,3 +3180,111 @@ implements the real ABC (`MarketDataProvider`, `ReasoningProvider`,
 `fetch_ohlcv` and the finished report is stubbed: real validation, real
 indicators, real structure, the real Decision Engine and the real Risk
 Guardian run on every test in the analysis suite.
+
+## 2026-08-28 — Mission 10 Phase 5.5: decision-journal persistence is
+deliberately NOT wired
+
+**The question Phase 5.1 left open, answered: no.** That entry deferred
+"decision-journal persistence and Mission 5 reflection wiring" to "5.5, *if
+approved*". It is not approved. No production `DecisionJournal` writer is
+introduced, no `SqliteDecisionJournal` is constructed in any request path, no
+`SqlitePortfolioStore` is opened, and Mission 5 reflection stays unwired.
+Phase 5.5 changes no source file. This entry is the deliverable.
+
+**The gap is real and is being left open on purpose.** `DecisionJournal` has
+no production writer anywhere in `src/` — every `record_*` call in the
+repository lives in `tests/memory/` and `tests/reflection/`. Mission 2 built
+an append-only journal; Missions 5 and 6 read from one; nothing in the
+running system has ever written to one. That is an architectural gap, and
+closing it by adding a writer now would cost more than it buys.
+
+**The interface makes a promise to the user that a journal would falsify.**
+`OrionInterface.tsx` renders, to the person using it: "Nothing is recorded,
+stored or logged." That sentence has been on screen since Phase 4 and was
+rewritten in Phase 3 and Phase 4 rather than allowed to go stale. Wiring a
+journal into the turn path would make it false while leaving it displayed.
+Deleting the sentence instead would be a product decision about what ORION
+*is* — a local prototype that forgets — and that decision has not been taken.
+Of every argument below this is the one that settles it: the others are about
+cost and correctness, this one is about telling the truth to a user.
+
+**It would require crossing four committed, enforced guarantees, not one
+convention.** `tests/orchestrator/test_import_hygiene.py` bans `sqlalchemy`,
+`sqlite3` and `orion.memory` from the composition root that actually runs an
+analysis. `tests/interface/test_import_hygiene.py` bans the same from the
+HTTP adapter. In `tests/interface/test_security.py`,
+`test_interface_package_opens_no_files_and_imports_no_database` AST-asserts
+that no `open()` call and no database import exists in the package, and
+`test_a_completed_turn_writes_nothing_to_disk` runs a real text turn and a
+real audio turn against an isolated working directory, then asserts
+`list(rglob("*")) == []` — zero bytes, checked against the filesystem rather
+than claimed. Enabling persistence means editing four tests whose whole
+purpose is to fail when someone does exactly that. A guarantee that is
+deleted the first time it is inconvenient was never a guarantee.
+
+**Merely constructing the journal creates the file.**
+`orion.memory.engine.create_memory_engine` runs `metadata.create_all(engine)`
+— a database file and its tables appear at construction, before anything is
+recorded. So there is no "wire it but write nothing" middle position on the
+filesystem test; the seam is binary, which `orchestrator/wiring.py` already
+documents for the identical reason it declines to open a paper account.
+
+**Half the journal has no producer, and a half-filled audit trail is worse
+than none.** The write surface is `record_evidence`, `record_reasoning`,
+`record_decision`, `record_verdict`, `record_fill` and
+`record_closed_position`. Mission 10 stops at the verdict: `run_analysis`
+composes `fetch_ohlcv → validate_snapshot → build_evidence → reason → decide
+→ review` and returns, executing nothing. There are no `Fill`s and no
+`ClosedPosition`s to record, so a wired journal would persist four of six
+record types forever. A reader — or Mission 5's `reflect_on_closed_position`,
+which walks `ClosedPosition → Fill → RiskVerdict → ProposedDecision` — would
+find a store that looks like an audit trail and contains no outcomes. The
+same fact makes reflection wiring moot rather than merely deferred: there is
+nothing for it to reflect on.
+
+**A conversational surface is the wrong thing to journal.** `/v1/voice/turn`
+answers questions. "Analyze gold" is a question, not a trade, and it arrives
+over an unauthenticated loopback POST with no rate limit. Journaling every
+turn would turn each question into an appended row with no retention policy,
+no cleanup path and no authentication in front of it — unbounded disk growth
+driven by whoever can reach `127.0.0.1:8000`, holding a durable record of
+what the user asked and when. The journal was designed for a trading loop
+with real fills, not for a microphone.
+
+**What honest absence looks like today, and why it is already correct.** The
+risk panel reports `NO_PORTFOLIO_STORE` rather than inventing a flat account;
+`RiskPanel`'s validator makes the fabricated case unconstructible. News and
+macro report `NOT_CONNECTED` through a schema with nowhere to put a
+fabricated headline. Phase 5.4 renders both states explicitly — `NOT
+AVAILABLE` with a sentence naming why, `NOT CONNECTED` with the backend's own
+detail — and its tests assert that an unavailable risk panel can never read
+as a verdict. The absence of persistence is disclosed by the same mechanism,
+in the same voice, and needs no new code to be honest.
+
+**What would have to be true to revisit this.** Not "the interface exists" —
+that is now true and changed nothing. Concretely: an execution loop that
+produces real `Fill`s and `ClosedPosition`s, so the journal's write surface
+has a producer for all six record types; a decision about retention and about
+what the interface tells the user instead of "nothing is recorded, stored or
+logged"; and an owner for the crash-consistency boundary the Mission 5 entry
+already documents as Finding A (account state and journal are separate SQLite
+files with no shared transaction). Until all three exist, the correct number
+of production journal writers is zero.
+
+**Documentation note.** Phases 5.2 (HTTP analysis surface), 5.3 (frontend
+analysis contract) and 5.4 (cinematic analysis view) shipped without entries
+in this document; their rationale lives in commits `058c8dc`, `b9bb3b6` and
+`7c8c264`. This entry does not backfill them — it records only the Phase 5.5
+decision — but a reader moving from Phase 5.1 to here should know the three
+phases in between happened and are documented elsewhere.
+
+**Still deferred, unchanged from the Phase 5.1 list:** the Macro Analyst /
+Finnhub / second Anthropic call; news and sentiment data layers; symbols
+beyond XAUUSD; user-selectable timeframes; streaming/WebSockets; and
+authentication. The broken `[project.scripts] orion = "orion.cli:main"`
+entrypoint (`src/orion/cli.py` still does not exist) remains tracked
+separately and is deliberately not fixed here.
+
+**Files modified:** this document only. No source file, no test, no
+dependency manifest, and no frontend file was touched. `pyproject.toml` and
+`uv.lock` are unchanged; no dependency was added or removed.
