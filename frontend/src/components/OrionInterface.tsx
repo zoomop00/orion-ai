@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { useOrionTurn } from "@/hooks/use-orion-turn";
 import { ORION_VISUAL_STATES, nextInSequence, profileFor } from "@/state/orion-visual-state";
 
+import { OrionAnalysisDeck } from "./OrionAnalysisDeck";
 import { OrionCore } from "./OrionCore";
 import styles from "./OrionInterface.module.css";
 
@@ -30,17 +31,34 @@ import styles from "./OrionInterface.module.css";
  * one thing that changed shape is the button's own label, which used to
  * disclaim a microphone that now exists.
  *
- * ALL BACKEND TEXT IS RENDERED AS TEXT. `transcript` and `responseText` are
- * interpolated as JSX children, which React escapes. There is no
- * `dangerouslySetInnerHTML`, no `innerHTML`, no markdown parser and no HTML
- * string construction anywhere in this tree, so a hostile transcript is
- * displayed rather than executed.
+ * PHASE 5.4 ADDS ONE CONDITIONAL REGION. When a turn produced an analysis --
+ * which it does only when the user actually asked for one -- `OrionAnalysisDeck`
+ * renders beneath the core. It is not a route, not a panel that can be opened,
+ * and not a state: there is nothing to toggle, because the deck exists exactly
+ * when an analysis does and vanishes with it on the next turn. An ordinary
+ * conversational turn still renders the Phase 4 interface unchanged, which is
+ * what keeps the brief's "spacious environment, not a wall of panels" true at
+ * rest.
+ *
+ * THE CORE IS STILL THE SUBJECT. The deck goes below the core, never beside
+ * it, and `OrionCore` was not touched: it keeps its full `clamp(230px, 58vmin,
+ * 540px)` stage rather than being shrunk to make room for data. On a short
+ * viewport the page grows and scrolls vertically instead, which is the honest
+ * trade -- squeezing the core to fit a report would invert the hierarchy the
+ * whole mission is built around.
+ *
+ * ALL BACKEND TEXT IS RENDERED AS TEXT. `transcript`, `responseText`, and now
+ * the analysis's `rationale` and capability details, are interpolated as JSX
+ * children, which React escapes. There is no `dangerouslySetInnerHTML`, no
+ * `innerHTML`, no markdown parser and no HTML string construction anywhere in
+ * this tree, so a hostile transcript is displayed rather than executed.
  */
 export function OrionInterface() {
   const {
     visualState,
     transcript,
     responseText,
+    analysis,
     error,
     busy,
     amplitude,
@@ -98,11 +116,19 @@ export function OrionInterface() {
           <span className={styles.wordmark}>ORION</span>
           <span className={styles.tagline}>Autonomous Market Intelligence</span>
         </div>
-        <span className={styles.build}>Mission 10 &middot; Phase 4 &middot; live voice turn</span>
+        <span className={styles.build}>Mission 10 &middot; Phase 5.4 &middot; cinematic analysis</span>
       </header>
 
-      <section className={styles.centre}>
+      {/*
+        `data-analysis` exists for the stylesheet, not for logic. At rest the
+        centre row is a fixed-height stage that centres the core; with a deck
+        in it the row has to be allowed to grow instead, or `.shell`'s
+        `overflow: hidden` would clip the report rather than let the page
+        scroll to it.
+      */}
+      <section className={styles.centre} data-analysis={analysis !== null}>
         <OrionCore state={visualState} amplitude={amplitude ?? undefined} />
+        {analysis !== null && <OrionAnalysisDeck analysis={analysis} />}
       </section>
 
       <footer className={styles.footer}>

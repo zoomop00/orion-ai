@@ -116,7 +116,23 @@
 .centre {
   display: grid;
   place-items: center;
+  gap: clamp(18px, 3.4vh, 48px);
+  min-width: 0;
   min-height: 0;
+}
+
+/*
+ * At rest `min-height: 0` lets the core's row shrink so the layout can hold
+ * itself to one viewport. With an analysis on screen that same rule would let
+ * the track size below the deck's content, and `.shell`'s `overflow: hidden`
+ * would then clip the report instead of letting the page scroll to it. So the
+ * automatic minimum comes back, the row grows, and the document scrolls
+ * vertically -- while `html, body { overflow-x: hidden }` in `globals.css`
+ * keeps the horizontal axis pinned regardless of what the backend sent.
+ */
+.centre[data-analysis="true"] {
+  align-content: start;
+  min-height: auto;
 }
 
 /* -------------------------------------------------------------- footer --- */

@@ -1,0 +1,522 @@
+/*
+ * The analysis deck.
+ *
+ * Reads as something ORION projected, not as a page. There is no card, no
+ * drop shadow, no solid panel fill and no border box -- a panel is a hairline
+ * top rule, a tracked-out micro label, and a stack of values on the same deep
+ * space the core floats in. The brief warns off "crowded trading dashboards"
+ * and "generic SaaS cards" by name, and those two conventions are exactly
+ * what a border-radius plus a background colour would import.
+ *
+ * IT BORROWS ORION'S CURRENT COLOUR RATHER THAN DECLARING ITS OWN.
+ * `--orion-accent-rgb` is set per visual state on `.shell` in
+ * `OrionInterface.module.css`, so the deck shifts hue with ORION as it thinks
+ * and speaks. The fallback in the `var()` below is only for a test that
+ * renders this component on its own.
+ *
+ * EVERY ANIMATION IS TRANSFORM OR OPACITY. Nothing here animates width,
+ * height, top or a filter, so the whole deck composites on the GPU alongside
+ * the core -- which matters because the core is being repainted from live
+ * audio at up to sixty frames a second while this is on screen. The
+ * confidence meter is a `scaleX` on a full-width bar for the same reason.
+ *
+ * NOTHING CAN PUSH THE PAGE SIDEWAYS. The panel grid is
+ * `auto-fit`/`minmax(min(220px, 100%), 1fr)`, which collapses to one column
+ * on a narrow phone instead of overflowing; every grid and flex child that
+ * holds text sets `min-width: 0`; and every free-text field the backend can
+ * fill -- the rationale and the two capability sentences -- wraps mid-word.
+ * A 400-character rationale with no spaces in it is a valid payload, and it
+ * must not be able to introduce a horizontal scrollbar.
+ */
+
+.deck {
+  --accent-rgb: var(--orion-accent-rgb, 104 206 240);
+
+  display: flex;
+  flex-direction: column;
+  gap: clamp(16px, 2.6vh, 30px);
+  /*
+   * The centre row centres its items, which would otherwise shrink this deck
+   * to the width of its widest word. Stretching is claimed here rather than
+   * granted by the parent so the deck stays correct wherever it is mounted.
+   */
+  justify-self: stretch;
+  width: 100%;
+  max-width: min(1080px, 100%);
+  min-width: 0;
+  margin: 0 auto;
+  animation: deckRise 1100ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* -------------------------------------------------------- target line --- */
+
+/*
+ * The scope caption: what was looked at, when. Sits directly under the core
+ * like a readout etched under an instrument, which is why it is a single
+ * centred line of small tracked type rather than a heading.
+ */
+.target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: clamp(8px, 1.4vw, 14px);
+  margin: 0;
+  color: rgba(196, 220, 244, 0.44);
+  font-size: clamp(9.5px, 0.85vw, 11px);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.symbol {
+  color: rgba(232, 244, 255, 0.9);
+  font-weight: 600;
+  letter-spacing: 0.3em;
+}
+
+.timeframe {
+  color: rgb(var(--accent-rgb) / 0.85);
+  font-weight: 600;
+  letter-spacing: 0.24em;
+}
+
+.price {
+  color: rgba(232, 244, 255, 0.78);
+  font-weight: 500;
+  letter-spacing: 0.12em;
+}
+
+.instant,
+.bars {
+  color: rgba(196, 220, 244, 0.34);
+  letter-spacing: 0.14em;
+}
+
+/* A hairline tick between fields, instead of a bullet or a pipe character. */
+.divider {
+  width: 14px;
+  height: 1px;
+  background: rgba(150, 200, 235, 0.22);
+}
+
+/* ------------------------------------------------------------ verdict --- */
+
+/*
+ * ORION's answer, and the only thing in the deck sized like a headline. If a
+ * user reads one thing here it should be this, so everything else in the
+ * deck is deliberately a step or two smaller.
+ */
+.verdict {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(10px, 1.6vh, 16px);
+  min-width: 0;
+  padding: clamp(16px, 2.4vh, 26px) 0;
+  border-top: 1px solid rgba(150, 200, 235, 0.1);
+  border-bottom: 1px solid rgba(150, 200, 235, 0.1);
+  text-align: center;
+}
+
+.action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: clamp(10px, 1.6vw, 18px);
+  margin: 0;
+}
+
+.actionWord {
+  color: rgba(240, 250, 255, 0.96);
+  font-size: clamp(26px, 4.4vw, 46px);
+  font-weight: 200;
+  letter-spacing: 0.06em;
+  line-height: 1.05;
+  text-transform: uppercase;
+}
+
+/*
+ * BUY and SELL get ORION's accent; WAIT stays deliberately quiet. Waiting is
+ * the most common and most conservative answer the engines give, and making
+ * it look like an alert would misrepresent it.
+ */
+.actionWord[data-action="buy"],
+.actionWord[data-action="sell"] {
+  color: rgb(var(--accent-rgb) / 0.98);
+  text-shadow: 0 0 32px rgb(var(--accent-rgb) / 0.32);
+}
+
+.bias {
+  color: rgba(196, 220, 244, 0.42);
+  font-size: clamp(9.5px, 0.85vw, 11px);
+  font-weight: 500;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+}
+
+.rationale {
+  max-width: 52ch;
+  min-width: 0;
+  margin: 0;
+  color: rgba(226, 240, 255, 0.76);
+  font-size: clamp(13px, 1.35vw, 15.5px);
+  font-weight: 300;
+  letter-spacing: 0.005em;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* -------------------------------------------------------------- gauges -- */
+
+.gauges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(14px, 2.4vw, 30px);
+  width: 100%;
+  min-width: 0;
+}
+
+.gauge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.gaugeLabel {
+  color: rgba(196, 220, 244, 0.34);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.meter {
+  position: relative;
+  width: clamp(90px, 14vw, 150px);
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(150, 200, 235, 0.14);
+}
+
+.meterFill {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    rgb(var(--accent-rgb) / 0.35),
+    rgb(var(--accent-rgb) / 0.95)
+  );
+  transform: scaleX(var(--confidence, 0));
+  transform-origin: left center;
+  transition: transform 900ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.gaugeValue {
+  color: rgba(232, 244, 255, 0.84);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.riskLevel {
+  color: rgba(232, 244, 255, 0.84);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+/*
+ * The advisory risk level warms as it rises. It is deliberately restrained --
+ * a red pill would read as a warning from the Risk Guardian, which this is
+ * not: it is the reasoning model's own opinion, and the guardian's actual
+ * verdict has its own panel below.
+ */
+.riskLevel[data-level="medium"] {
+  color: rgba(255, 226, 176, 0.86);
+}
+
+.riskLevel[data-level="high"] {
+  color: rgba(255, 194, 184, 0.9);
+}
+
+/* --------------------------------------------------------------- codes -- */
+
+.codes {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.code {
+  min-width: 0;
+  padding: 4px 10px;
+  border: 1px solid rgba(150, 200, 235, 0.14);
+  border-radius: 999px;
+  color: rgba(196, 220, 244, 0.5);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.codeFailed {
+  border-color: rgba(255, 176, 164, 0.24);
+  color: rgba(255, 200, 190, 0.72);
+}
+
+/* -------------------------------------------------------------- panels -- */
+
+/*
+ * `auto-fit` with a `min()` floor: four columns on a desktop, two on a
+ * tablet, one on a phone, with no breakpoint written anywhere and no
+ * possibility of a track wider than the viewport.
+ */
+.panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: clamp(18px, 2.6vw, 34px);
+  width: 100%;
+  min-width: 0;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid rgba(150, 200, 235, 0.12);
+  animation: panelRise 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.panel:nth-child(1) {
+  animation-delay: 120ms;
+}
+.panel:nth-child(2) {
+  animation-delay: 200ms;
+}
+.panel:nth-child(3) {
+  animation-delay: 280ms;
+}
+.panel:nth-child(4) {
+  animation-delay: 360ms;
+}
+
+.panelTitle {
+  margin: 0;
+  color: rgb(var(--accent-rgb) / 0.72);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+}
+
+/* ------------------------------------------------------------ readings -- */
+
+.readings {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  min-width: 0;
+}
+
+.reading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.readingLabel {
+  color: rgba(196, 220, 244, 0.4);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.readingValue {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  text-align: right;
+}
+
+.value {
+  color: rgba(232, 244, 255, 0.88);
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0.03em;
+}
+
+.hint {
+  color: rgba(196, 220, 244, 0.26);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/*
+ * A value the backend sent as null. Dimmed rather than hidden: "ORION had no
+ * reading here" is information, and a row that vanished would be
+ * indistinguishable from a row this build forgot to render.
+ */
+.reading[data-available="false"] .value {
+  color: rgba(196, 220, 244, 0.3);
+}
+
+/* -------------------------------------------------------- capabilities -- */
+
+.capability {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.capabilityLabel {
+  color: rgba(226, 240, 255, 0.72);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/*
+ * Stated plainly, in the muted grey of a disabled instrument rather than the
+ * amber of a fault. Nothing is broken -- this build simply has no news or
+ * macro source, and the panel says so instead of showing an empty chart.
+ */
+.capabilityStatus {
+  align-self: center;
+  padding: 3px 8px;
+  border: 1px solid rgba(150, 200, 235, 0.16);
+  border-radius: 999px;
+  color: rgba(196, 220, 244, 0.44);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  white-space: nowrap;
+}
+
+.capabilityDetail {
+  grid-column: 1 / -1;
+  min-width: 0;
+  color: rgba(196, 220, 244, 0.36);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- risk -- */
+
+.riskHeadline {
+  margin: 0;
+  color: rgba(232, 244, 255, 0.86);
+  font-size: 15px;
+  font-weight: 300;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* No verdict exists, so the headline is stated as quietly as the reason. */
+.panel[data-available="false"] .riskHeadline {
+  color: rgba(196, 220, 244, 0.42);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+}
+
+.riskExplanation {
+  min-width: 0;
+  margin: 0;
+  color: rgba(196, 220, 244, 0.4);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.riskInstant {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  color: rgba(196, 220, 244, 0.34);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+/* ------------------------------------------------------------ a11y ------ */
+
+/*
+ * Announced, never shown. Pairs with the em dash so a screen-reader user
+ * hears "not available" where a sighted user sees a dash -- the dash on its
+ * own is ambiguous to speech.
+ */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ motion ---- */
+
+@keyframes deckRise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes panelRise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/*
+ * Under reduced motion the deck simply *is* there. Nothing slides in, nothing
+ * staggers, and the confidence meter jumps to its value rather than sweeping
+ * to it -- the number beside it was always the authoritative reading, so no
+ * information is lost by removing the sweep.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .deck,
+  .panel {
+    animation: none;
+  }
+
+  .meterFill {
+    transition: none;
+  }
+}

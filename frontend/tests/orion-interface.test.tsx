@@ -92,9 +92,19 @@ describe("OrionInterface", () => {
     expect(screen.getByTestId("orion-status").getAttribute("aria-live")).toBe("polite");
   });
 
-  it("shows no market data, numbers, or dashboard furniture", () => {
+  /**
+   * Phase 5.4 gave the interface something to draw, so this assertion needs
+   * saying more precisely than before rather than relaxing: with no analysis
+   * on screen -- which is the resting state, and every ordinary
+   * conversational turn -- the interface is still exactly what Phase 4 left.
+   * The companion assertions for a turn that *did* produce an analysis live
+   * in `orion-interface-analysis.test.tsx`, and they keep the table, canvas
+   * and second-form bans in force there too.
+   */
+  it("shows no market data, numbers, or dashboard furniture at rest", () => {
     const { container } = render(<OrionInterface />);
 
+    expect(screen.queryByTestId("orion-analysis")).toBeNull();
     expect(container.querySelectorAll("table")).toHaveLength(0);
     expect(container.querySelectorAll("canvas")).toHaveLength(0);
     // Phase 3 adds exactly one command surface -- one form, one input, and
@@ -111,7 +121,13 @@ describe("OrionInterface", () => {
     expect(container.querySelectorAll("time")).toHaveLength(0);
 
     // No prices, percentages or ticker symbols anywhere in the rendered text.
-    const text = container.textContent ?? "";
+    //
+    // The build chip is excluded rather than the rule being loosened: it
+    // names the phase ("Phase 5.4"), and a version number is not market data.
+    // Everything else on screen is still held to the original assertion.
+    const build = screen.getByText(/^Mission 10/).textContent ?? "";
+    expect(build).toBeTruthy();
+    const text = (container.textContent ?? "").replace(build, "");
     expect(text).not.toMatch(/\d+\.\d+/);
     expect(text).not.toMatch(/[$€£]|XAU|USD|%/);
   });

@@ -69,6 +69,10 @@ const MIC_FILE = "orion-microphone.ts";
 const ANALYSER_FILE = "orion-analyser.ts";
 /** The single file that validates a server-sent analysis. */
 const ANALYSIS_FILE = "orion-analysis.ts";
+/** The single file that decides how a validated analysis reads. */
+const VIEW_FILE = "analysis-view.ts";
+/** The single component that draws one. */
+const DECK_FILE = "OrionAnalysisDeck.tsx";
 
 const forbid = (pattern: RegExp, why: string, allowIn: readonly string[] = []): void => {
   for (const { path, name, text } of CODE) {
@@ -235,6 +239,77 @@ describe("frontend source safety", () => {
     expect(new Set(statuses)).toEqual(new Set(['"not_connected"']));
   });
 
+  it("turns a validated analysis into labels in exactly one file", () => {
+    // Phase 5.4 draws what Phase 5.3 validated. The split is the same one
+    // every other boundary here uses: `orion-analysis.ts` decides what is
+    // true, `analysis-view.ts` decides what it is called, and the component
+    // places already-final strings. A rounding rule or a fallback label
+    // appearing in a `.tsx` file would mean that split had quietly collapsed.
+    requireIn(VIEW_FILE, /export function toAnalysisView/, "the view boundary should own the mapping");
+    forbid(/toAnalysisView\s*\(/, "only the analysis deck may build a view model", [
+      VIEW_FILE,
+      DECK_FILE,
+    ]);
+  });
+
+  it("formats numbers and instants without a locale or a clock", () => {
+    // Two failure modes, one rule. A locale-sensitive formatter makes the
+    // server render and the browser render disagree, which React reports as
+    // a hydration mismatch on a page that is entirely a report. And
+    // converting an instant into the viewer's zone would silently restate
+    // *when* ORION looked at the market, which a report must never do.
+    forbid(/toLocaleString|toLocaleDateString|toLocaleTimeString/, "locale-sensitive formatting");
+    forbid(/\bIntl\./, "locale-sensitive formatting");
+    forbid(/new\s+Date\s*\(/, "the interface reads no clock and reinterprets no instant");
+    forbid(/getTimezoneOffset|resolvedOptions/, "the viewer's time zone is never consulted");
+    requireIn(VIEW_FILE, /toFixed\(/, "numbers should be formatted arithmetically, not by locale");
+  });
+
+  it("keeps the analysis view free of every capability it does not need", () => {
+    const view = CODE.find(({ name }) => name === VIEW_FILE);
+    expect(view, `${VIEW_FILE} is missing`).toBeDefined();
+    const text = view?.text ?? "";
+
+    for (const [pattern, why] of [
+      [/fetch\s*\(/, "the view model makes no request"],
+      [/document\./, "the view model touches no DOM"],
+      [/window\./, "the view model touches no browser globals"],
+      [/Math\.random/, "the view model invents nothing"],
+      [/parseAnalysis/, "the view model re-validates nothing; it is handed a validated value"],
+    ] as const) {
+      expect(text, `${VIEW_FILE}: ${why}`).not.toMatch(pattern);
+    }
+  });
+
+  it("says NOT CONNECTED for news and macro, and can say nothing else", () => {
+    const view = CODE.find(({ name }) => name === VIEW_FILE);
+    requireIn(VIEW_FILE, /NOT_CONNECTED_LABEL = "NOT CONNECTED"/, "the label must be explicit");
+    // A second status label appearing here would mean the interface had
+    // started claiming a data source this build does not have.
+    expect(view?.text).not.toMatch(/"(Connected|Partial|Live|Available)"/);
+    // There is no news data in this build, so there is nothing for a field of
+    // any of these names to hold. (`headline` is deliberately not on this
+    // list: the risk panel legitimately has one, and it is a label for a
+    // verdict rather than an article.)
+    expect(view?.text).not.toMatch(/sentiment|ticker|article|newsfeed|impact/i);
+  });
+
+  it("draws no chart, table or canvas, and no image from a server value", () => {
+    const deck = CODE.find(({ name }) => name === DECK_FILE);
+    expect(deck, `${DECK_FILE} is missing`).toBeDefined();
+    const text = deck?.text ?? "";
+
+    // The brief warns off "crowded trading dashboards" and "excessive charts"
+    // by name. There is nothing in `AnalysisSummary` to plot even if it did.
+    for (const [pattern, why] of [
+      [/<table|<canvas|<svg|<img|<iframe|<video/, "the deck renders no chart, table or media"],
+      [/href=|src=/, "no url is built anywhere in the deck"],
+      [/new\s+Image\s*\(/, "no image is constructed"],
+    ] as const) {
+      expect(text, `${DECK_FILE}: ${why}`).not.toMatch(pattern);
+    }
+  });
+
   it("uses no randomness, so nothing simulates data and hydration stays stable", () => {
     forbid(/Math\.random/, "would break hydration and would fake audio data");
     forbid(/crypto\.getRandomValues/, "would break hydration and would fake audio data");
@@ -272,7 +347,18 @@ describe("api boundary", () => {
 });
 
 describe("responsive structure", () => {
-  const stylesheets = FILES.filter(({ path }) => path.endsWith(".css"));
+  /**
+   * Stylesheets with their comments removed, for exactly the reason `CODE` is
+   * stripped above: these files *document* the rules they implement, often by
+   * quoting the very declaration under test. A `toMatch` against the raw text
+   * can therefore be satisfied by the prose alone, which makes the assertion
+   * pass even after the real declaration has been deleted -- a mutation of
+   * `.panels`' grid template proved exactly that before this was added. The
+   * rule is about what the stylesheet does, not what it explains.
+   */
+  const stylesheets = FILES.filter(({ path }) => path.endsWith(".css")).map(
+    ({ path, text }) => ({ path, text: text.replace(/\/\*[\s\S]*?\*\//g, " ") }),
+  );
 
   it("ships stylesheets alongside the components", () => {
     expect(stylesheets.length).toBeGreaterThanOrEqual(3);
@@ -296,6 +382,62 @@ describe("responsive structure", () => {
     const layout = stylesheets.find(({ path }) => path.endsWith("OrionInterface.module.css"));
     expect(layout?.text).toMatch(/\.commandRow\s*\{[^}]*max-width/);
     expect(layout?.text).toMatch(/\.commandInput\s*\{[^}]*min-width:\s*0/);
+  });
+
+  it("lets the analysis deck collapse instead of overflowing a phone", () => {
+    const deck = stylesheets.find(({ path }) => path.endsWith("OrionAnalysisDeck.module.css"));
+    expect(deck, "the analysis deck stylesheet is missing").toBeDefined();
+    const css = deck?.text ?? "";
+
+    // `minmax(min(220px, 100%), 1fr)` is the idiom that keeps an auto-fit
+    // grid from ever demanding a track wider than its container. Without the
+    // inner `min()`, a 360px phone gets a horizontal scrollbar.
+    expect(css).toMatch(/minmax\(min\(\d+px,\s*100%\),\s*1fr\)/);
+    expect(css).toMatch(/max-width:\s*min\(/);
+    expect(css).toMatch(/min-width:\s*0/);
+    expect(css).toMatch(/clamp\(/);
+  });
+
+  it("wraps every free-text field the backend can fill", () => {
+    const deck = stylesheets.find(({ path }) => path.endsWith("OrionAnalysisDeck.module.css"));
+    const css = deck?.text ?? "";
+
+    // The rationale is up to 400 characters chosen by a model, and the two
+    // capability sentences come from the backend. A single unbroken 400-
+    // character token is a valid payload, and it must wrap rather than push
+    // the document sideways.
+    for (const selector of [".rationale", ".capabilityDetail", ".riskExplanation"]) {
+      const block = css.match(new RegExp(`\\${selector}\\s*\\{[^}]*\\}`))?.[0] ?? "";
+      expect(block, `${selector} must wrap mid-word`).toMatch(/overflow-wrap:\s*anywhere/);
+    }
+  });
+
+  it("animates the analysis deck on the GPU only", () => {
+    const deck = stylesheets.find(({ path }) => path.endsWith("OrionAnalysisDeck.module.css"));
+    const css = deck?.text ?? "";
+
+    // The core is already repainting from live audio while this is on screen,
+    // so every keyframe here must be compositor-only. Animating width, height
+    // or top would put layout back on the main thread sixty times a second.
+    const properties = new Set<string>();
+    for (const match of css.matchAll(/@keyframes\s+[\w-]+\s*\{/g)) {
+      let depth = 0;
+      let index = (match.index ?? 0) + match[0].length - 1;
+      const start = index;
+      do {
+        const character = css[index];
+        if (character === "{") depth += 1;
+        if (character === "}") depth -= 1;
+        index += 1;
+      } while (depth > 0 && index < css.length);
+
+      for (const declaration of css.slice(start, index).matchAll(/([a-z-]+)\s*:/g)) {
+        if (declaration[1] !== undefined) properties.add(declaration[1]);
+      }
+    }
+
+    expect(properties.size).toBeGreaterThan(0);
+    expect([...properties].sort()).toEqual(["opacity", "transform"]);
   });
 
   it("respects reduced-motion preferences in both stylesheets that animate", () => {
