@@ -4024,3 +4024,158 @@ companions: `intent.py` returns `IntentKind.CAPABILITIES`, which that `schemas.p
 defines, and `test_local_response.py` imports `LocalResponseProvider`, which that
 `response.py` defines. Splitting them would have produced a commit that does not
 build.
+
+## 2026-08-29 — Mission 4 Phase 2a: a real paper account, opened only when asked
+
+**The Risk Guardian has never run its portfolio controls in a running system.**
+Mission 3 gave it seven of them — position sizing, exposure, daily and weekly
+loss limits, drawdown against the equity high-water mark, conflicting positions,
+portfolio staleness — and Mission 4 built the account they read. But
+`build_analysis_service`'s `portfolio_store` parameter has defaulted to `None`
+since Mission 10 Phase 5.1, and nothing in `src/` ever passed one, so every
+analysis over HTTP and every analysis from the CLI reported
+`no_portfolio_store` and those seven controls executed only in tests and
+backtests. `orion.paper` had exactly one consumer in the whole of `src/`:
+`orion.backtest.engine`, which replays history. This phase gives the forward
+path an account. It adds no execution, no journal write and no reflection.
+
+**Persistence is CLI-only, which is what makes it possible at all.** Mission 10
+Phase 5.5 refused to wire a journal into the turn path and its decisive argument
+was not cost — it was that `OrionInterface.tsx` renders "Nothing is recorded,
+stored or logged" to the user, and persistence would have made that false while
+leaving it on screen. That sentence is still on screen and is still true: the
+HTTP path constructs no store, and
+`tests/interface/test_security.py::test_a_completed_turn_writes_nothing_to_disk`
+still runs a real text turn and a real audio turn against an isolated working
+directory and asserts `list(rglob("*")) == []`. Nothing in `orion.interface`
+changed. Neither did anything in `orion.orchestrator`.
+
+**No import wall was moved, because none needed to be.**
+`tests/orchestrator/test_import_hygiene.py` bans `orion.memory`, `sqlalchemy`
+and `sqlite3` from the orchestrator and allows `wiring.py` exactly three extra
+modules, none of them a store. It did not have to be edited: `wiring.py` already
+imports the `PortfolioStore` *ABC* from `orion.paper.store` and already takes one
+as a parameter, so the *concrete* `SqlitePortfolioStore` is constructed in
+`orion/cli.py` — a composition root, like `app.py` — and handed through the
+existing seam. A committed test now pins that: `SqlitePortfolioStore(` is
+constructed in exactly one file in `src/`, and it is the CLI.
+
+**The seam is binary, so the opt-in is explicit.**
+`orion.memory.engine.create_memory_engine` runs `metadata.create_all`, so a
+database file and its tables appear merely by constructing a store. There is no
+"wire it but write nothing" middle position — the same fact Phase 5.5 recorded.
+So `analyze` is unchanged unless `--account` is given: without the flag no store
+is constructed, `create_memory_engine` is never reached, and the risk panel
+still reports `no_portfolio_store` honestly. `orion account show` and
+`analyze --account` check for the file *before* opening an engine, so neither can
+bring a database into existence as a side effect of being asked to read one. A
+command that refuses by first creating the thing it is refusing to read has not
+refused, and every refusal path in the suite asserts zero files.
+
+**Retention: indefinite, and deletion is the user's own act.** `orion.db` is
+user-owned local paper-trading state. There is no cleanup, expiry, rotation,
+compaction or background job anywhere in this phase, and no verb deletes or
+resets an account. The store is append-only — one permanent row per revision, by
+Mission 2's design — so the file grows without bound as the account accumulates
+revisions. That is the correct trade for an audit trail and it is said out loud
+in the CLI's own docstring rather than silently managed. This closes the second
+of Phase 5.5's three unblock conditions ("a decision about retention"); the
+third, the crash-consistency boundary Mission 5 recorded as Finding A, is not
+reached by this phase because nothing here writes a journal.
+
+**Deleting an account means deleting the whole SQLite set, and the count is not
+fixed.** WAL mode means an open account is `orion.db` plus `orion.db-wal` and
+`orion.db-shm`. A clean shutdown checkpoints the log and removes both sidecars,
+so a properly-closed account is a single file — but a crash, or a process still
+holding it, leaves them behind, and removing only the database would leave a
+write-ahead log a later open could try to recover from. Both the refusal message
+and the docstring therefore say "any -wal and -shm files beside it" rather than
+promising three. A test performs the documented procedure and proves the next
+`open` starts genuinely fresh at revision 0 rather than recovering the old
+account.
+
+**No argument can become a filesystem path.** The database location is
+`ORION_DB_PATH` and nothing else; no value from `argv` reaches a path.
+`--symbol` goes through `orion.orchestrator.intent.parse_intent`, whose
+`Intent.symbol` is a value looked up in `_SYMBOL_ALIASES` rather than a
+substring of the input — so `../../etc/passwd`, `/etc/passwd`, `:memory:` and a
+UNC path are all refused as unknown symbols, and none of them creates a file
+anywhere. `"gold; rm -rf /"` is the interesting case and is *accepted*: it
+legitimately contains a supported alias, so the closed table resolves it — to
+`XAUUSD`, never to any part of what was typed. Nothing is executed and the
+account still lands at `ORION_DB_PATH`. That is the table working as designed,
+and it has its own test saying so.
+
+**`--balance` is validated before anything is created.** `nan` and `inf` both
+parse as floats and `inf` would satisfy `PortfolioState`'s `gt=0` outright, so
+both are refused by an `argparse` type callable along with zero, negatives and
+non-numbers. Option-shaped tokens (`-inf`, `--symbol`) are refused by argparse
+one step earlier. Every path exits 2 with no traceback, creates no file, and
+does not echo the rejected value back.
+
+**Failures name nothing.** `PortfolioStoreError`'s own messages embed SQLAlchemy
+text that can name the database and its path, and an unreadable directory raises
+an `OSError` that names it outright. As on the analysis path, the exception is
+neither bound, formatted nor re-raised: four fixed sentences cover "no account",
+"already exists", "could not read" and "could not open". Tests assert that a
+store failure carrying a `sk-live-…` credential in its message prints none of
+it, that no account output contains a file path, and that no credential reaches
+either stream on any account path.
+
+**Three existing tests in `tests/test_cli.py` were narrowed, not deleted, and
+each gained a stricter companion.** They asserted the absence of exactly what
+this phase adds, so they could not both survive unchanged and let it exist.
+`test_the_only_verb_is_analyze` became
+`test_the_verb_surface_is_exactly_analyze_and_account`, plus a new
+`test_no_verb_or_flag_offers_live_execution` proving `trade`, `execute`, `order`
+and `--live` are all still rejected — the half of Mission 12.4's rule that must
+never be narrowed. The import allowlist gained four *exact modules*
+(`orion.memory.engine`, `orion.memory.portfolio_store`, `orion.paper.store`,
+`orion.risk.portfolio`), mirroring the orchestrator hygiene test's own
+module-by-module style, plus a new test banning any wholesale
+`orion.memory`/`orion.paper`/`orion.risk`/`orion.interface` import. And
+`test_the_cli_touches_no_filesystem`'s `open`/`Path`/`pathlib` parameters — a
+substring scan that also flagged the identifier `account_open` — were replaced
+by two AST tests: no `open`/`read_*`/`write_*`/`unlink` call anywhere in the
+file, and `Path(...)` may only ever call `.is_file()`. `shutil` and `tempfile`
+remain banned outright.
+
+**Two factory seams rather than one widened one.** `ServiceFactory` keeps its
+zero-argument shape because that is what every existing caller and test passes;
+the `--account` path takes a separate `AccountServiceFactory`. Widening the
+first would have edited tests that are not about accounts at all. Neither seam is
+reachable from the command line, and `store_factory` is handed the path
+`_account_db_path` resolved from `ORION_DB_PATH` — it cannot redirect the
+database.
+
+**Known limitation, recorded rather than fixed.** `main()` does not dispose the
+SQLAlchemy engine it opens. As a console entrypoint the process exits and the
+operating system releases the file, so this is invisible in real use; in-process
+callers (the test suite) hold the database open until the engine is garbage
+collected, which is why the deletion test owns and disposes its own engine
+through the approved seam. If a later phase ever calls `main()` in a loop, or
+4.2b holds an account open across an execution cycle, engine lifetime becomes a
+real concern and belongs there.
+
+**Deliberately not in this phase:** paper execution, any journal write,
+reflection, closed-position production, an account `delete`/`reset` verb,
+telemetry, logging, and anything resembling live or broker execution. `README.md`
+is unchanged.
+
+**Files added:** `tests/test_cli_account.py` (46 tests). **Files modified:**
+`src/orion/cli.py`, `tests/test_cli.py`, and
+`tests/orchestrator/test_local_response.py` — the last a one-line
+formatting-only correction of a `ruff format` violation introduced in `6aa6bc3`,
+which `ruff check` does not catch but the CI gate does. No frontend file, no
+`orion.interface` file, no `orion.orchestrator` file and no dependency manifest
+was touched, and no dependency was added.
+
+**Verification:** `pytest` 1700 passed (1653 before), `ruff check .`,
+`ruff format --check .` (181 files) and `mypy src --strict` (81 files) all clean.
+The interface security and import-hygiene suites and the orchestrator
+import-hygiene suite pass unchanged. Proven against an isolated working
+directory rather than claimed: an HTTP text turn creates no file, `orion analyze
+XAUUSD` without the flag creates no file, and `orion account open` creates the
+database — and a real `SqlitePortfolioStore` handed to the real `run_analysis`
+produces `RiskAvailability.AVAILABLE` with a verdict on it, which is the first
+time that has been true outside a backtest.

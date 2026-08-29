@@ -77,9 +77,7 @@ class TestItAnswersWhatItCan:
         assert answer.startswith(CAPABILITIES_LOCAL_ONLY_TEXT)
         assert answer != UNRECOGNISED_TEXT
 
-    @pytest.mark.parametrize(
-        "text", ["hi", "hello", "hey", "hey orion", "hi orion", "hello orion"]
-    )
+    @pytest.mark.parametrize("text", ["hi", "hello", "hey", "hey orion", "hi orion", "hello orion"])
     def test_every_ordinary_greeting_gets_the_introduction(self, text: str) -> None:
         assert say(text) == GREETING_TEXT
 

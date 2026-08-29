@@ -351,15 +351,37 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     assert "analyze" in capsys.readouterr().out
 
 
-def test_the_only_verb_is_analyze() -> None:
-    """Nothing in this codebase can place an order, so no verb may look like
-    it can. Read off the parser itself rather than out of the help text."""
+def test_the_verb_surface_is_exactly_analyze_and_account() -> None:
+    """No verb may look like it can reach a broker. Read off the parser itself
+    rather than out of the help text.
+
+    Mission 12.4 asserted `{"analyze"}` here on the grounds that nothing in this
+    codebase can place an order. Mission 4 Phase 2a adds `account`, which opens
+    a *simulated* local account and reaches no venue — so the guarantee this
+    test protects is unchanged and the assertion is narrowed rather than
+    dropped. `open` and `show` are the account verb's own actions; both are
+    listed, so a third one cannot appear here unnoticed.
+    """
     choices = {
         name
         for action in build_parser()._actions
         for name in getattr(action, "choices", None) or ()
     }
-    assert choices == {"analyze"}
+    assert choices == {"analyze", "account"}
+
+
+def test_no_verb_or_flag_offers_live_execution() -> None:
+    """The half of the Mission 12.4 rule that must never be narrowed."""
+    parser = build_parser()
+    for argv in (
+        ["trade", "XAUUSD"],
+        ["execute", "XAUUSD"],
+        ["order", "XAUUSD"],
+        ["analyze", "XAUUSD", "--live"],
+        ["account", "open", "--balance", "1", "--live"],
+    ):
+        with pytest.raises(SystemExit):
+            parser.parse_args(argv)
 
 
 # --------------------------------------------------------- failure paths
@@ -477,25 +499,53 @@ def test_the_cli_source_file_exists() -> None:
 def test_the_cli_imports_only_what_an_entrypoint_needs() -> None:
     """A composition root, not a second pipeline.
 
-    It may read `Settings` and reach the orchestrator's own wiring — that is
-    what a composition root is for — and nothing else. In particular it may
-    not import `orion.memory`/`orion.paper` (persistence),
-    `orion.interface` (the server is a different entrypoint), or the Mission
-    0-8 packages it would otherwise be one edit away from driving directly.
+    It may read `Settings`, reach the orchestrator's own wiring, and construct
+    the one concrete `PortfolioStore` the account verbs need — that is what a
+    composition root is for — and nothing else. In particular it may not import
+    `orion.interface` (the server is a different entrypoint) or the Mission 0-8
+    engine packages it would otherwise be one edit away from driving directly.
+
+    THE PERSISTENCE ENTRIES ARE NAMED MODULE BY MODULE, NOT PACKAGE BY PACKAGE.
+    Mission 12.4 banned `orion.memory`/`orion.paper` outright, because nothing
+    then constructed a store. Mission 4 Phase 2a has to construct exactly one,
+    and `tests/orchestrator/test_import_hygiene.py` keeps `orion.memory` banned
+    from the orchestrator — so the concrete store is built here instead. The
+    allowance is four exact modules, mirroring that hygiene test's own
+    `_ALLOWED_EXTRA_ORION_IMPORTS_BY_FILE` style: a fifth, or a whole-package
+    import, still fails.
     """
     allowed = {
         "argparse",
+        "math",
         "sys",
         "collections.abc",
         "datetime",
+        "pathlib",
         "orion.config",
         "orion.orchestrator.analysis",
         "orion.orchestrator.intent",
         "orion.orchestrator.schemas",
         "orion.orchestrator.wiring",
+        # The paper-account seam, and nothing wider.
+        "orion.memory.engine",
+        "orion.memory.portfolio_store",
+        "orion.paper.store",
+        "orion.risk.portfolio",
         "__future__",
     }
     assert _imported_modules(_cli_source()) <= allowed
+
+
+def test_the_cli_imports_no_engine_package_wholesale() -> None:
+    """The four persistence modules are a seam, not a doorway.
+
+    A bare `import orion.memory` or `from orion.paper import ...` would satisfy
+    nothing above and is banned outright: the CLI drives the pipeline through
+    `AnalysisService`, never by reaching into an engine itself.
+    """
+    imported = _imported_modules(_cli_source())
+    for package in ("orion.memory", "orion.paper", "orion.risk", "orion.interface"):
+        assert package not in imported
 
 
 @pytest.mark.parametrize(
@@ -506,9 +556,59 @@ def test_the_cli_has_no_logging_database_or_network_capability(forbidden: str) -
     assert forbidden not in _code_without_comments_or_strings(_cli_source())
 
 
-@pytest.mark.parametrize("forbidden", ["open", "Path", "pathlib", "shutil", "tempfile"])
-def test_the_cli_touches_no_filesystem(forbidden: str) -> None:
+@pytest.mark.parametrize("forbidden", ["shutil", "tempfile"])
+def test_the_cli_copies_and_creates_no_temporary_files(forbidden: str) -> None:
+    """Narrowed from Mission 12.4's `["open", "Path", "pathlib", "shutil",
+    "tempfile"]`. `pathlib` is now needed — `_account_exists` asks whether the
+    database is there *without* creating one, which is the whole reason
+    `account show` cannot bring an account into existence. Copying files and
+    minting temporary ones remain banned, and the two assertions below replace
+    the `open`/`Path` bans with something stricter than a substring scan.
+    """
     assert forbidden not in _code_without_comments_or_strings(_cli_source())
+
+
+def test_the_cli_never_opens_a_file_itself() -> None:
+    """The real content of the old `"open"` ban, asserted precisely.
+
+    That parameter matched the *substring* `open`, so it also flagged the
+    identifier `account_open`. This walks the AST instead: no call to the
+    builtin `open`, and no `Path.open`/`read_*`/`write_*` anywhere. Reading and
+    writing the account is `orion.memory`'s job, through SQLAlchemy, behind the
+    `PortfolioStore` interface.
+    """
+    tree = ast.parse(_cli_source().read_text(encoding="utf-8"))
+    banned = {"open", "read_text", "read_bytes", "write_text", "write_bytes", "unlink"}
+    called: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                called.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                called.add(func.attr)
+    assert not (called & banned), f"the CLI must not touch files directly: {called & banned}"
+
+
+def test_the_only_filesystem_question_the_cli_asks_is_whether_the_account_exists() -> None:
+    """`pathlib` is allowed for exactly one purpose.
+
+    `Path(...)` may only ever be used to ask `is_file()`. Anything else — a
+    `mkdir`, a `glob`, a path built from an argument — would be a new capability
+    rather than the existence check this phase needed.
+    """
+    tree = ast.parse(_cli_source().read_text(encoding="utf-8"))
+    uses: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Call)
+            and isinstance(node.func.value.func, ast.Name)
+            and node.func.value.func.id == "Path"
+        ):
+            uses.append(node.func.attr)
+    assert uses == ["is_file"]
 
 
 @pytest.mark.parametrize("forbidden", ["subprocess", "exec", "eval", "compile", "os.environ"])
