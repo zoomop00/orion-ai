@@ -1,17 +1,32 @@
-"""ORION's command line: one verb, over the orchestrator that already exists.
+"""ORION's command line, over the orchestrator and paper engine that exist.
 
 `pyproject.toml` has advertised `orion = "orion.cli:main"` since Mission 0 and
 this module was never written, so the installed `orion` command has always
 failed with `ModuleNotFoundError` before printing anything. This file is that
 entrypoint, and nothing more.
 
-ANALYSIS, AND A LOCAL PAPER ACCOUNT. `orion analyze XAUUSD` runs exactly the
-pipeline Mission 10 Phase 5.1 assembled — market data, validation, deterministic
-analysis, AI reasoning, the decision engine, the Risk Guardian — through
-`orion.orchestrator.wiring.build_analysis_service` and `AnalysisService.run`. It
-adds no stage, reorders none and skips none. `orion account open` / `orion
-account show` manage the simulated account that Mission 4 built and nothing had
-ever opened.
+ANALYSIS, A LOCAL PAPER ACCOUNT, AND ONE FORWARD CYCLE. `orion analyze XAUUSD`
+runs exactly the pipeline Mission 10 Phase 5.1 assembled — market data,
+validation, deterministic analysis, AI reasoning, the decision engine, the Risk
+Guardian — through `orion.orchestrator.wiring.build_analysis_service` and
+`AnalysisService.run`. It adds no stage, reorders none and skips none. `orion
+account open` / `orion account show` manage the simulated account that Mission 4
+built and nothing had ever opened. `orion paper XAUUSD` runs that same analysis
+and then, if and only if the Risk Guardian approved it, opens a simulated
+position through `orion.paper.session.run_cycle`.
+
+ONE CYCLE PER INVOCATION, AND THEN THE PROCESS EXITS. There is no scheduler, no
+daemon, no retry and no loop: `orion paper` does one thing once. Anything
+recurring is the operating system's job — a cron entry the user wrote — never a
+background thread this command started without being asked.
+
+THE REPORT IS UNPACKED HERE, BECAUSE ONLY HERE CAN IT BE.
+`tests/orchestrator/test_import_hygiene.py` forbids every engine package,
+`orion.paper` included, from importing `orion.orchestrator`. So
+`orion.paper.session.run_cycle` takes the domain objects an analysis produced —
+`ProposedDecision`, `Evidence`, `RiskVerdict` — and this module, which may see
+both sides, takes them off the `AnalysisReport` and hands them over. The session
+never learns that an `AnalysisReport` exists.
 
 NO VERB IN THIS FILE PLACES AN ORDER WITH A BROKER, and none ever will. Mission
 12.4 stated that as "no trade or execute verb, because nothing in this codebase
@@ -79,10 +94,19 @@ Phase 5.1. So this module, which is a composition root like `app.py`, constructs
 `SqlitePortfolioStore` and hands it through that existing parameter. No import
 wall moved, and `orion.orchestrator` still cannot reach a database.
 
+RESOURCES ARE OWNED AND RELEASED, NOT LEFT TO PROCESS EXIT. `orion paper` holds
+an account open across a read, an execution and two writes, so
+`_default_paper_resources` is a context manager that disposes its engine in a
+`finally` — on the failure path too. Left alive, a pooled connection keeps
+SQLite's `-wal`/`-shm` sidecars locked, which a user cannot then delete. The two
+account verbs still leave their engine to process exit, which is harmless for a
+command that immediately exits and is recorded rather than quietly assumed.
+
 NO LOGGING, AND NO NETWORK OF ITS OWN. This module imports no logging framework
 and makes no request itself: the only network traffic is the providers' own,
 inside `AnalysisService.run`. Nothing the user types is written to the database —
-the account holds balances and positions, never a transcript or an argument.
+the account holds balances, positions, fills and closed positions, never a
+transcript, an argument or a rationale.
 
 FAILURES ARE MESSAGE-FREE, FOR THE SAME REASON THEY ARE OVER HTTP. Every stage
 underneath raises a vendor-specific error whose message may name a vendor, a
@@ -98,18 +122,23 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 from orion.config import get_settings
 from orion.memory.engine import create_memory_engine
 from orion.memory.portfolio_store import SqlitePortfolioStore
+from orion.memory.sqlite_journal import SqliteDecisionJournal
 from orion.orchestrator.analysis import AnalysisService
 from orion.orchestrator.intent import DEFAULT_TIMEFRAME, known_symbols, parse_intent
 from orion.orchestrator.schemas import AnalysisReport, IntentKind, RiskAvailability
 from orion.orchestrator.wiring import build_analysis_service
+from orion.paper.policy import PaperExecutionPolicy
+from orion.paper.session import CycleOutcome, CycleResult, JournalWriter, run_cycle
 from orion.paper.store import PortfolioRecord, PortfolioStore
+from orion.risk.policy import RiskPolicy
 from orion.risk.portfolio import initial_portfolio_state
 
 #: Exit codes. 0 and 2 are the conventional success/usage pair (2 is argparse's
@@ -123,6 +152,9 @@ EXIT_ANALYSIS_FAILED = 4
 #: account is there but unreadable" without parsing a sentence.
 EXIT_NO_ACCOUNT = 5
 EXIT_ACCOUNT_ERROR = 6
+#: One forward paper cycle ran, and something in it refused. Distinct from a
+#: crash and from a veto, both of which are ordinary outcomes reported on stdout.
+EXIT_CYCLE_FAILED = 7
 
 #: Fixed sentences. Nothing in this file is ever built from an exception, a
 #: vendor response, or the argument the user supplied.
@@ -145,6 +177,7 @@ ACCOUNT_EXISTS_MESSAGE = (
 ACCOUNT_UNAVAILABLE_MESSAGE = "ORION could not read the paper account."
 ACCOUNT_NOT_WRITTEN_MESSAGE = "ORION could not open the paper account."
 INVALID_BALANCE_MESSAGE = "must be a positive, finite number"
+CYCLE_FAILED_MESSAGE = "ORION could not complete the paper cycle."
 
 #: How `main` obtains an `AnalysisService`. `None` means "this deployment
 #: cannot analyse", which `build_analysis_service` already returns for a
@@ -193,6 +226,38 @@ def _default_store_factory(db_path: str) -> PortfolioStore:
     creating it is what the user asked for.
     """
     return SqlitePortfolioStore(create_memory_engine(db_path))
+
+
+#: How the paper cycle obtains its two durable collaborators *and* gives them
+#: back. A context manager rather than a plain factory because 4.2a recorded
+#: that the CLI leaked its engine until process exit: harmless for a command
+#: that then exits, but this cycle holds an account open across a read, an
+#: execution and two writes, and a leaked handle keeps the SQLite WAL files
+#: locked. Ownership is explicit and disposal is in a `finally`.
+PaperResources = Callable[[str], AbstractContextManager[tuple[PortfolioStore, JournalWriter]]]
+
+
+@contextmanager
+def _default_paper_resources(db_path: str) -> Iterator[tuple[PortfolioStore, JournalWriter]]:
+    """Open the account and its journal on one engine, and always close it.
+
+    ONE ENGINE, DELIBERATELY. The store and the journal are backed by the same
+    database file, so two engines would mean two connection pools competing for
+    the same SQLite writer lock — and `orion.memory.schema`'s own docstring
+    explains that the store's compare-and-swap safety already rests on that
+    single-writer behaviour. Sharing one engine does not make the two writes a
+    single transaction (Mission 5's Finding A is explicit that they commit
+    independently, which is exactly why the ordering in `run_cycle` matters);
+    it only means one pool and one thing to dispose.
+    """
+    engine = create_memory_engine(db_path)
+    try:
+        yield SqlitePortfolioStore(engine), SqliteDecisionJournal(engine)
+    finally:
+        # Releases every pooled connection, which is what lets SQLite
+        # checkpoint and remove the -wal/-shm sidecars. Runs on the exception
+        # path too, so a failed cycle leaks no handle either.
+        engine.dispose()
 
 
 def _account_db_path() -> str:
@@ -288,6 +353,23 @@ def build_parser() -> argparse.ArgumentParser:
             "Requires an account opened with 'orion account open'. Without this "
             "flag nothing is read from or written to disk."
         ),
+    )
+
+    paper = subcommands.add_parser(
+        "paper",
+        help="Run one forward paper cycle against the local account. Simulated only.",
+        description=(
+            "Run one analysis of SYMBOL and, if and only if the Risk Guardian approves "
+            "it, open a simulated position in the local paper account. Requires an "
+            "account opened with 'orion account open'. Runs exactly one cycle and "
+            "exits: there is no scheduler, no daemon and no retry. Nothing reaches a "
+            "broker or any venue, and no real order is ever placed."
+        ),
+    )
+    paper.add_argument(
+        "symbol",
+        metavar="SYMBOL",
+        help=f"The market to trade on paper. One of: {_known_symbols_text()}",
     )
 
     account = subcommands.add_parser(
@@ -471,6 +553,175 @@ def _run_account_show(*, store_factory: StoreFactory) -> int:
     return EXIT_OK
 
 
+#: What each cycle outcome means on a terminal. Fixed sentences chosen at
+#: development time, selected by a closed enum -- never built from an exception.
+_CYCLE_SUMMARY: dict[CycleOutcome, str] = {
+    CycleOutcome.EXECUTED: "opened a paper position",
+    CycleOutcome.CLOSED: "closed the open paper position",
+    CycleOutcome.HOLDING: "holding; neither stop nor target was reached",
+    CycleOutcome.VETOED: "no trade; the Risk Guardian did not approve it",
+    CycleOutcome.NO_VERDICT: "no trade; the Risk Guardian returned no verdict",
+    CycleOutcome.NOT_TRADEABLE: "no trade; the approved size is not tradeable",
+    CycleOutcome.PORTFOLIO_MISMATCH: "no trade; the account is not the one that was reviewed",
+    CycleOutcome.EXECUTION_REFUSED: "no trade; the simulated execution refused it",
+    CycleOutcome.ACCOUNT_UNAVAILABLE: "no trade; the paper account could not be read or written",
+    CycleOutcome.JOURNAL_UNAVAILABLE: (
+        "position saved, but the journal could not record it; the account is correct"
+    ),
+}
+
+#: Outcomes that mean the cycle could not do its job. A veto is not among them:
+#: the Risk Guardian refusing a trade is the system working.
+_CYCLE_FAILURES = frozenset(
+    {
+        CycleOutcome.PORTFOLIO_MISMATCH,
+        CycleOutcome.EXECUTION_REFUSED,
+        CycleOutcome.ACCOUNT_UNAVAILABLE,
+        CycleOutcome.JOURNAL_UNAVAILABLE,
+    }
+)
+
+
+def render_cycle(symbol: str, report: AnalysisReport, result: CycleResult) -> str:
+    """A deterministic, terminal-shaped rendering of one paper cycle.
+
+    Every value is read straight off the report or off the objects the engines
+    produced. Nothing is recomputed and nothing is substituted: a cycle that
+    opened no position prints no fill, and a cycle that wrote no journal row
+    prints no fingerprint.
+    """
+    if report.risk.availability is RiskAvailability.AVAILABLE:
+        assert report.risk.verdict is not None  # guaranteed by RiskPanel
+        risk = report.risk.verdict.outcome.value
+    else:
+        risk = report.risk.availability.value
+
+    rows = [
+        ("outcome", result.outcome.value),
+        ("summary", _CYCLE_SUMMARY[result.outcome]),
+        ("proposal", f"{report.decision.action.value} {report.decision.direction.value}"),
+        ("risk guardian", risk),
+    ]
+
+    if result.fill is not None:
+        fill = result.fill
+        rows.append(
+            (
+                "fill",
+                f"{fill.direction.value} {fill.quantity:g} @ {fill.fill_price:.2f} "
+                f"fee {fill.fee:.2f}",
+            )
+        )
+    if result.closed_position is not None:
+        closed = result.closed_position
+        rows.append(
+            (
+                "closed",
+                f"{closed.direction.value} {closed.quantity:g} @ {closed.exit_price:.2f} "
+                f"({closed.close_reason.value}) realised {closed.realized_pnl:.2f}",
+            )
+        )
+
+    rows.append(("account saved", "yes" if result.account_was_written else "no"))
+
+    # Three genuinely different states, said differently: a row was written, a
+    # row was owed and could not be written, or there was nothing to record.
+    if result.journal_fingerprint is not None:
+        journal_status = result.journal_fingerprint
+    elif result.outcome is CycleOutcome.JOURNAL_UNAVAILABLE:
+        journal_status = "not recorded"
+    else:
+        journal_status = "nothing to record"
+    rows.append(("journal", journal_status))
+
+    if result.portfolio is not None:
+        state = result.portfolio
+        held = state.open_position
+        position = (
+            "none"
+            if held is None
+            else (
+                f"{held.direction.value} {held.quantity:g} @ {held.entry_price:.2f} "
+                f"(stop {held.stop_loss:.2f}, target {held.take_profit:.2f})"
+            )
+        )
+        rows.extend(
+            [
+                ("cash", f"{state.cash:.2f}"),
+                ("equity", f"{state.equity:.2f}"),
+                ("open position", position),
+            ]
+        )
+
+    width = max(len(label) for label, _ in rows)
+    lines = [f"{symbol} paper cycle"]
+    lines.extend(f"  {label.ljust(width)}  {value}" for label, value in rows)
+    return "\n".join(lines)
+
+
+def _run_paper(
+    symbol_argument: str,
+    *,
+    account_service_factory: AccountServiceFactory,
+    paper_resources: PaperResources,
+) -> int:
+    """Run one forward paper cycle. Never raises, never places a real order."""
+    intent = parse_intent(f"analyze {symbol_argument}")
+    if intent.kind is not IntentKind.ANALYZE:
+        print(UNKNOWN_SYMBOL_MESSAGE, file=sys.stderr)
+        print(f"ORION can analyse: {_known_symbols_text()}", file=sys.stderr)
+        return EXIT_USAGE
+
+    db_path = _account_db_path()
+    if not _account_exists(db_path):
+        # An account is required and is never created here: opening one is a
+        # deliberate act with a balance the user chooses.
+        print(NO_ACCOUNT_MESSAGE, file=sys.stderr)
+        return EXIT_NO_ACCOUNT
+
+    settings = get_settings()
+    now = datetime.now(UTC)
+
+    try:
+        with paper_resources(db_path) as (store, journal):
+            service = account_service_factory(store)
+            if service is None:
+                print(NOT_CONFIGURED_MESSAGE, file=sys.stderr)
+                return EXIT_NOT_CONFIGURED
+
+            try:
+                report = service.run(intent, now=now)
+            except Exception:
+                # Message-free for the same reason the analysis path is: the
+                # stages underneath name vendors, URLs and raw responses.
+                print(ANALYSIS_FAILED_MESSAGE, file=sys.stderr)
+                return EXIT_ANALYSIS_FAILED
+
+            # The orchestrator's report is unpacked *here*, in the composition
+            # root: `orion.paper` may not import `orion.orchestrator`, so the
+            # session takes the domain objects rather than the report.
+            result = run_cycle(
+                decision=report.decision,
+                evidence=report.evidence,
+                verdict=report.risk.verdict,
+                store=store,
+                journal=journal,
+                policy=PaperExecutionPolicy.from_settings(settings),
+                risk_per_trade_fraction=RiskPolicy.from_settings(
+                    settings
+                ).max_risk_per_trade_fraction,
+                now=now,
+            )
+            rendering = render_cycle(intent.symbol or symbol_argument, report, result)
+    except Exception:
+        # The resource manager itself failed to open or close. Nothing ran.
+        print(CYCLE_FAILED_MESSAGE, file=sys.stderr)
+        return EXIT_CYCLE_FAILED
+
+    print(rendering)
+    return EXIT_CYCLE_FAILED if result.outcome in _CYCLE_FAILURES else EXIT_OK
+
+
 def _run_analysis(
     symbol: str,
     *,
@@ -534,15 +785,16 @@ def main(
     service_factory: ServiceFactory | None = None,
     account_service_factory: AccountServiceFactory | None = None,
     store_factory: StoreFactory | None = None,
+    paper_resources: PaperResources | None = None,
 ) -> int:
     """The `orion` console entrypoint. Returns a process exit code.
 
     `argv` defaults to the real command line. The three factories are test seams
     and nothing else: none is reachable from the command line, so no invocation
     can swap out how ORION is wired or where its account lives. `store_factory`
-    in particular cannot be used to redirect the database — it is handed the path
-    `_account_db_path` resolved from `ORION_DB_PATH`, and never one built from an
-    argument.
+    and `paper_resources` in particular cannot be used to redirect the database —
+    both are handed the path `_account_db_path` resolved from `ORION_DB_PATH`,
+    and never one built from an argument.
     """
     parser = build_parser()
     try:
@@ -552,6 +804,13 @@ def main(
         # Turning that back into a return keeps every path out of this function
         # uniform, and keeps the message argparse already wrote to stderr.
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
+
+    if args.command == "paper":
+        return _run_paper(
+            str(args.symbol),
+            account_service_factory=account_service_factory or _account_service_factory,
+            paper_resources=paper_resources or _default_paper_resources,
+        )
 
     if args.command == "account":
         # `add_subparsers(required=True)` guarantees both levels were given.

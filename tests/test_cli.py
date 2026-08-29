@@ -356,18 +356,18 @@ def test_the_verb_surface_is_exactly_analyze_and_account() -> None:
     rather than out of the help text.
 
     Mission 12.4 asserted `{"analyze"}` here on the grounds that nothing in this
-    codebase can place an order. Mission 4 Phase 2a adds `account`, which opens
-    a *simulated* local account and reaches no venue — so the guarantee this
-    test protects is unchanged and the assertion is narrowed rather than
-    dropped. `open` and `show` are the account verb's own actions; both are
-    listed, so a third one cannot appear here unnoticed.
+    codebase can place an order. Phase 2a added `account` and Phase 2b adds
+    `paper`; both are *simulated* and reach no venue, so the guarantee this test
+    protects is unchanged and the assertion is narrowed rather than dropped.
+    `open` and `show` are the account verb's own actions; both are listed, so a
+    third one cannot appear here unnoticed.
     """
     choices = {
         name
         for action in build_parser()._actions
         for name in getattr(action, "choices", None) or ()
     }
-    assert choices == {"analyze", "account"}
+    assert choices == {"analyze", "account", "paper"}
 
 
 def test_no_verb_or_flag_offers_live_execution() -> None:
@@ -519,6 +519,7 @@ def test_the_cli_imports_only_what_an_entrypoint_needs() -> None:
         "math",
         "sys",
         "collections.abc",
+        "contextlib",
         "datetime",
         "pathlib",
         "orion.config",
@@ -531,6 +532,14 @@ def test_the_cli_imports_only_what_an_entrypoint_needs() -> None:
         "orion.memory.portfolio_store",
         "orion.paper.store",
         "orion.risk.portfolio",
+        # Phase 2b: the forward cycle, its policies, and the concrete journal
+        # it writes through. `orion.paper.session` is the loop itself; this
+        # module supplies it with collaborators and unpacks the report for it,
+        # because `orion.paper` may not import `orion.orchestrator`.
+        "orion.memory.sqlite_journal",
+        "orion.paper.policy",
+        "orion.paper.session",
+        "orion.risk.policy",
         "__future__",
     }
     assert _imported_modules(_cli_source()) <= allowed

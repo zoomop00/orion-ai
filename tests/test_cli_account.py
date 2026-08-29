@@ -24,6 +24,8 @@ only writer is `SqlitePortfolioStore`.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -32,6 +34,7 @@ from sqlalchemy import Engine
 
 from orion.cli import (
     EXIT_ACCOUNT_ERROR,
+    EXIT_CYCLE_FAILED,
     EXIT_NO_ACCOUNT,
     EXIT_NOT_CONFIGURED,
     EXIT_OK,
@@ -41,6 +44,7 @@ from orion.cli import (
 )
 from orion.memory.engine import create_memory_engine
 from orion.memory.portfolio_store import SqlitePortfolioStore
+from orion.memory.sqlite_journal import SqliteDecisionJournal
 from orion.orchestrator.analysis import AnalysisService, run_analysis
 from orion.orchestrator.schemas import AnalysisReport, Intent, RiskAvailability
 from orion.paper.store import PortfolioStore
@@ -557,13 +561,21 @@ class TestTheCommandSurfaceStaysHonest:
             for action in parser._subparsers._group_actions  # type: ignore[union-attr]
             if hasattr(action, "choices") and action.choices
         ]
-        assert set(actions[0].choices) == {"analyze", "account"}
+        assert set(actions[0].choices) == {"analyze", "account", "paper"}
 
-    def test_no_execution_verb_exists_yet(self) -> None:
-        """4.2b adds `orion paper`. Until it does, it must not be reachable."""
+    def test_the_paper_verb_exists_and_requires_a_symbol(self) -> None:
+        """Phase 2a asserted `paper` was *not* reachable, anticipating this
+        phase. It is now — and it still takes a symbol from the closed table
+        and offers no flag that could reach a venue."""
         parser = build_parser()
+        parsed = parser.parse_args(["paper", "XAUUSD"])
+        assert parsed.command == "paper"
+        assert parsed.symbol == "XAUUSD"
+
         with pytest.raises(SystemExit):
-            parser.parse_args(["paper", "XAUUSD"])
+            parser.parse_args(["paper"])
+        with pytest.raises(SystemExit):
+            parser.parse_args(["paper", "XAUUSD", "--live"])
 
     def test_the_cli_is_the_only_module_that_builds_a_concrete_store(self) -> None:
         """`orion.orchestrator` still cannot reach a database.
@@ -581,3 +593,170 @@ class TestTheCommandSurfaceStaysHonest:
             and path.relative_to(source).as_posix() != definition
         ]
         assert builders == ["cli.py"]
+
+
+# ------------------------------------------------------- the forward cycle ---
+
+
+class TestThePaperVerb:
+    def test_it_refuses_without_an_account_and_creates_nothing(
+        self, account_home: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An account is required and is never created here: opening one is a
+        deliberate act with a balance the user chooses."""
+        code = main(["paper", "XAUUSD"])
+
+        assert code == EXIT_NO_ACCOUNT
+        assert "No paper account exists" in capsys.readouterr().err
+        assert files_in(account_home) == []
+
+    def test_an_unknown_symbol_is_refused_before_the_account_is_touched(
+        self, account_home: Path
+    ) -> None:
+        assert main(["paper", "EURUSD"]) == EXIT_USAGE
+        assert files_in(account_home) == []
+
+    @pytest.mark.parametrize(
+        "argument", ["../../etc/passwd", "/etc/passwd", ":memory:", "orion.db", "$(whoami)"]
+    )
+    def test_a_hostile_symbol_cannot_escape_the_closed_alias_table(
+        self, account_home: Path, argument: str
+    ) -> None:
+        assert main(["account", "open", "--balance", "100000"]) == EXIT_OK
+        before = set(files_in(account_home))
+
+        assert main(["paper", argument]) == EXIT_USAGE
+        # No file created anywhere, inside the account directory or beside it.
+        assert set(files_in(account_home)) == before
+        assert not (account_home.parent / "orion.db").exists()
+
+    def test_it_uses_the_real_sqlite_store_and_a_real_journal(self, account_home: Path) -> None:
+        assert main(["account", "open", "--balance", "100000"]) == EXIT_OK
+
+        seen: list[tuple[object, object]] = []
+
+        @contextmanager
+        def watching(db_path: str) -> Iterator[tuple[PortfolioStore, object]]:
+            engine = create_memory_engine(db_path)
+            try:
+                store = SqlitePortfolioStore(engine)
+                journal = SqliteDecisionJournal(engine)
+                seen.append((store, journal))
+                yield store, journal
+            finally:
+                engine.dispose()
+
+        main(
+            ["paper", "XAUUSD"],
+            account_service_factory=lambda _: None,
+            paper_resources=watching,  # type: ignore[arg-type]
+        )
+
+        assert len(seen) == 1
+        store, journal = seen[0]
+        assert isinstance(store, SqlitePortfolioStore)
+        assert isinstance(journal, SqliteDecisionJournal)
+
+    def test_the_engine_is_disposed_and_the_wal_files_are_released(
+        self, account_home: Path
+    ) -> None:
+        """4.2a left the engine alive until process exit. A cycle holds an
+        account open across a read, an execution and two writes, so ownership
+        is explicit now -- and a clean dispose lets SQLite checkpoint and drop
+        the -wal/-shm sidecars, which is observable from the filesystem."""
+        # The account verbs still keep 4.2a's behaviour of leaving their engine
+        # to process exit, so this opens the account through a factory the test
+        # owns and disposes. That isolates the assertion to the thing under
+        # test: the *cycle's* own resource ownership.
+        opening: list[Engine] = []
+
+        def owning_store(db_path: str) -> PortfolioStore:
+            engine = create_memory_engine(db_path)
+            opening.append(engine)
+            return SqlitePortfolioStore(engine)
+
+        assert (
+            main(["account", "open", "--balance", "100000"], store_factory=owning_store) == EXIT_OK
+        )
+        for engine in opening:
+            engine.dispose()
+
+        disposed: list[bool] = []
+
+        @contextmanager
+        def watching(db_path: str) -> Iterator[tuple[PortfolioStore, object]]:
+            engine = create_memory_engine(db_path)
+            try:
+                yield SqlitePortfolioStore(engine), SqliteDecisionJournal(engine)
+            finally:
+                engine.dispose()
+                disposed.append(True)
+
+        main(
+            ["paper", "XAUUSD"],
+            account_service_factory=lambda _: None,
+            paper_resources=watching,  # type: ignore[arg-type]
+        )
+
+        assert disposed == [True]
+        # The real proof the handles were released: the file can be deleted,
+        # which Windows refuses while any connection still holds it open.
+        for name in ("orion.db", "orion.db-wal", "orion.db-shm"):
+            (account_home / name).unlink(missing_ok=True)
+        assert files_in(account_home) == []
+
+    def test_the_engine_is_disposed_even_when_the_cycle_raises(
+        self, account_home: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["account", "open", "--balance", "100000"]) == EXIT_OK
+        disposed: list[bool] = []
+
+        @contextmanager
+        def exploding(db_path: str) -> Iterator[tuple[PortfolioStore, object]]:
+            engine = create_memory_engine(db_path)
+            try:
+                yield SqlitePortfolioStore(engine), SqliteDecisionJournal(engine)
+                raise RuntimeError("something went wrong at ./orion.db")
+            finally:
+                engine.dispose()
+                disposed.append(True)
+
+        code = main(
+            ["paper", "XAUUSD"],
+            account_service_factory=lambda _: None,
+            paper_resources=exploding,  # type: ignore[arg-type]
+        )
+
+        assert code == EXIT_CYCLE_FAILED
+        assert disposed == [True]
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "orion.db" not in err
+
+    def test_it_reports_honestly_when_the_deployment_cannot_analyse(
+        self, account_home: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["account", "open", "--balance", "100000"]) == EXIT_OK
+
+        code = main(["paper", "XAUUSD"], account_service_factory=lambda _: None)
+
+        assert code == EXIT_NOT_CONFIGURED
+        assert "not configured to analyse" in capsys.readouterr().err
+
+    def test_no_credential_reaches_the_terminal_on_any_paper_path(
+        self,
+        account_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        for name in ("ANTHROPIC_API_KEY", "TWELVE_DATA_API_KEY", "DEEPGRAM_API_KEY"):
+            monkeypatch.setenv(name, FAKE_KEY)
+
+        main(["paper", "XAUUSD"])
+        main(["account", "open", "--balance", "100000"])
+        main(["paper", "XAUUSD"], account_service_factory=lambda _: None)
+
+        captured = capsys.readouterr()
+        assert FAKE_KEY not in captured.out
+        assert FAKE_KEY not in captured.err
+        assert "sk-live" not in captured.out + captured.err

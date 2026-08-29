@@ -4179,3 +4179,158 @@ XAUUSD` without the flag creates no file, and `orion account open` creates the
 database — and a real `SqlitePortfolioStore` handed to the real `run_analysis`
 produces `RiskAvailability.AVAILABLE` with a verdict on it, which is the first
 time that has been true outside a backtest.
+
+## 2026-08-29 — Mission 4 Phase 2b: the forward paper loop, and the journal's first production writer
+
+**Mission 2 built an append-only journal that nothing had ever written to.**
+Every `record_*` call in the repository lived in `tests/memory/` and
+`tests/reflection/`; `orion.paper` had exactly one consumer anywhere in `src/` —
+`orion.backtest.engine`, which replays history — so no `Fill` and no
+`ClosedPosition` had ever been produced by a system running forward in time.
+Phase 5.5 named the unblock condition precisely: "an execution loop that
+produces real `Fill`s and `ClosedPosition`s, so the journal's write surface has a
+producer". `src/orion/paper/session.py` is that loop, `orion paper XAUUSD` is its
+only caller, and it is deliberately the only production writer that exists.
+
+**Two enforced contracts shaped where it could live, and both were reported
+before any code was written.** The specification asked for the loop in
+`orion/paper/session.py`, which turned out to be blocked twice over.
+
+First, `tests/orchestrator/test_import_hygiene.py::test_no_engine_package_imports
+_the_orchestrator` lists `paper` among the engine packages forbidden from
+importing `orion.orchestrator`, on the stated grounds that an import in that
+direction "would invert the layering every other hygiene test in this repo
+protects". `AnalysisReport` is an orchestrator type. Resolved without touching
+the wall: `run_cycle` takes the three domain objects an analysis produced —
+`ProposedDecision`, `Evidence`, `RiskVerdict` — and `orion.cli`, which may see
+both sides, unpacks the report and hands them over. The session never learns that
+an `AnalysisReport` exists. This is better layering than the shape originally
+specified, not a workaround for it.
+
+Second, `orion.memory` already depends on `orion.paper` in three files
+(`journal.py` and `sqlite_journal.py` import `Fill`/`ClosedPosition`,
+`portfolio_store.py` imports `PortfolioStore`), so importing `DecisionJournal`
+back would have turned a clean one-way dependency into a cycle. No test forbade
+it, which is exactly why it was raised rather than done. Resolved by dependency
+inversion: `JournalWriter` is a two-method `Protocol` declared in
+`session.py` — `record_fill` and `record_closed_position`, nothing else — which
+`DecisionJournal` and `SqliteDecisionJournal` satisfy structurally with no change
+to either. It restates an interface, never an implementation. Three tests keep
+the restatement honest: the ABC satisfies it, the concrete class satisfies it,
+and it declares exactly those two names, so a widened `Protocol` or a drifted
+signature fails rather than rots.
+
+**The Risk Guardian's authority is enforced twice, deliberately.** `execute()`
+already raises `PaperExecutionError` unless `verdict.outcome` is APPROVED, so a
+veto cannot produce a `Fill` even if this module were wrong; `run_cycle` also
+refuses before building anything, so the common case reports a verdict rather
+than a fault. A `None` verdict — the Guardian produced no answer at all — is
+`NO_VERDICT`, which is not a veto and is not treated as approval either. Tests
+cover VETOED, NO_TRADE_PROPOSED and absent, and each asserts zero saves and zero
+journal calls, not merely a zero fill count.
+
+**THE ACCOUNT EXECUTED AGAINST IS PROVEN TO BE THE ONE THAT WAS REVIEWED.** This
+is the subtlest thing in the phase and was found by reading
+`orion.orchestrator.analysis._risk_panel` rather than by testing. The Guardian
+does not review the stored account: the analysis layer marks it to market first —
+a pure, unsaved projection — and reviews *that*, so `verdict.portfolio_ref`
+fingerprints the projection and not the record. `execute()` verifies exactly that
+fingerprint. Passing the raw stored state would therefore have failed on every
+approved trade. `run_cycle` reproduces the projection with the same pure
+function and the same `now` and `last_price` the analysis used, and then
+re-verifies the fingerprint itself before executing, failing closed as
+`PORTFOLIO_MISMATCH` if it differs. That guard is not redundant with
+`execute()`'s: it makes the failure legible instead of an exception, and it must
+never be relaxed into executing anyway — the Guardian approved a specific account
+state, and a mismatch means this is not it. It fired for real during
+verification, when a harness passed a different `now` than the CLI had, which is
+precisely the class of drift it exists to catch.
+
+**Persistence order: the account first, the journal second, always.** Mission 5's
+Finding A instructed a future orchestrator to "treat `PortfolioStore` as
+authoritative and persist it first; call `journal.record_fill()` second", because
+the two stores commit independently and only that ordering is recoverable. If
+`save()` fails, nothing is journaled and no trade happened. If the journal write
+fails after a successful `save()`, the trade *did* happen: it is reported as
+`JOURNAL_UNAVAILABLE` rather than rolled back, because there is no transaction
+spanning both stores and inventing one by re-saving the previous state would be a
+second write that could itself fail. The ordering is asserted as a recorded call
+sequence — `["load", "load", "save", "record_fill"]` — not inferred from reading
+the code.
+
+**Replay after a crash is safe, and that was verified rather than assumed.**
+`sqlite_journal._write` uses `on_conflict_do_nothing` keyed on the *content*
+fingerprint, so re-recording an identical `Fill` is a no-op returning the same
+fingerprint: one row, whatever the recorded_at. The existing integrity guarantee
+is untouched — the same fingerprint with different stored bytes still raises
+`DecisionJournalIntegrityError` — and there is a test for each half, so
+idempotency cannot later be mistaken for "the journal accepts anything".
+
+**Engine lifetime is now explicit, which 4.2a recorded as an open limitation.**
+A cycle holds an account open across a read, an execution and two writes, and a
+leaked pooled connection keeps SQLite's `-wal`/`-shm` sidecars locked so a user
+cannot delete them. `_default_paper_resources` is a context manager that builds
+one engine, yields the store and the journal on it, and disposes in a `finally` —
+on the exception path too. One engine on purpose: two would mean two pools
+competing for the same single SQLite writer lock the store's compare-and-swap
+safety already rests on. Sharing it does not make the two writes one transaction;
+Finding A is explicit that they commit independently, which is why the ordering
+above matters. The two *account* verbs still leave their engine to process exit,
+unchanged from 4.2a and harmless for a command that immediately exits — recorded
+here rather than quietly assumed.
+
+**Nothing is fabricated.** The fill price and fee come from `execute()` under the
+configured `PaperExecutionPolicy`; the quantity from `compute_position_size`, the
+same shared function the Guardian's own `position_size_within_limits` control
+used to approve the proposal; the stop and target from the approved proposal; the
+balances from `execute()`'s own cash-conservation arithmetic. A `ClosedPosition`
+is written only when `resolve_stop_take_profit` actually produced one, and a
+cycle that closes a position does not also open one — the same sequencing
+`orion.backtest.engine` uses, because the evidence that closed it is the evidence
+the proposal was reasoned from and acting twice on it would double-count. A test
+asserts the journalled `Fill` is the very object `execute()` returned, by
+identity rather than equality, which is Finding B's stated long-term mitigation
+for `Fill` provenance.
+
+**One cycle per invocation, and no venue.** `orion paper XAUUSD` runs once and
+exits: no scheduler, no daemon, no retry, no thread, no `while True`, asserted by
+a test that greps the module for all of them. There is no `--live`, no broker
+adapter and no code path toward one; anything recurring is a cron entry the user
+wrote. An account is required and never created here — opening one is a
+deliberate act with a balance the user chooses.
+
+**Existing tests changed, and why each had to.** Four assertions in
+`tests/test_cli.py` and `tests/test_cli_account.py` asserted the *absence* of
+what this phase adds. The verb-surface assertions gained `paper`; the CLI's own
+import allowlist gained five entries, named module by module in the same style
+the orchestrator hygiene test uses; and `test_no_execution_verb_exists_yet` —
+written in 4.2a with the comment "4.2b adds `orion paper`. Until it does, it must
+not be reachable" — was replaced by one asserting the verb exists, takes a symbol
+from the closed table, and still rejects `--live`. **No import-hygiene boundary
+was weakened**: the orchestrator, paper and interface hygiene suites are
+byte-identical and pass unchanged.
+
+**Deliberately not in this phase:** reflection, `record_evidence`/`record_
+reasoning`/`record_decision`/`record_verdict` (the journal's contract makes none
+of them a prerequisite for `record_fill`), an account `delete`/`reset` verb,
+telemetry, logging, scheduling, and anything resembling live or broker execution.
+`README.md` is unchanged.
+
+**Files added:** `src/orion/paper/session.py`, `tests/paper/test_session.py`
+(29 tests). **Files modified:** `src/orion/cli.py`, `tests/test_cli.py`,
+`tests/test_cli_account.py`. No frontend file, no `orion.interface` file, no
+`orion.orchestrator` file and no dependency manifest was touched, and no
+dependency was added.
+
+**Verification:** `pytest` 1740 passed (1701 before), `ruff check .`,
+`ruff format --check .` (183 files) and `mypy src --strict` (82 files) all clean.
+The interface security, interface/orchestrator/paper import-hygiene, memory and
+backtest suites all pass unchanged. Proven on disk rather than claimed: a real
+cycle against a real `SqlitePortfolioStore` and a real `SqliteDecisionJournal`
+produced `executed`, `long 31.645570 @ 2521.3562 fee 7.9790`, one row in
+`fill_table`, portfolio revisions `[0, 1]` — and replaying the same fill left one
+row with an identical fingerprint. After `dispose()` only `acct.db` remained, the
+WAL sidecars checkpointed away, so no handle was left holding the file. From an
+isolated working directory: `orion paper XAUUSD` without an account exits 5 and
+creates nothing, an HTTP turn still writes zero bytes, a hostile symbol is
+refused by the closed table, and `--live` is rejected by the parser.
