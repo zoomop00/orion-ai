@@ -27,6 +27,17 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  /*
+   * Next's own dev badge, off.
+   *
+   * It is framework tooling rather than anything ORION renders, but it
+   * anchors itself to a viewport corner on top of the application, where it
+   * collided with the development controls and read as part of the product.
+   * Compile and runtime errors are still surfaced with this off -- only the
+   * persistent route indicator goes away, and only in development, since it
+   * does not exist in a production build at all.
+   */
+  devIndicators: false,
   experimental: {
     mcpServer: false,
   },

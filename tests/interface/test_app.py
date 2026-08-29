@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from orion.interface.app import create_app
 from orion.interface.schemas import MAX_REQUEST_BODY_BYTES
 from orion.interface.service import VoiceTurnService
-from orion.voice.response import DEFAULT_RESPONSE_TEXT
+from orion.orchestrator.response import ANALYSIS_UNAVAILABLE_TEXT, GREETING_TEXT
 
 from .conftest import (
     DEEPGRAM_LISTEN_URL,
@@ -73,7 +73,7 @@ def test_text_fallback_returns_a_complete_turn(
     assert response.status_code == 200
     body = response.json()
     assert body["transcript"] == "hello orion"
-    assert body["response_text"] == DEFAULT_RESPONSE_TEXT
+    assert body["response_text"] == GREETING_TEXT
     assert body["audio_format"] == "wav"
     assert body["audio_media_type"] == "audio/wav"
     assert body["state"] == "idle"
@@ -114,7 +114,7 @@ def test_audio_turn_returns_the_transcribed_text(
     assert response.status_code == 200
     body = response.json()
     assert body["transcript"] == "orion analyze gold"
-    assert body["response_text"] == DEFAULT_RESPONSE_TEXT
+    assert body["response_text"] == ANALYSIS_UNAVAILABLE_TEXT
     assert deepgram["listen"].call_count == 1
     assert deepgram["speak"].call_count == 1
 

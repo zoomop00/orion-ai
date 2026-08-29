@@ -60,13 +60,22 @@ from orion.risk.schemas import RiskVerdict
 class IntentKind(StrEnum):
     """What the user asked for, from the closed set this build understands.
 
-    Two members, not a growing catalogue: `orion.orchestrator.intent` maps
-    an utterance onto exactly one thing ORION can do today, and everything
-    else onto `UNKNOWN`. A new capability adds a member here *and* a real
+    Not a growing catalogue: `orion.orchestrator.intent` maps an utterance
+    onto exactly one thing ORION can do today, and everything else onto
+    `UNKNOWN`. A new capability adds a member here *and* a real
     implementation behind it, in the same change — never a member on its own.
+
+    `GREETING` and `CAPABILITIES` are answered entirely locally by
+    `orion.orchestrator.response.LocalResponseProvider`: deterministic
+    sentences about what ORION is and what this machine can currently do.
+    They reach no provider, cost nothing, and work with no credential
+    configured at all — which is the point of them. Only `ANALYZE` needs
+    anything external.
     """
 
     ANALYZE = "analyze"
+    GREETING = "greeting"
+    CAPABILITIES = "capabilities"
     UNKNOWN = "unknown"
 
 
@@ -94,10 +103,10 @@ class Intent(BaseModel):
                 f"{self.timeframe!r}; an analyze intent must name both"
             )
         resolved_anything = self.symbol is not None or self.timeframe is not None
-        if self.kind is IntentKind.UNKNOWN and resolved_anything:
+        if self.kind is not IntentKind.ANALYZE and resolved_anything:
             raise ValueError(
-                f"kind is UNKNOWN but symbol/timeframe are {self.symbol!r}/"
-                f"{self.timeframe!r}; an unrecognised utterance resolves nothing"
+                f"kind is {self.kind.value.upper()} but symbol/timeframe are {self.symbol!r}/"
+                f"{self.timeframe!r}; only an analyze intent resolves either"
             )
         return self
 

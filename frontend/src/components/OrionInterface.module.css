@@ -1,30 +1,111 @@
 /*
- * Layout and chrome for the ORION surface.
+ * The ORION environment.
  *
- * Three rows: identity, core, readout. The middle row takes every pixel the
- * other two do not, so the core is always optically centred in whatever space
- * remains -- on a phone in landscape as much as on a desktop.
+ * ONE COMPOSITION, ON ONE AXIS. Ambient field, core, response, command line:
+ * a single centred column, read top to bottom, with nothing placed beside
+ * anything else. `.shell` is three rows filling exactly one viewport --
+ * identity, the field, the command channel -- and the development corner is
+ * positioned out of the grid entirely so it occupies no space at all.
+ *
+ * WHY THE RESPONSE OVERLAPS THE CORE. Stacking core and reply as separate
+ * blocks makes them compete for height, and the only ways out are shrinking
+ * the core or scrolling the reply -- both of which earlier revisions tried,
+ * and both of which broke the thing the interface is for. `--core-overlap`
+ * pulls `.voice` up into the outer part of the core's field instead, where
+ * there is nothing but hairline orbits and drifting particles. That does two
+ * things at once: it reads as ORION speaking rather than as a paragraph
+ * under a picture, and it gives the core back the room to be genuinely large.
+ *
+ * THE CORE'S SIZE IS A FUNCTION OF THE VIEWPORT AND NOTHING ELSE. Not of
+ * whether a reply arrived, not of whether an analysis is on screen. When a
+ * report is taller than the field, the core stays exactly as it is and the
+ * report scrolls beneath it -- `.voice` is the only scroll region here.
+ *
+ * THE REPLY HAS NO MAX-HEIGHT AND NO SCROLL BOX. It has a `min-height`
+ * reserve so a short answer does not pull the core downward, and it grows
+ * freely past that. The failed pattern this replaces was `min-height` and
+ * `max-height` set to the same value with `overflow-y: auto`, which is what
+ * made an ordinary sentence something you had to scroll a small box to read.
  */
 
 .shell {
+  /*
+   * The single source of the core's size. Height is the binding constraint
+   * on nearly every desktop, so it leads; `vmin` keeps the core proportional
+   * on a phone. Deliberately large -- the core is the subject, and the
+   * overlap below is what pays for it.
+   */
+  --orion-core-stage: clamp(230px, min(58vmin, 55vh), 560px);
+  /*
+   * How far the response rises into the core's field. A fraction of the
+   * stage rather than a fixed distance, so the relationship between ORION
+   * and what it says is identical at every viewport size. The core's sphere
+   * is only 31% of the stage and its rings reach the edge, so this overlaps
+   * light and hairlines, never the sphere itself.
+   */
+  --core-overlap: calc(var(--orion-core-stage) * -0.2);
+  /* Height reserved at the bottom for the development corner. */
+  --dev-lane: 30px;
+
   position: relative;
   display: grid;
-  grid-template-rows: auto 1fr auto;
-  gap: clamp(12px, 2vh, 28px);
-  min-height: 100vh;
-  min-height: 100dvh;
+  grid-template-columns: minmax(0, 1fr);
+  /*
+   * `minmax(0, 1fr)` rather than `1fr`: a grid track's automatic minimum is
+   * its content, so without this the field would refuse to shrink below a
+   * long analysis and would push the command line off the bottom.
+   */
+  grid-template-rows: auto minmax(0, 1fr);
+  row-gap: clamp(10px, 1.8vh, 26px);
+  justify-items: center;
+  /*
+   * `height`, not `min-height`. The document is exactly one viewport and
+   * never grows: anything too tall scrolls inside its own region, so an
+   * answer never reads as a navigation.
+   */
+  height: 100vh;
+  height: 100dvh;
+  /*
+   * The bottom padding carries an extra lane for the development corner.
+   *
+   * The corner is absolutely positioned, so it takes no part in layout --
+   * which meant the centred composition was free to grow straight through
+   * it, and at 1024x768 the state buttons ended up sitting underneath the
+   * command line. Reserving the strip keeps the two apart with one number
+   * instead of a per-viewport rule, and the composition simply centres in
+   * what is left.
+   */
   padding:
-    calc(clamp(18px, 3.2vh, 34px) + env(safe-area-inset-top))
-    calc(clamp(18px, 3.4vw, 46px) + env(safe-area-inset-right))
-    calc(clamp(18px, 3.2vh, 34px) + env(safe-area-inset-bottom))
-    calc(clamp(18px, 3.4vw, 46px) + env(safe-area-inset-left));
+    calc(clamp(18px, 3vh, 34px) + env(safe-area-inset-top))
+    calc(clamp(20px, 3.6vw, 54px) + env(safe-area-inset-right))
+    calc(clamp(18px, 3vh, 34px) + var(--dev-lane) + env(safe-area-inset-bottom))
+    calc(clamp(20px, 3.6vw, 54px) + env(safe-area-inset-left));
   overflow: hidden;
   isolation: isolate;
 }
 
-/* ---------------------------------------------------------- background --- */
+.header {
+  grid-row: 1;
+  justify-self: stretch;
+}
 
 .field {
+  grid-row: 2;
+}
+
+/* ---------------------------------------------------------- atmosphere --- */
+
+/*
+ * Four layers, and the hierarchy between them is the whole point: the core
+ * is loud, its light is medium, the depth field is barely there, and there
+ * is no decorative chrome at all. Earlier revisions had a horizon rule and
+ * four corner brackets; both read as generic HUD furniture rather than as a
+ * space, and both are gone rather than tuned.
+ *
+ * Every layer is centred on the composition's own axis, a little above the
+ * middle, so the light in the room agrees with where ORION actually is.
+ */
+.atmosphere {
   position: absolute;
   inset: 0;
   z-index: -1;
@@ -32,50 +113,103 @@
 }
 
 /*
- * Two very slow, very large blurred lights. This is what stops the background
- * from being flat black without adding a single visible element.
+ * The light ORION casts into the room. Tinted by the current state's accent,
+ * and the reason the whole environment changes temperature when ORION does.
  */
-.aurora {
+.ambient {
+  position: absolute;
+  inset: -25%;
+  background: radial-gradient(
+    32% 32% at 50% 42%,
+    rgb(var(--orion-accent-rgb) / 0.24),
+    rgb(var(--orion-accent-rgb) / 0.07) 46%,
+    transparent 72%
+  );
+  filter: blur(60px);
+  opacity: 0.72;
+  transform: scale(1);
+  transition:
+    opacity 1400ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 1600ms cubic-bezier(0.22, 1, 0.36, 1),
+    background 1500ms ease;
+  animation: ambientDrift 78s ease-in-out infinite alternate;
+}
+
+/* A second, far cooler source off-axis, so the room has depth instead of one
+   lamp in the middle of nothing. */
+.counterLight {
   position: absolute;
   inset: -20%;
   background:
-    radial-gradient(38% 30% at 22% 18%, rgba(14, 124, 84, 0.22), transparent 70%),
-    radial-gradient(42% 34% at 82% 86%, rgba(8, 92, 78, 0.18), transparent 72%),
-    /*
-     * The floor. Sits directly under the core and follows the current state's
-     * accent, so the whole room changes temperature when ORION does -- which
-     * is a far cheaper and far more convincing signal than lighting up a
-     * badge somewhere.
-     */
-    radial-gradient(46% 40% at 50% 52%, rgb(var(--orion-accent-rgb) / 0.13), transparent 74%);
-  filter: blur(40px);
-  animation: drift 64s ease-in-out infinite alternate;
-  transition: background 1400ms cubic-bezier(0.22, 1, 0.36, 1);
+    radial-gradient(34% 30% at 86% 14%, rgba(10, 78, 68, 0.2), transparent 70%),
+    radial-gradient(30% 26% at 10% 88%, rgba(12, 96, 66, 0.15), transparent 72%);
+  filter: blur(70px);
+  opacity: 0.7;
+  animation: ambientDrift 112s ease-in-out infinite alternate-reverse;
 }
 
 /*
- * A faint measurement grid, masked so it only exists near the centre of the
- * frame. Reads as an instrument surface rather than a pattern.
+ * The distant field: a very sparse point grid, masked to a soft ellipse
+ * around the core so it never reads as a repeating pattern across the page.
+ * This is what gives the black somewhere to be, and it is deliberately the
+ * quietest thing on screen.
  */
-.grid {
+.depth {
   position: absolute;
   inset: 0;
-  background-image: radial-gradient(rgba(112, 186, 152, 0.14) 1px, transparent 1px);
-  background-size: 30px 30px;
-  opacity: 0.42;
-  -webkit-mask: radial-gradient(58% 58% at 50% 46%, #000 0%, transparent 100%);
-  mask: radial-gradient(58% 58% at 50% 46%, #000 0%, transparent 100%);
+  background-image: radial-gradient(rgba(120, 196, 160, 0.16) 1px, transparent 1px);
+  background-size: 46px 46px;
+  opacity: 0.3;
+  -webkit-mask: radial-gradient(48% 50% at 50% 42%, #000 0%, transparent 100%);
+  mask: radial-gradient(48% 50% at 50% 42%, #000 0%, transparent 100%);
+  transition: opacity 1400ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.vignette {
+/* Edge falloff. The room ends softly rather than at the window edge. */
+.falloff {
   position: absolute;
   inset: 0;
   background: radial-gradient(
-    120% 100% at 50% 42%,
-    transparent 38%,
-    rgba(1, 6, 4, 0.55) 78%,
-    rgba(1, 6, 4, 0.9) 100%
+    124% 104% at 50% 44%,
+    transparent 32%,
+    rgba(1, 6, 4, 0.5) 74%,
+    rgba(1, 6, 4, 0.92) 100%
   );
+  transition: opacity 1400ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*
+ * State response, in the environment rather than only in the core.
+ * Listening opens the room; thinking closes it in and brings the depth
+ * field up; speaking is the warmest and brightest it gets. Opacity and
+ * transform only -- nothing here can move a single element of layout.
+ */
+.shell[data-state="listening"] .ambient {
+  opacity: 0.92;
+  transform: scale(1.06);
+}
+
+.shell[data-state="thinking"] .ambient {
+  opacity: 0.84;
+  transform: scale(0.95);
+}
+
+.shell[data-state="thinking"] .depth {
+  opacity: 0.56;
+}
+
+.shell[data-state="thinking"] .falloff {
+  opacity: 1.2;
+}
+
+.shell[data-state="speaking"] .ambient {
+  opacity: 1;
+  transform: scale(1.03);
+}
+
+/* A report on screen is a quieter room: the deck is the thing being read. */
+.shell[data-analysis="true"] .depth {
+  opacity: 0.14;
 }
 
 /* -------------------------------------------------------------- header --- */
@@ -90,15 +224,15 @@
 .identity {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
 }
 
 .wordmark {
   position: relative;
   margin-right: -0.46em;
-  padding-bottom: 7px;
-  color: rgba(222, 244, 232, 0.94);
-  font-size: clamp(12px, 1.1vw, 15px);
+  padding-bottom: 8px;
+  color: rgba(224, 246, 234, 0.95);
+  font-size: clamp(11px, 1vw, 14px);
   font-weight: 500;
   letter-spacing: 0.46em;
 }
@@ -108,7 +242,7 @@
   position: absolute;
   bottom: 0;
   left: 0;
-  width: 26px;
+  width: 24px;
   height: 1px;
   background: linear-gradient(90deg, var(--orion-accent), rgb(var(--orion-accent-rgb) / 0));
   transition: background 1200ms ease;
@@ -116,8 +250,8 @@
 
 .tagline {
   margin-right: -0.24em;
-  color: rgba(178, 214, 194, 0.34);
-  font-size: clamp(8.5px, 0.72vw, 10px);
+  color: rgba(178, 214, 194, 0.3);
+  font-size: clamp(8px, 0.68vw, 9.5px);
   font-weight: 500;
   letter-spacing: 0.24em;
   text-transform: uppercase;
@@ -125,177 +259,355 @@
 
 .build {
   margin-right: -0.16em;
-  color: rgba(178, 214, 194, 0.17);
-  font-size: clamp(8.5px, 0.7vw, 10px);
+  color: rgba(178, 214, 194, 0.14);
+  font-size: clamp(8px, 0.66vw, 9.5px);
   letter-spacing: 0.16em;
   text-align: right;
   text-transform: uppercase;
 }
 
-/* -------------------------------------------------------------- centre --- */
+/* ------------------------------------------------- the field: one axis --- */
 
-.centre {
-  display: grid;
-  place-items: center;
-  gap: clamp(18px, 3.4vh, 48px);
+/*
+ * ORION and what ORION says, as a single centred object.
+ *
+ * The group is vertically centred in the field, which puts the core a little
+ * above the visual centre of the screen -- the reply hangs below it, so the
+ * pair balances around the middle rather than the core sitting on it.
+ * `overflow: hidden` here with a scrolling `.voice` inside is what keeps the
+ * core pinned at full size when a report is too tall: the core never
+ * scrolls away and never shrinks, only the report moves.
+ */
+.field {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /*
+   * The whole composition -- core, reply, command channel -- centred as one
+   * group. The command line lived in a third grid row before this, which
+   * pinned it to the bottom edge and left a dead band between it and the
+   * reply: a footer, which is exactly what it must not read as. Inside the
+   * group it sits a fixed distance below what ORION just said.
+   */
+  justify-content: center;
+  width: 100%;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.coreZone {
+  display: grid;
+  flex: none;
+  place-items: center;
+}
+
+/* ---------------------------------------------------------- the channel --- */
+
+/*
+ * Where ORION speaks, lifted into the lower part of the core's own field.
+ *
+ * `min-height` is a reserve, not a cap: it stops a two-word answer from
+ * pulling the core down the screen, and a longer answer grows straight past
+ * it with no scrolling and no clipping. There is deliberately no
+ * `max-height` anywhere on this element -- that pairing, plus `overflow-y`,
+ * was the fixed band that made ordinary replies unreadable.
+ */
+.voice {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(9px, 1.3vh, 15px);
+  width: 100%;
+  min-width: 0;
+  min-height: clamp(7em, 17vh, 11em);
+  margin-top: var(--core-overlap);
+  padding: 0 clamp(4px, 2vw, 20px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  text-align: center;
+  /*
+   * The pool of shade that keeps a sentence readable inside the core's glow,
+   * painted as this element's own background rather than as an outset
+   * pseudo-element.
+   *
+   * THIS IS WHERE BOTH SCROLLBARS CAME FROM. The previous revision drew it
+   * with `.voice::before { inset: -6% -8% -10% }` -- an absolutely
+   * positioned child deliberately larger than its parent, inside a scroll
+   * container. That is overflow by construction, and it gave the field a
+   * full-width horizontal scrollbar and a vertical one, both in the accent
+   * colour, straight across the composition. A background cannot overflow.
+   */
+  background: radial-gradient(
+    44% 62% at 50% 42%,
+    rgba(1, 7, 5, 0.62),
+    rgba(1, 7, 5, 0.24) 54%,
+    transparent 76%
+  );
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--orion-accent-rgb) / 0.26) transparent;
+}
+
+.voice::-webkit-scrollbar {
+  width: 3px;
+}
+
+.voice::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgb(var(--orion-accent-rgb) / 0.24);
+}
+
+/*
+ * A report is the one thing that can outgrow the field. The reserve is
+ * waived so the deck can use every pixel below the core, and the core --
+ * pinned by `.field`'s own `overflow: hidden` -- does not move or resize.
+ */
+.voice[data-analysis="true"] {
   min-height: 0;
 }
 
-/*
- * At rest `min-height: 0` lets the core's row shrink so the layout can hold
- * itself to one viewport. With an analysis on screen that same rule would let
- * the track size below the deck's content, and `.shell`'s `overflow: hidden`
- * would then clip the report instead of letting the page scroll to it. So the
- * automatic minimum comes back, the row grows, and the document scrolls
- * vertically -- while `html, body { overflow-x: hidden }` in `globals.css`
- * keeps the horizontal axis pinned regardless of what the backend sent.
- */
-.centre[data-analysis="true"] {
-  align-content: start;
-  min-height: auto;
-}
-
-/* -------------------------------------------------------------- footer --- */
-
-.footer {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: clamp(14px, 2.2vh, 24px);
-}
-
-.readout {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  min-height: 3.6em;
+.address,
+.reply,
+.error {
+  flex: none;
+  width: 100%;
+  min-width: 0;
   margin: 0;
-  text-align: center;
+}
+
+/*
+ * What this turn is about: a contextual trace, not a component. No rule, no
+ * mark, no bubble and no role label -- just the words, one clear step below
+ * ORION's own voice, so the exchange has context without gaining furniture.
+ */
+.address {
+  max-width: 40ch;
+  margin: 0 auto;
+  color: rgba(178, 214, 194, 0.4);
+  font-size: clamp(10.5px, 0.95vw, 12px);
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  animation: settleIn 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.reply {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(8px, 1.1vh, 13px);
 }
 
 .stateLabel {
-  margin-right: -0.38em;
+  margin-right: -0.42em;
   color: var(--orion-accent);
-  font-size: clamp(9.5px, 0.82vw, 11px);
+  font-size: clamp(9px, 0.76vw, 10.5px);
   font-weight: 600;
-  letter-spacing: 0.38em;
+  letter-spacing: 0.42em;
   text-transform: uppercase;
+  opacity: 0.85;
   transition: color 900ms ease;
 }
 
+/*
+ * The answer. A narrow measure on purpose: this is ORION speaking on the
+ * composition's own axis, not a column of body copy, and a short line
+ * length is most of what keeps it feeling spoken rather than published.
+ * No box, no border, no background -- size, weight and colour do the work.
+ */
 .statusText {
-  max-width: 34ch;
-  color: rgba(214, 238, 224, 0.8);
-  font-size: clamp(16px, 2vw, 21px);
+  /*
+   * 56 characters: comfortably inside the 45-65ch band a long measure stays
+   * readable in, and one line shorter than 46ch on the longest reply ORION
+   * has -- which is the difference between fitting a 768px-tall viewport and
+   * making the reply scroll. The core is never the thing that gives way.
+   */
+  max-width: 56ch;
+  margin: 0 auto;
+  color: rgba(230, 249, 238, 0.95);
+  font-size: clamp(16px, 1.35vw, 21px);
   font-weight: 300;
-  letter-spacing: -0.005em;
-  line-height: 1.4;
+  letter-spacing: -0.003em;
+  line-height: 1.62;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+  /*
+   * ORION's answer resolves rather than appears.
+   *
+   * The whole sentence is already here -- nothing is streamed, nothing is
+   * fabricated, and no character arrives later than any other. This governs
+   * only how it comes into focus: out of focus and slightly loose, settling
+   * over two thirds of a second. It is the difference between a reply that
+   * was fetched and a reply that was thought of, and it costs one keyframe.
+   */
+  animation: resolveIn 720ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 /*
- * What ORION heard, held one step below what ORION said. Dimmer and
- * smaller rather than boxed or bubbled -- the hierarchy does the work a
- * chat layout would otherwise need furniture for.
+ * A spoken analysis summary is a long paragraph and the deck below it is
+ * the thing being read, so the summary steps down rather than competing.
  */
-.transcript {
-  max-width: 34ch;
-  color: rgba(178, 214, 194, 0.44);
-  font-size: clamp(11px, 1.05vw, 12.5px);
-  font-weight: 400;
-  letter-spacing: 0.04em;
-  line-height: 1.45;
+.voice[data-analysis="true"] .statusText {
+  max-width: 60ch;
+  font-size: clamp(13px, 0.95vw, 15px);
+  line-height: 1.62;
 }
 
+/*
+ * A real fault, said plainly and never framed as an alert. The reducer
+ * clears it the instant the next turn begins and on any dev state change,
+ * so it cannot sit under a fresh answer or outlive the failure it describes.
+ */
 .error {
-  max-width: 36ch;
-  margin: 0;
-  color: rgba(255, 196, 186, 0.82);
-  font-size: clamp(12px, 1.2vw, 13.5px);
+  max-width: 42ch;
+  margin: 0 auto;
+  color: rgba(255, 198, 188, 0.8);
+  font-size: clamp(11.5px, 1vw, 13px);
   font-weight: 400;
   letter-spacing: 0.02em;
-  text-align: center;
+  line-height: 1.5;
+  animation: settleIn 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 /* ------------------------------------------------------ command surface --- */
 
 /*
- * One command line and one send affordance, with the microphone beside them
- * as the path Phase 4 will make real. Everything shares the hairline /
- * blurred-glass language the development controls already use, so this reads
- * as part of ORION rather than as a form dropped onto it.
+ * How ORION is addressed, on the same axis as everything else. A caret, a
+ * line of text and a hairline under it -- not a pill, not a card, not a
+ * bordered form control. It stays quiet until it has focus, at which point
+ * the rule takes the accent.
  */
 .commandRow {
   display: flex;
+  /* Never squeezed: the reply above it is the flexible element, this is not. */
+  flex: none;
   align-items: center;
-  gap: 10px;
+  gap: clamp(8px, 1.2vw, 14px);
   width: 100%;
-  max-width: 488px;
+  max-width: clamp(320px, 42vw, 520px);
+  min-width: 0;
+  margin-top: clamp(18px, 3.4vh, 44px);
 }
 
 .command {
+  position: relative;
   display: flex;
   flex: 1;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   min-width: 0;
-  padding: 5px 5px 5px 18px;
-  border: 1px solid rgba(112, 186, 152, 0.12);
-  border-radius: 999px;
-  background: rgba(6, 18, 14, 0.4);
-  backdrop-filter: blur(8px);
-  transition:
-    border-color 400ms ease,
-    box-shadow 400ms ease;
+  padding: 8px 2px 10px;
 }
 
-.command:focus-within {
-  border-color: rgb(var(--orion-accent-rgb) / 0.42);
-  box-shadow: 0 0 28px rgb(var(--orion-accent-rgb) / 0.13);
+/* The hairline the command line is written on. */
+.command::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    rgb(var(--orion-accent-rgb) / 0),
+    rgb(var(--orion-accent-rgb) / 0.3) 22%,
+    rgb(var(--orion-accent-rgb) / 0.3) 78%,
+    rgb(var(--orion-accent-rgb) / 0)
+  );
+  opacity: 0.7;
+  transition:
+    background 500ms ease,
+    opacity 500ms ease;
+}
+
+.command:focus-within::after {
+  opacity: 1;
+  background: linear-gradient(
+    90deg,
+    rgb(var(--orion-accent-rgb) / 0),
+    rgb(var(--orion-accent-rgb) / 0.75) 22%,
+    rgb(var(--orion-accent-rgb) / 0.75) 78%,
+    rgb(var(--orion-accent-rgb) / 0)
+  );
+}
+
+/* A prompt mark rather than an icon: one short accent bar at the head of
+   the line, which is what tells you this is a command surface. */
+.caret {
+  flex: none;
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--orion-accent);
+  opacity: 0.5;
+  transition:
+    opacity 400ms ease,
+    background 1200ms ease;
+}
+
+.command:focus-within .caret {
+  opacity: 1;
 }
 
 .commandInput {
   flex: 1;
   min-width: 0;
-  padding: 8px 0;
+  padding: 0;
   border: none;
   background: transparent;
-  color: rgba(224, 244, 232, 0.94);
+  color: rgba(226, 246, 234, 0.95);
   font-family: inherit;
-  font-size: clamp(13.5px, 1.4vw, 15px);
-  font-weight: 400;
-  letter-spacing: 0.01em;
+  font-size: clamp(13px, 1.05vw, 15px);
+  font-weight: 300;
+  letter-spacing: 0.012em;
+  /*
+   * Left, running out from the caret like a prompt. Centred, it left the
+   * caret stranded at the far end of an otherwise empty rule -- and it made
+   * the user's own typing look like ORION's centred voice. The two speakers
+   * are told apart by treatment rather than by any bubble or label.
+   */
+  text-align: left;
   outline: none;
 }
 
 .commandInput::placeholder {
-  color: rgba(178, 214, 194, 0.36);
-  letter-spacing: 0.08em;
+  color: rgba(178, 214, 194, 0.3);
+  font-weight: 400;
+  font-size: 0.84em;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
 }
 
 .commandInput:disabled {
-  color: rgba(214, 238, 224, 0.45);
+  color: rgba(214, 238, 224, 0.42);
   cursor: not-allowed;
 }
 
-.commandSend {
+/*
+ * Bare glyphs, not filled circles. The send arrow brightens when there is
+ * something to send, which is the only affordance it needs.
+ */
+.commandSend,
+.mic {
   display: grid;
   flex: none;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  border: 1px solid rgb(var(--orion-accent-rgb) / 0.28);
+  border: none;
   border-radius: 50%;
-  background: rgb(var(--orion-accent-rgb) / 0.14);
-  color: rgba(236, 252, 242, 0.92);
+  background: transparent;
+  color: rgba(214, 238, 224, 0.46);
   cursor: pointer;
   transition:
-    background-color 300ms ease,
-    border-color 300ms ease,
     color 300ms ease,
-    opacity 300ms ease;
+    opacity 300ms ease,
+    transform 400ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .commandSend svg {
@@ -303,139 +615,104 @@
   height: 17px;
 }
 
-.commandSend:hover:not(:disabled) {
-  border-color: rgb(var(--orion-accent-rgb) / 0.55);
-  background: rgb(var(--orion-accent-rgb) / 0.24);
-}
-
-.commandSend:focus-visible {
-  outline: 1px solid var(--orion-accent);
-  outline-offset: 3px;
-}
-
-.commandSend:disabled {
-  border-color: rgba(112, 186, 152, 0.12);
-  background: rgba(104, 186, 150, 0.04);
-  color: rgba(214, 238, 224, 0.34);
-  cursor: not-allowed;
-}
-
-/* ------------------------------------------------------ mic affordance --- */
-
-.mic {
-  display: grid;
-  flex: none;
-  place-items: center;
-  width: 46px;
-  height: 46px;
-  padding: 0;
-  border: 1px solid rgba(112, 186, 152, 0.13);
-  border-radius: 50%;
-  background: rgba(104, 186, 150, 0.04);
-  color: rgba(214, 238, 224, 0.62);
-  cursor: pointer;
-  transition:
-    border-color 400ms ease,
-    background-color 400ms ease,
-    color 400ms ease,
-    box-shadow 400ms ease,
-    transform 400ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
 .mic svg {
-  width: 19px;
-  height: 19px;
+  width: 18px;
+  height: 18px;
 }
 
-.mic:hover {
-  border-color: rgba(112, 186, 152, 0.34);
-  color: rgba(224, 244, 232, 0.9);
+.commandSend:hover:not(:disabled),
+.mic:hover:not(:disabled) {
+  color: rgba(238, 252, 244, 0.96);
 }
 
+.commandSend:focus-visible,
 .mic:focus-visible {
   outline: 1px solid var(--orion-accent);
   outline-offset: 4px;
 }
 
-.mic:disabled,
-.devButton:disabled {
+.commandSend:not(:disabled) {
+  color: rgb(var(--orion-accent-rgb) / 0.95);
+}
+
+.commandSend:disabled,
+.mic:disabled {
+  color: rgba(214, 238, 224, 0.22);
   cursor: not-allowed;
-  opacity: 0.45;
 }
 
 .mic[aria-pressed="true"] {
-  border-color: rgb(var(--orion-accent-rgb) / 0.6);
-  background: rgb(var(--orion-accent-rgb) / 0.12);
-  box-shadow: 0 0 24px rgb(var(--orion-accent-rgb) / 0.28);
-  color: rgba(236, 252, 242, 0.96);
-  transform: scale(1.04);
+  color: rgb(var(--orion-accent-rgb));
+  transform: scale(1.08);
 }
 
 /*
  * A live microphone gets a slow breath of its own, separate from anything
- * the core is doing. It is deliberately NOT an audio-reactive element: the
- * user's voice drives the core, and a second thing pulsing to the same
- * signal would read as a glitch rather than as one instrument.
+ * the core is doing. It is deliberately NOT audio-reactive: the user's
+ * voice drives the core, and a second thing pulsing to the same signal
+ * would read as a glitch rather than as one instrument.
  */
 .mic[data-capturing="true"] {
   animation: micLive 2.4s ease-in-out infinite;
 }
 
-@keyframes micLive {
-  0%,
-  100% {
-    box-shadow: 0 0 20px rgb(var(--orion-accent-rgb) / 0.24);
-  }
-  50% {
-    box-shadow: 0 0 34px rgb(var(--orion-accent-rgb) / 0.44);
-  }
-}
+/* -------------------------------------------------- development corner --- */
 
-/* -------------------------------------------------- development controls -- */
-
-.dev {
+/*
+ * Not part of ORION, and not part of the composition either: absolutely
+ * positioned out of the grid, so it occupies no space and cannot influence
+ * the layout at any viewport. It rests at a fraction of its weight and comes
+ * fully up on hover or keyboard focus -- always reachable, never competing.
+ * Opacity only: `pointer-events` or `visibility` would make it unusable
+ * rather than quiet.
+ */
+.aside {
+  position: absolute;
+  bottom: calc(clamp(10px, 1.6vh, 16px) + env(safe-area-inset-bottom));
+  left: calc(clamp(14px, 2.4vw, 28px) + env(safe-area-inset-left));
+  z-index: 2;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  padding: 3px 3px 3px 11px;
-  border: 1px solid rgba(112, 186, 152, 0.08);
-  border-radius: 999px;
-  background: rgba(6, 18, 14, 0.34);
-  backdrop-filter: blur(8px);
-  /*
-   * A development affordance, not part of ORION. It rests at a third of its
-   * weight and comes fully up on hover or keyboard focus -- always reachable,
-   * never competing with the core. Opacity only: `pointer-events` or
-   * `visibility` would make it unusable rather than quiet.
-   */
-  opacity: 0.34;
+  max-width: min(38ch, 42vw);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  opacity: 0.16;
   transition: opacity 500ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.dev:hover,
-.dev:focus-within {
+.aside:hover,
+.aside:focus-within {
   opacity: 1;
 }
 
+.dev {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  /* One row. Wrapping put "Next" on a second line directly on top of the
+     disclosure below it. */
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
 .devLabel {
-  padding-right: 6px;
-  color: rgba(178, 214, 194, 0.28);
-  font-size: 8.5px;
+  padding-right: 7px;
+  color: rgba(178, 214, 194, 0.32);
+  font-size: 8px;
   font-weight: 600;
   letter-spacing: 0.22em;
   text-transform: uppercase;
 }
 
 .devButton {
-  padding: 6px 11px;
+  padding: 4px 8px;
   border: 1px solid transparent;
   border-radius: 999px;
   background: transparent;
-  color: rgba(196, 228, 210, 0.44);
+  color: rgba(196, 228, 210, 0.5);
   font-family: inherit;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 500;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -446,8 +723,8 @@
     border-color 300ms ease;
 }
 
-.devButton:hover {
-  color: rgba(224, 244, 232, 0.88);
+.devButton:hover:not(:disabled) {
+  color: rgba(226, 246, 234, 0.9);
 }
 
 .devButton:focus-visible {
@@ -456,21 +733,39 @@
 }
 
 .devButton[aria-pressed="true"] {
-  border-color: rgb(var(--orion-accent-rgb) / 0.35);
-  background: rgb(var(--orion-accent-rgb) / 0.12);
-  color: rgba(236, 252, 242, 0.95);
+  border-color: rgb(var(--orion-accent-rgb) / 0.32);
+  background: rgb(var(--orion-accent-rgb) / 0.1);
+  color: rgba(238, 252, 244, 0.95);
+}
+
+.devButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .devAdvance {
-  color: rgba(196, 228, 210, 0.34);
+  color: rgba(196, 228, 210, 0.36);
 }
 
+/*
+ * Rendered always, shown when the corner is. At the aside's resting weight
+ * this was a smear of unreadable grey text in the corner of an otherwise
+ * quiet composition -- present but illegible is the worst of both, so it
+ * resolves with everything else on hover or keyboard focus.
+ */
 .disclosure {
   margin: 0;
-  color: rgba(178, 214, 194, 0.15);
-  font-size: 9.5px;
-  letter-spacing: 0.1em;
-  text-align: center;
+  color: rgba(178, 214, 194, 0.4);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  line-height: 1.6;
+  opacity: 0;
+  transition: opacity 400ms ease;
+}
+
+.aside:hover .disclosure,
+.aside:focus-within .disclosure {
+  opacity: 1;
 }
 
 /* ---------------------------------------------------- state accenting ---- */
@@ -489,87 +784,185 @@
   --orion-accent-rgb: 112 236 172;
 }
 
+/* ------------------------------------------------------------ keyframes -- */
+
+@keyframes ambientDrift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(1.5%, -1.5%, 0) scale(1.07);
+  }
+}
+
+/*
+ * Blur-to-focus, not a slide. The text loosens its tracking and comes into
+ * focus, which reads as something resolving rather than something being
+ * inserted.
+ */
+@keyframes resolveIn {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+    letter-spacing: 0.05em;
+    transform: translate3d(0, 6px, 0);
+  }
+  62% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    letter-spacing: -0.003em;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes settleIn {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 5px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes micLive {
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* ------------------------------------------------------------ responsive - */
 
-@media (max-width: 560px) {
+/*
+ * There is one composition, so there are no placement breakpoints -- only
+ * adjustments to how much of the viewport each part is allowed to claim.
+ */
+
+@media (max-width: 720px) {
   .header {
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
   }
 
   .build {
     text-align: left;
   }
 
-  .dev {
-    padding-left: 10px;
-  }
-
-  .command {
-    padding-left: 14px;
-  }
-
   .commandRow {
+    max-width: none;
+  }
+
+  /* A narrow screen has fewer pixels per line, so the reserve shrinks with
+     the measure rather than holding room the text cannot use. */
+  .voice {
+    min-height: clamp(6em, 14vh, 9em);
+  }
+
+  .aside {
+    max-width: 60vw;
+  }
+}
+
+/*
+ * A short viewport is the one case where the core genuinely cannot keep its
+ * full size: at 390px of height there is no arrangement in which a large
+ * core, a readable reply and a command line all fit. The core is capped by
+ * viewport height here -- which is a viewport response, not the forbidden
+ * one. Nothing about a reply arriving changes it.
+ */
+@media (max-height: 620px) {
+  .shell {
+    /*
+     * Raised from 38vh once the reply stopped needing six lines here. The
+     * priority on a landscape phone is core presence first, then a readable
+     * reply, then the command line -- and the width the reply gave back is
+     * spent on the core rather than left as empty space. 44vh was measured
+     * and put the reply back into a scroll; 41vh is what actually fits.
+     */
+    --orion-core-stage: clamp(120px, min(58vmin, 41vh), 320px);
+    /* No height to spare: the corner overlaps the composition's outer
+       margin instead of being given a lane of its own. */
+    --dev-lane: 0px;
+    /* Deeper into the core's outer field, which is emptier than usual here
+       because the core itself is smaller. Buys back a dozen pixels without
+       touching the core's size or the type. */
+    --core-overlap: calc(var(--orion-core-stage) * -0.26);
+
+    row-gap: clamp(8px, 1.4vh, 16px);
+  }
+
+  .voice {
+    min-height: 0;
     gap: 8px;
   }
 
-  .devButton {
-    padding: 6px 10px;
-    font-size: 10px;
-  }
-}
-
-/* Short viewports (phone in landscape): give the core the room back. */
-@media (max-height: 620px) {
-  .footer {
-    gap: 10px;
-  }
-
-  .readout {
-    min-height: 0;
-  }
-
+  /*
+   * A short viewport is a wide one, so the reply spends width instead of
+   * height. This is the whole fix for 844x390: at 58ch the longest reply
+   * ORION has ran to six lines and overflowed the field by about thirty
+   * pixels; the same text at 78ch is four lines and fits, at exactly the
+   * same font size. Nothing is shrunk, hidden or clipped -- a landscape
+   * phone simply has horizontal room that a portrait measure was refusing
+   * to use. 78ch is long for a page of prose and right for four lines on a
+   * screen twice as wide as it is tall.
+   */
   .statusText {
-    font-size: 15px;
+    max-width: 78ch;
+    font-size: clamp(13.5px, 1.1vw, 16px);
+    line-height: 1.5;
   }
 
-  .mic {
-    width: 44px;
-    height: 44px;
+  /* The trace and the channel tighten with everything else. */
+  .address {
+    max-width: 78ch;
   }
 
-  .mic svg {
-    width: 17px;
-    height: 17px;
+  .commandRow {
+    margin-top: clamp(10px, 2vh, 20px);
   }
 
-  .commandSend {
-    width: 34px;
-    height: 34px;
-  }
-
-  .commandInput {
-    padding: 6px 0;
-  }
-}
-
-@keyframes drift {
-  from {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  to {
-    transform: translate3d(2%, -2%, 0) scale(1.08);
+  .disclosure {
+    display: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .aurora,
+  /*
+   * Every animation introduced here is decorative: the room stops drifting,
+   * the answer simply is there, and the microphone stops breathing. The
+   * state cross-fades stay, because they carry information -- what ORION is
+   * doing -- and removing them would take away meaning rather than motion.
+   */
+  .ambient,
+  .counterLight,
+  .statusText,
+  .address,
+  .error,
   .mic[data-capturing="true"] {
     animation: none;
   }
 
+  .ambient {
+    transition: opacity 400ms ease;
+    transform: none;
+  }
+
+  .shell[data-state="listening"] .ambient,
+  .shell[data-state="thinking"] .ambient,
+  .shell[data-state="speaking"] .ambient {
+    transform: none;
+  }
+
   /* No fade to reveal: the controls simply sit at their quiet weight. */
-  .dev {
+  .aside {
     transition: none;
   }
 }

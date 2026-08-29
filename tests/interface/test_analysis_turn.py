@@ -32,13 +32,17 @@ from orion.data.provider_base import MarketDataProvider, MarketDataProviderError
 from orion.interface.app import create_app
 from orion.interface.service import VoiceTurnService
 from orion.orchestrator.analysis import AnalysisService
+from orion.orchestrator.response import (
+    ANALYSIS_UNAVAILABLE_TEXT,
+    GREETING_TEXT,
+    UNRECOGNISED_TEXT,
+)
 from orion.orchestrator.schemas import AnalysisReport, Intent
 from orion.reasoning.provider_base import ReasoningProviderError
 from orion.research.provider_base import EconomicCalendarProviderError
 from orion.risk.policy import KillSwitchState, RiskPolicy
 from orion.risk.portfolio import PortfolioState
 from orion.risk.schemas import ControlStatus
-from orion.voice.response import DEFAULT_RESPONSE_TEXT
 from tests.orchestrator.conftest import (
     FakePortfolioStore,
     FakeReasoningProvider,
@@ -153,7 +157,7 @@ class TestAnAnalysisCrossesTheWire:
     def test_the_spoken_reply_describes_the_same_analysis(self, analysing: TestClient) -> None:
         body = analysing.post(TEXT_URL, json={"text": ANALYZE}).json()
 
-        assert body["response_text"] != DEFAULT_RESPONSE_TEXT
+        assert body["response_text"] != ANALYSIS_UNAVAILABLE_TEXT
         assert body["response_text"].startswith("Gold on the hourly chart")
         assert body["state"] == "idle"
 
@@ -333,7 +337,9 @@ class TestOrdinaryTurnsAreUnchanged:
         body = analysing.post(TEXT_URL, json={"text": "hello orion"}).json()
 
         assert body["analysis"] is None
-        assert body["response_text"] == DEFAULT_RESPONSE_TEXT
+        # Answered locally and deterministically: no provider was consulted,
+        # and no analysis rode along.
+        assert body["response_text"] == GREETING_TEXT
 
     def test_a_service_with_no_analysis_factory_behaves_exactly_as_before(
         self, client: TestClient, deepgram: respx.MockRouter
@@ -341,7 +347,7 @@ class TestOrdinaryTurnsAreUnchanged:
         body = client.post(TEXT_URL, json={"text": ANALYZE}).json()
 
         assert body["analysis"] is None
-        assert body["response_text"] == DEFAULT_RESPONSE_TEXT
+        assert body["response_text"] == ANALYSIS_UNAVAILABLE_TEXT
         assert body["state"] == "idle"
 
     def test_analysis_availability_is_a_boolean_about_wiring_only(self) -> None:
@@ -358,7 +364,7 @@ class TestOrdinaryTurnsAreUnchanged:
             body = client.post(TEXT_URL, json={"text": ANALYZE}).json()
 
         assert body["analysis"] is None
-        assert body["response_text"] == DEFAULT_RESPONSE_TEXT
+        assert body["response_text"] == ANALYSIS_UNAVAILABLE_TEXT
 
     def test_every_response_still_carries_exactly_the_documented_fields(
         self, analysing: TestClient
@@ -633,7 +639,11 @@ class TestNothingInternalCrossesTheBoundary:
 
         assert body["transcript"] == hostile
         assert body["analysis"] is None
-        assert body["response_text"] == DEFAULT_RESPONSE_TEXT
+        # A hostile transcript resolves to no intent ORION can act on, and the
+        # reply is one of this module's fixed sentences -- never any part of
+        # what was said.
+        assert body["response_text"] == UNRECOGNISED_TEXT
+        assert hostile not in body["response_text"]
 
 
 # ------------------------------------------------- vocabularies do not drift

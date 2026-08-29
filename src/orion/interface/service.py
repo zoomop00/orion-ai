@@ -92,7 +92,7 @@ from orion.interface.schemas import (
     VoiceTurnResponse,
 )
 from orion.orchestrator.analysis import AnalysisService
-from orion.orchestrator.response import AnalysisResponseProvider
+from orion.orchestrator.response import AnalysisResponseProvider, LocalResponseProvider
 from orion.orchestrator.schemas import AnalysisReport
 from orion.voice.audio_input import AudioInputError, InMemoryAudioInput
 from orion.voice.audio_output import AudioOutputError, InMemoryAudioOutput
@@ -103,7 +103,7 @@ from orion.voice.provider_base import (
     TranscriptionProvider,
     TranscriptionProviderError,
 )
-from orion.voice.response import ResponseProviderError, StaticResponseProvider
+from orion.voice.response import ResponseProviderError
 from orion.voice.runtime import VoiceRuntime, VoiceRuntimeBusyError, VoiceTurnResult
 from orion.voice.schemas import Transcript
 
@@ -372,10 +372,19 @@ class VoiceTurnService:
         # is exactly the Phase 2/3 provider and nothing below behaves
         # differently.
         analysis_service = self._analysis_factory() if self._analysis_factory else None
+        # `LocalResponseProvider` answers greetings and "what can you do" with
+        # no provider at all, and says precisely what is missing when asked to
+        # analyse on a machine that cannot. It is the fallback in both
+        # branches, so those answers are the same however this deployment is
+        # configured -- the analysis path simply reaches them less often.
+        local = LocalResponseProvider(
+            analysis_available=analysis_service is not None,
+            voice_available=bool(self._deepgram_api_key),
+        )
         response_provider = (
-            AnalysisResponseProvider(analysis_service)
+            AnalysisResponseProvider(analysis_service, fallback=local)
             if analysis_service is not None
-            else StaticResponseProvider()
+            else local
         )
 
         # Speech is wired only when this deployment has the credential for

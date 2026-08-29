@@ -60,6 +60,19 @@ export interface OrionTurnSnapshot {
   readonly visualState: OrionVisualState;
   /** What ORION understood. Untrusted text — rendered as text, never HTML. */
   readonly transcript: string | null;
+  /**
+   * What the user typed, echoed back the instant it was sent and held only
+   * until `transcript` arrives to replace it.
+   *
+   * NOT A SECOND TRANSCRIPT, AND NOT A CLAIM. `transcript` remains what ORION
+   * says it understood, and only the backend ever writes it. This is the
+   * user's own text, shown so a turn reads as *addressed* rather than as a
+   * paragraph appearing under an orb — the interface acknowledges the input
+   * before it has an answer. A spoken turn has nothing to echo and leaves it
+   * null, because ORION genuinely does not know what was said until the
+   * transcript comes back.
+   */
+  readonly prompt: string | null;
   /** What ORION said back. Also rendered as text only. */
   readonly responseText: string | null;
   /**
@@ -81,7 +94,7 @@ export interface OrionTurnSnapshot {
 type TurnAction =
   | { readonly type: "arming" }
   | { readonly type: "listening" }
-  | { readonly type: "submitted" }
+  | { readonly type: "submitted"; readonly prompt?: string }
   | {
       readonly type: "heard";
       readonly transcript: string;
@@ -96,6 +109,7 @@ type TurnAction =
 const INITIAL: OrionTurnSnapshot = {
   visualState: "idle",
   transcript: null,
+  prompt: null,
   responseText: null,
   analysis: null,
   error: null,
@@ -111,6 +125,7 @@ function reduce(snapshot: OrionTurnSnapshot, action: TurnAction): OrionTurnSnaps
       return {
         visualState: "idle",
         transcript: null,
+        prompt: null,
         responseText: null,
         analysis: null,
         error: null,
@@ -122,6 +137,9 @@ function reduce(snapshot: OrionTurnSnapshot, action: TurnAction): OrionTurnSnaps
       return {
         visualState: "thinking",
         transcript: null,
+        // A typed turn carries its own text; a spoken one does not, and is
+        // left with nothing to show until ORION reports what it heard.
+        prompt: action.prompt ?? null,
         responseText: null,
         analysis: null,
         error: null,
@@ -148,13 +166,21 @@ function reduce(snapshot: OrionTurnSnapshot, action: TurnAction): OrionTurnSnaps
       return {
         visualState: "idle",
         transcript: null,
+        prompt: null,
         responseText: null,
         analysis: null,
         error: action.message,
         busy: false,
       };
     case "dev":
-      return snapshot.busy ? snapshot : { ...snapshot, visualState: action.state };
+      // Refused outright while a turn is running, so the development
+      // controls cannot yank the interface out from under a live turn.
+      // Otherwise it also clears any error still on screen: a previewed
+      // state is a new interaction, and copy describing a failure that is
+      // no longer happening must not survive into it.
+      return snapshot.busy
+        ? snapshot
+        : { ...snapshot, visualState: action.state, error: null };
   }
 }
 
@@ -307,7 +333,7 @@ export function useOrionTurn(): OrionTurnController {
 
       const { controller, turnId, current } = begin();
       busyRef.current = true;
-      dispatch({ type: "submitted" });
+      dispatch({ type: "submitted", prompt: text });
 
       void (async () => {
         try {

@@ -12,7 +12,21 @@
  */
 
 .stage {
-  --stage: clamp(230px, 58vmin, 540px);
+  /*
+   * One number the whole core is built from, and the layout owns it:
+   * `OrionInterface` sets `--orion-core-stage` from the viewport, this file
+   * decides what every layer measures relative to it. The fallback is for a
+   * test or a future container that mounts the core on its own.
+   *
+   * IT IS A FUNCTION OF THE VIEWPORT AND NOTHING ELSE. An earlier revision
+   * let the layout drop this to roughly half its size whenever a reply or a
+   * report appeared, so ORION visibly collapsed into a decorative circle the
+   * moment it answered anything. `vmin` alone had the opposite failure -- it
+   * sizes off the narrow axis, so a wide, short desktop got a sphere taller
+   * than the room it was in -- which is why the layout's rule caps on height
+   * and width as well.
+   */
+  --stage: var(--orion-core-stage, clamp(180px, min(48vmin, 38vh), 460px));
   --accent-rgb: 54 182 124;
 
   position: relative;
@@ -20,6 +34,13 @@
   height: var(--stage);
   perspective: 1100px;
   transform: translateZ(0);
+  /*
+   * Eased, so a viewport change settles the core rather than snapping it.
+   * Nothing but a resize moves these now.
+   */
+  transition:
+    width 900ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 900ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .stage[data-state="idle"] {
@@ -239,7 +260,7 @@
 .ringLine {
   position: absolute;
   inset: 0;
-  border: 1px solid rgb(var(--accent-rgb) / calc(0.1 + 0.16 * var(--glow)));
+  border: 1px solid rgb(var(--accent-rgb) / calc(0.07 + 0.13 * var(--glow)));
   border-radius: 50%;
   transition: border-color 1000ms ease;
 }
@@ -267,7 +288,7 @@
     #000 calc(100% - 1.5px)
   );
   mask: radial-gradient(closest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
-  opacity: calc(0.55 + 0.45 * var(--glow));
+  opacity: calc(0.4 + 0.4 * var(--glow));
   transition: opacity 1000ms ease;
 }
 
@@ -312,8 +333,20 @@
   animation: latticeBreath 9.5s ease-in-out infinite;
 }
 
+/*
+ * `fill-box`, not `view-box`.
+ *
+ * The viewBox is `-50 -50 100 100`, so its coordinate origin is the corner
+ * at (-50, -50) rather than the centre. With `transform-box: view-box`,
+ * `transform-origin: 50% 50%` is measured from that corner, which put the
+ * rotation centre at the viewBox's bottom-right and swung the whole graph
+ * several hundred pixels clear of the core -- in THINKING, the lattice
+ * appeared floating off in the top-right of the screen. `fill-box` measures
+ * against the group's own bounding box, whose centre is the centre of the
+ * graph, which is the point it was always meant to turn about.
+ */
 .latticeSpin {
-  transform-box: view-box;
+  transform-box: fill-box;
   transform-origin: 50% 50%;
   animation: spin 84s linear infinite;
 }
@@ -419,12 +452,17 @@
 
 /* -------------------------------------------------------------- sphere --- */
 
+/*
+ * The primary core. Deliberately the loudest layer: the brief's hierarchy is
+ * core LOUD, near field MEDIUM, orbits SUBTLE, distant field BARELY THERE,
+ * and 28% of the stage put the sphere and its rings at roughly equal weight.
+ */
 .sphereWrap {
   position: absolute;
   inset: 0;
   margin: auto;
-  width: 28%;
-  height: 28%;
+  width: 31%;
+  height: 31%;
   transform: scale(var(--core-scale));
   transition: transform 1100ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -735,6 +773,7 @@
   .latticeSpin,
   .latticeNode,
   .bar,
+  .stage,
   .sphere,
   .shimmer,
   .sphere::after,
@@ -747,6 +786,11 @@
   .latticeEdge,
   .stage::before {
     animation: none;
+  }
+
+  /* Resize instantly rather than gliding. */
+  .stage {
+    transition: none;
   }
 
   /* The signal wave stops, but the graph stays legible at a fixed weight. */

@@ -54,6 +54,68 @@ MAX_SCANNED_CHARS = 2000
 # Verbs that mean "run the analysis". A closed set, matched on whole tokens.
 _ANALYZE_TOKENS = frozenset({"analyze", "analyse", "analysis", "analyzing", "analysing"})
 
+# Words that open a conversation. Whole tokens only, so "this" never matches
+# "hi" and "hello world" in the middle of a sentence still reads as a greeting
+# rather than as nothing at all.
+_GREETING_TOKENS = frozenset(
+    {"hello", "hi", "hey", "yo", "greetings", "morning", "afternoon", "evening"}
+)
+
+# Asking what ORION is or what it can do. One token is enough for the
+# unambiguous ones; the phrasings people actually use are matched as
+# contiguous token runs, the same mechanism `_SYMBOL_ALIASES` uses.
+_CAPABILITY_TOKENS = frozenset({"help", "capabilities", "commands"})
+
+# Phrases are matched as contiguous runs, so a longer sentence that *contains*
+# one is already covered and does not need its own entry: "tell me what you
+# can do" matches ("what", "can", "you", "do"), and "what are your
+# capabilities" matches the `capabilities` token above. Only phrasings that
+# share no shorter form with an entry already here are listed.
+_CAPABILITY_PHRASES: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("what", "can", "you", "do"),
+        # The indirect word order, which is what "tell me what you can do"
+        # and "explain what you can do" actually contain.
+        ("what", "you", "can", "do"),
+        ("what", "do", "you", "do"),
+        ("what", "can", "i", "ask"),
+        ("who", "are", "you"),
+        ("what", "are", "you"),
+        ("what", "are", "you", "capable", "of"),
+        ("what", "is", "orion", "capable", "of"),
+        ("what", "can", "orion", "do"),
+        ("what", "does", "orion", "do"),
+    }
+)
+
+# Chat shorthand, folded onto the word it stands for BEFORE any table is
+# consulted.
+#
+# THIS IS WHY "what can u do" WORKS. Every table in this module matches whole
+# tokens, so "u" and "you" were two different words and the phrase above
+# simply did not match -- a real user asking a supported question got the
+# unrecognised answer back. Normalising one token to another keeps that fix
+# inside the same closed-vocabulary model rather than loosening the matcher:
+# this is a fixed dictionary written at development time, applied per token,
+# with no regex, no stemming, no edit distance and no inference. A word that
+# is not a key is passed through untouched.
+#
+# IT CANNOT WIDEN WHAT ORION WILL FETCH. None of these values is a symbol
+# alias, so no rewriting here can resolve a symbol that the raw text could
+# not, and `_SYMBOL_ALIASES` remains the only route to a `symbol` at all.
+_TOKEN_NORMALISATION: dict[str, str] = {
+    "u": "you",
+    "ur": "your",
+    "r": "are",
+    "wat": "what",
+    "wot": "what",
+    "hii": "hi",
+    "helo": "hello",
+    "hullo": "hello",
+    "analyzed": "analyze",
+    "analysed": "analyse",
+}
+
 # Alias -> the symbol ORION uses internally. Keys are whitespace-normalised
 # lowercase token sequences; multi-token keys are matched as contiguous runs
 # of tokens, never as substrings, so "golden" can never match "gold".
@@ -76,10 +138,16 @@ def _tokenize(text: str) -> tuple[str, ...]:
     become separators. `"Orion, analyze XAU/USD!"` and `"orion analyze xau
     usd"` therefore produce identical tokens, which is what lets the alias
     table stay small and literal.
+
+    Each token is then looked up in `_TOKEN_NORMALISATION`, so a handful of
+    fixed chat spellings ("u", "ur", "wat") reach the tables below as the
+    words they stand for. The rewrite is a dictionary lookup on a whole
+    token and nothing else -- see that table for why it cannot widen what
+    ORION is willing to fetch.
     """
     lowered = text[:MAX_SCANNED_CHARS].lower()
     cleaned = "".join(char if char in _KEEP else " " for char in lowered)
-    return tuple(cleaned.split())
+    return tuple(_TOKEN_NORMALISATION.get(token, token) for token in cleaned.split())
 
 
 def _resolve_symbol(tokens: tuple[str, ...]) -> str | None:
@@ -96,6 +164,12 @@ def _resolve_symbol(tokens: tuple[str, ...]) -> str | None:
     return None
 
 
+def _contains_run(tokens: tuple[str, ...], phrase: tuple[str, ...]) -> bool:
+    """Whether `phrase` appears as a contiguous run of whole tokens."""
+    width = len(phrase)
+    return any(tokens[i : i + width] == phrase for i in range(len(tokens) - width + 1))
+
+
 def parse_intent(text: str) -> Intent:
     """Classify one utterance.
 
@@ -109,17 +183,26 @@ def parse_intent(text: str) -> Intent:
     if not tokens:
         return Intent(kind=IntentKind.UNKNOWN)
 
-    if not _ANALYZE_TOKENS.intersection(tokens):
-        return Intent(kind=IntentKind.UNKNOWN)
-
-    symbol = _resolve_symbol(tokens)
-    if symbol is None:
+    # Ordered by cost and specificity, and the order is the contract: a
+    # request to analyse outranks a greeting attached to it, so "hi, analyse
+    # gold" runs the analysis rather than saying hello back.
+    if _ANALYZE_TOKENS.intersection(tokens):
+        symbol = _resolve_symbol(tokens)
+        if symbol is not None:
+            return Intent(kind=IntentKind.ANALYZE, symbol=symbol, timeframe=DEFAULT_TIMEFRAME)
         # ORION was clearly asked to analyse *something*, but nothing it can
-        # actually fetch. Refusing here is better than resolving a symbol
+        # actually fetch. Falling through is better than resolving a symbol
         # that is guaranteed to fail at the data provider one call later.
-        return Intent(kind=IntentKind.UNKNOWN)
 
-    return Intent(kind=IntentKind.ANALYZE, symbol=symbol, timeframe=DEFAULT_TIMEFRAME)
+    if _CAPABILITY_TOKENS.intersection(tokens) or any(
+        _contains_run(tokens, phrase) for phrase in _CAPABILITY_PHRASES
+    ):
+        return Intent(kind=IntentKind.CAPABILITIES)
+
+    if _GREETING_TOKENS.intersection(tokens):
+        return Intent(kind=IntentKind.GREETING)
+
+    return Intent(kind=IntentKind.UNKNOWN)
 
 
 def known_symbols() -> frozenset[str]:

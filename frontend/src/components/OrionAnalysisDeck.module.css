@@ -36,11 +36,20 @@
   flex-direction: column;
   gap: clamp(16px, 2.6vh, 30px);
   /*
-   * The centre row centres its items, which would otherwise shrink this deck
-   * to the width of its widest word. Stretching is claimed here rather than
-   * granted by the parent so the deck stays correct wherever it is mounted.
+   * ONE SCROLL REGION ON THE SCREEN, AND IT IS NOT THIS ONE.
+   *
+   * The deck used to be its own capped, masked scroller nested inside
+   * another one, which meant a long report could be scrolled in two places
+   * at once and the report's own top edge faded against the core above it.
+   * `OrionInterface`'s `.voice` column is now the single scrolling region
+   * and this simply takes the height it needs inside it -- so the summary,
+   * the verdict and the panels scroll together as one document, the way a
+   * report reads.
+   *
+   * `flex: none` because the column centres its content with collapsing
+   * spacers: without it the deck would be the thing that gets shrunk.
    */
-  justify-self: stretch;
+  flex: none;
   width: 100%;
   max-width: min(1080px, 100%);
   min-width: 0;

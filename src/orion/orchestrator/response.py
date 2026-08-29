@@ -173,6 +173,94 @@ def summarize(report: AnalysisReport) -> str:
     return with_rationale if len(with_rationale) <= MAX_SPOKEN_CHARS else without_rationale
 
 
+# --------------------------------------------------------- local answers ---
+#
+# Every sentence below is a fixed string chosen at development time. None is
+# built from a vendor response, an exception, a credential or the user's own
+# words -- `parse_intent` returns a closed enum, and that enum is the only
+# thing that selects between them.
+
+GREETING_TEXT = (
+    "Hello. I'm ORION. I read the gold market, reason over what I find, and put every "
+    "proposal past an independent Risk Guardian before I say it out loud. Ask me what I can do."
+)
+
+CAPABILITIES_READY_TEXT = (
+    "Ask me to analyse gold and I'll fetch real XAUUSD bars, run the indicators, reason over "
+    "the evidence, and put the result past the Risk Guardian. I never place a trade."
+)
+
+CAPABILITIES_LOCAL_ONLY_TEXT = (
+    "Right now I can introduce myself and explain what I do -- that part needs nothing. "
+    "Analysis needs two keys in your .env: TWELVE_DATA_API_KEY for market data and "
+    "ANTHROPIC_API_KEY for reasoning. I never place a trade, configured or not."
+)
+
+SPEECH_HINT_TEXT = " I'm answering in writing; add DEEPGRAM_API_KEY and I'll say it out loud too."
+
+ANALYSIS_UNAVAILABLE_TEXT = (
+    "I can analyse gold, but not on this machine yet -- that needs TWELVE_DATA_API_KEY and "
+    "ANTHROPIC_API_KEY in your .env. Everything else about me works without them."
+)
+
+UNRECOGNISED_TEXT = (
+    'I didn\'t catch a request I can act on. Try "analyse gold", or ask me what I can do.'
+)
+
+
+class LocalResponseProvider(ResponseProvider):
+    """Answers the things ORION can answer with no provider at all.
+
+    THIS IS WHY THE FIRST RUN IS NOT A DEAD END. `StaticResponseProvider`
+    returns one fixed sentence for every utterance, which is the correct
+    Mission 9 behaviour -- it never reads the transcript, so untrusted text
+    provably travels through the runtime as inert data. But as the *product's*
+    front door it meant every input, however reasonable, got the same
+    "not connected in this build" line, and a machine with no credentials
+    looked broken rather than unconfigured.
+
+    READING THE TRANSCRIPT SAFELY IS ALREADY A SOLVED PROBLEM HERE. This
+    provider does not inspect `transcript.text`; it passes it to
+    `orion.orchestrator.intent.parse_intent`, whose module docstring is
+    explicit that it is a deterministic closed-vocabulary token matcher with
+    no model, no regex over user patterns, no network and no clock, and that
+    "nothing the user typed ever leaves this module". What comes back is one
+    member of a four-member enum. That enum -- never the text -- picks one of
+    the fixed sentences above, so the untrusted string still reaches nothing
+    it could influence, and no reply can contain any part of it.
+
+    NOTHING IS INVENTED. There is no market data here, no price, no verdict
+    and no claim that a provider is connected when it is not. The only
+    runtime input is two booleans describing what this deployment has, and
+    they select between whole prepared sentences rather than being formatted
+    into one.
+    """
+
+    def __init__(self, *, analysis_available: bool, voice_available: bool) -> None:
+        self._analysis_available = analysis_available
+        self._voice_available = voice_available
+
+    def respond(self, transcript: Transcript) -> str:
+        kind = parse_intent(transcript.text).kind
+
+        if kind is IntentKind.ANALYZE:
+            # Only reachable when no `AnalysisService` was wired: with one,
+            # `AnalysisResponseProvider` handles this intent and never falls
+            # back here. So this says what is missing, once and precisely,
+            # rather than repeating a generic disclaimer at every turn.
+            return ANALYSIS_UNAVAILABLE_TEXT
+        if kind is IntentKind.CAPABILITIES:
+            answer = (
+                CAPABILITIES_READY_TEXT
+                if self._analysis_available
+                else CAPABILITIES_LOCAL_ONLY_TEXT
+            )
+            return answer if self._voice_available else answer + SPEECH_HINT_TEXT
+        if kind is IntentKind.GREETING:
+            return GREETING_TEXT
+        return UNRECOGNISED_TEXT
+
+
 class AnalysisResponseProvider(ResponseProvider):
     """Answers an analyse request with a real analysis, and anything else
     with the existing Mission 9 static response.
