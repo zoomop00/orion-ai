@@ -3716,3 +3716,311 @@ commit — pip-audit 2.10.1 over the exported lock, against the PyPI and OSV
 services, and gitleaks 8.30.1 over the full history, its download checksum
 verified against the release manifest — and both pinned action SHAs were
 confirmed against their tags.
+
+## 2026-08-29 — Backfill: the six entries this log was missing, and the 12.3 gap
+
+**This entry and the six below it were written retroactively, at `6aa6bc3`.**
+Everything from `717ea35` to `6aa6bc3` shipped without an entry here, so for six
+consecutive commits the only record of *why* was the commit message. The Mission
+10 Phase 5.5 entry already flagged the same drift for Phases 5.2–5.4 and declined
+to backfill them; that was the right call for three phases whose rationale was
+narrow and whose commits are easy to read end to end. It is the wrong call at
+six, because two of them — the CLI entrypoint and the Macro Analyst wiring — are
+load-bearing for the Mission 4 Phase 2 work that comes next, and one of them
+reverses a promise this document makes about credentials.
+
+**These are backfills and are marked as such.** Each entry below is distilled
+from its own commit message and diff, not reconstructed from memory. Where a
+commit did not record a number, this document does not invent one: per-commit
+test totals are stated only where the commit itself stated them. The verified
+totals at `6aa6bc3`, the commit this backfill is written against, are 1653 Python
+tests, 541 frontend tests, `ruff`, `mypy --strict`, `eslint`, `typecheck` and a
+clean production build.
+
+**Mission 12.3 does not exist and was never deferred.** The sequence runs 12.1,
+12.2, 12.4, 12.5, and a gap in a numbered sequence otherwise reads as lost work.
+It is not: `12.3` appears in no commit, no branch, no test and nowhere in this
+document. No capability was planned under that number, so there is nothing to
+defer and nothing to deprecate — the number was simply skipped when Mission 12.4
+was named. It is recorded here so a future reader stops looking. If a Mission 12
+item is ever needed again, it should take the next free number rather than
+backfill 12.3, because reusing a skipped number to mean something new is how a
+log stops being a record.
+
+**Files modified:** this document only. No source file, no test, no frontend file
+and no dependency manifest was touched by this backfill.
+
+## 2026-08-28 — Mission 12.4: the CLI entrypoint that was declared but never written
+
+*(Backfilled — see the 2026-08-29 note above. Commit `717ea35`.)*
+
+**`pyproject.toml` had advertised a command that could not start.**
+`[project.scripts] orion = "orion.cli:main"` has been declared since Mission 0
+with no `orion/cli.py` behind it, so the installed `orion` command failed with
+`ModuleNotFoundError` before printing anything. Mission 12.2's entry listed the
+broken entrypoint as deliberately out of its scope; this is where it was fixed.
+
+**One verb, over the orchestrator that already existed.** `orion analyze
+<symbol>` runs exactly the pipeline Mission 10 Phase 5.1 assembled —
+`parse_intent` → `build_analysis_service` → `AnalysisService.run` — adding no
+stage, reordering none and skipping none. `argparse` and `datetime` are stdlib,
+so no dependency was added.
+
+**No `trade` or `execute` verb, on the stated grounds that nothing in the
+codebase could place an order.** That reasoning was correct at the time and is
+superseded, for paper execution only, by the approved Mission 4 Phase 2 decision;
+see that entry when it lands. It was never an argument against *simulated*
+execution — it was an argument against a command that looked like it could reach
+a broker.
+
+**The symbol is never passed through.** What the user types goes to
+`orion.orchestrator.intent.parse_intent`, whose `Intent.symbol` is a value looked
+up in the closed alias table rather than a substring of the input, so the string
+reaching `MarketDataProvider.fetch_ohlcv` can only ever be a symbol this build
+declares. An unrecognised argument is refused at the CLI rather than forwarded to
+fail at the vendor one call later.
+
+**Nothing is written to disk.** No portfolio store is constructed, so
+`orion.memory.engine.create_memory_engine` — which creates a database file and
+its tables as a construction side effect — is never reached. The risk panel
+reports `no_portfolio_store` honestly, exactly as it does over HTTP. Every
+failure prints one fixed sentence with no exception text, vendor name, path or
+traceback, for the same reason `orion.http_errors` exists.
+
+**Files added:** `src/orion/cli.py`, `tests/test_cli.py`. **Files modified:**
+`README.md` — the Running section now says what the command needs and that it
+never trades, and the project layout no longer lists a `pipeline.py` that has
+never existed. 3 files, 754 insertions.
+
+## 2026-08-28 — Mission 10 Phase 6: the emerald cinematic core
+
+*(Backfilled — see the 2026-08-29 note above. Commit `ce2c281`.)*
+
+**Styling only.** The interface was re-themed from cyan/blue to emerald and the
+core's sense of life deepened, with no component, hook, state model, geometry or
+backend change and no dependency added. The single non-CSS edit is the browser
+theme-colour string in `layout.tsx`, matched to the new ground.
+
+**Palette.** A per-state emerald accent (idle, listening, a teal-shifted
+thinking, speaking), a near-black green ground, and 76 neutral tints re-cast from
+blue at the same luminance, so contrast is unchanged rather than merely
+re-checked.
+
+**Everything added to the core rides on pseudo-elements of existing markup** — a
+graduated bezel and four cardinal marks so it reads as instrumentation, two
+internal convection cells on coprime 19s/29s periods, a specular sweep, a
+drifting hotspot, twinkling mote halos, and an uneven ambient haze sweeping the
+field every 96 seconds. Coprime periods are the point: two cells that never
+present the same arrangement twice inside a minute are the difference between
+"alive" and "looping".
+
+**Thinking geometry propagates a signal.** The seven chords carry a wave with a
+sharp-attack, slow-decay envelope, the nodes fire rather than breathe, and the
+graph counter-wobbles against its own rotation so the figure never repeats.
+
+**Development controls rest at a third of their weight** and come up on hover or
+focus, keeping the core dominant. Every animation added here is covered by
+`prefers-reduced-motion`.
+
+**Files modified:** `frontend/src/app/globals.css`,
+`frontend/src/app/layout.tsx`, `OrionAnalysisDeck.module.css`,
+`OrionCore.module.css`, `OrionInterface.module.css`. 5 files, 476 insertions,
+95 deletions. No backend file and no dependency manifest was touched.
+
+## 2026-08-28 — Mission 12.5: the four provider credentials become `SecretStr`
+
+*(Backfilled — see the 2026-08-29 note above. Commit `684ed2b`.)*
+
+**This corrects a claim this document had been making.** Earlier entries describe
+ORION as careful never to leak a credential through an error path, and the
+provider suites carry deliberate `sk-live-…` fixtures to prove it. But the four
+credentials on `Settings` were plain `str`, so `repr()`, `str()`, `model_dump()`
+and `model_dump_json()` each returned all four in full. `Settings` is built fresh
+per analysis and per request, so a single caught traceback frame printed every
+key ORION holds. The provider-level guarantee was real; the settings object
+underneath it was not.
+
+**Typed as `pydantic.SecretStr`, which masks all four renderings**, and unwrapped
+with `get_secret_value()` at exactly three call sites in the two composition
+roots — passed as the argument itself, never bound to a local, so no intermediate
+name holds a plaintext key in a frame. A token-level test pins the count to those
+three sites, which makes a fourth unwrap a test failure rather than a review
+miss.
+
+**`analysis_available` keeps testing truthiness rather than materialising the
+secret**: an empty `SecretStr` is already falsy, so asking whether a credential is
+configured never unwraps one.
+
+**Deliberately unchanged:** environment and `.env` loading, aliases, defaults,
+every non-credential field, all provider signatures, and the error vocabulary.
+`VoiceTurnService` still takes a `str` on purpose — the narrow boundary is the
+audited one, and widening `SecretStr` across an interface that does not need it
+would spread the type without spreading the guarantee.
+
+**Files modified:** `src/orion/config.py`, `src/orion/interface/app.py`,
+`src/orion/orchestrator/wiring.py`. **Files added:**
+`tests/test_secret_handling.py` — 25 regression tests, per the commit: the four
+renderings plus a traceback and an f-string, per-field round trips, environment
+and `.env` loading, the real key reaching `TwelveDataProvider` and the Anthropic
+SDK client, a `ValidationError` that echoes nothing, and the token-level count.
+4 files, 301 insertions. No dependency was added.
+
+## 2026-08-28 — Mission 7/8: the Macro Analyst, finally connected
+
+*(Backfilled — see the 2026-08-29 note above. Commit `125be5e`.)*
+
+**Two missions had been built and left unconnected.** Mission 7 built the
+economic-calendar data layer and Mission 8 built the Macro Analyst;
+`FINNHUB_API_KEY` had no consumer anywhere in `src/`, and every analysis reported
+"No macro source is connected in this build". This wires both.
+
+**`MacroPanel` is shaped like `RiskPanel`, and for the same reason.** It reports
+four honest states — `not_connected`, `no_events`, `macro_unavailable`,
+`available` — so "nothing found", "could not look" and "cannot look at all" stay
+distinct, and none of them is answered by inventing macro context. `wiring.py`
+builds the calendar provider and the analyst together and only when
+`FINNHUB_API_KEY` is present; without it nothing changes and no second vendor is
+contacted.
+
+**Advisory only, and structurally so.** Macro runs *after* the decision exists,
+and a test compares whole serialised decision, risk, evidence and reasoning
+objects across every macro state to prove none of them moves. This is the same
+authority boundary Mission 3 established: the Risk Guardian can veto, an analyst
+can only annotate. Mission 7's quality gate still runs, so a stale snapshot never
+reaches the paid analyst, and neither does an empty batch.
+
+**Fail-soft, unlike every other stage.** A calendar outage returns a complete
+analysis with macro marked unavailable rather than destroying the report. Vendor
+exceptions are caught broadly and never read — the panel says it could not look,
+without saying what the vendor said.
+
+**The model identifier, prompt version, input fingerprint and per-event
+assessment ids stop at `_to_macro_summary`.** On the wire `MacroSummary` carries
+five values and a count. News is untouched and remains structurally incapable of
+claiming connectivity.
+
+**The orchestrator's per-file import allowlist was widened deliberately** — the
+note it replaced asked for exactly that — and narrowed to exact modules rather
+than whole packages. `orion.interface` still may not import `orion.analysts` or
+`orion.research`. This is the wall that Mission 4 Phase 2 must also respect, and
+the precedent for how it is widened when it genuinely must be.
+
+**The frontend gained no UI:** the analysis deck's existing Macro row renders a
+richer view model, so no component or stylesheet changed.
+
+**Files modified:** `src/orion/orchestrator/{analysis,schemas,wiring}.py`,
+`src/orion/interface/{schemas,service}.py`, `frontend/src/lib/{analysis-view,
+orion-analysis}.ts`, plus four test files. **Files added:**
+`tests/orchestrator/test_macro.py`, `frontend/tests/orion-macro.test.ts`.
+14 files, 1140 insertions. No dependency was added.
+
+## 2026-08-28 — Unspoken text turns: ORION answers without a speech credential
+
+*(Backfilled — see the 2026-08-29 note above. Commit `90b7ab1`.)*
+
+**A missing text-to-speech vendor was silently gating the entire product.**
+`VoiceRuntime` required a `SpeechSynthesisProvider` and an `AudioOutput`, so
+`run_turn()` always ended in the SPEAKING leg, and `VoiceTurnService` gated both
+endpoints on `DEEPGRAM_API_KEY` — including the typed one. A deployment with no
+speech vendor could not reach analysis, risk or macro at all: `POST
+/v1/voice/turn/text` answered `503 voice_unavailable`. ORION's reply is text
+first; the audio is a second rendering of it, and the architecture had that
+backwards.
+
+**Synthesis and audio output became together-optional.** With neither, a turn
+runs `IDLE → LISTENING → UNDERSTANDING → ANALYZING → IDLE` — a path
+`orion.voice.state`'s graph has always permitted, because failure recovery needed
+an IDLE edge out of every state. The graph, the transition rules and the recovery
+guarantee are untouched; this uses an edge that was already there rather than
+adding one. Half-wiring — one without the other — is refused at construction.
+
+**Nothing invents silence.** `SynthesizedSpeech.audio` keeps `min_length=1`, so
+an unspoken turn reports `speech=None` rather than an empty buffer. On the wire a
+new boolean pairs with four now-nullable audio fields under an all-or-nothing
+validator, so audio is *absent* rather than empty and a client branches on a
+boolean instead of inferring from a length.
+
+**The audio endpoint is unchanged and still refuses without Deepgram** — there is
+no way to transcribe speech without it — and a credentialed deployment speaks
+exactly as before. `/health`'s `text_fallback_available` is now genuinely
+independent of the speech credential instead of being the same boolean under a
+second name.
+
+**Files modified:** `src/orion/voice/runtime.py`,
+`src/orion/interface/{app,schemas,service}.py`, `frontend/src/lib/{orion-api,
+orion-audio}.ts`, `frontend/src/hooks/use-orion-turn.ts`, plus four test files.
+**Files added:** `tests/voice/test_unspoken_turn.py`,
+`frontend/tests/orion-unspoken-turn.test.ts`. 13 files, 492 insertions. No UI
+component or stylesheet changed and no dependency was added.
+
+## 2026-08-29 — Mission 10 Phase 6: spatial composition, and the capability-intent fix
+
+*(Backfilled — see the 2026-08-29 note above. Commit `6aa6bc3`.)*
+
+**A closed-vocabulary parser made a supported question look unsupported.** Every
+table in `orion.orchestrator.intent` matches whole tokens, so `"u"` was not
+`"you"` and `"what can u do"` fell through to the unrecognised answer — a
+question the local response layer was built specifically to answer. The fix is a
+closed `_TOKEN_NORMALISATION` dictionary that folds a fixed set of chat spellings
+onto the words they stand for *before* any table is consulted: a dictionary
+lookup on a whole token, with no regex, no stemming, no edit distance and no
+inference. The deterministic, no-model, no-network security model of that module
+is unchanged.
+
+**The load-bearing property is asserted, not assumed.** A test proves no value in
+the normalisation table is a symbol alias, so folding shorthand onto real words
+can never resolve a symbol the raw text could not — `_SYMBOL_ALIASES` remains the
+only route to a `symbol`, and therefore to a vendor URL. Analysis still outranks
+every other intent in the same sentence, because the analyze branch still runs
+first.
+
+**The interface became one composition on one axis.** Two earlier arrangements
+failed in opposite directions: a vertical stack made the reply steal height from
+the core, and a left/right split fixed that but read as a two-column landing
+page. The reply now rises into the outer part of the core's own field, where
+there is nothing but hairline orbits and drifting particles — so ORION and what
+ORION says are one object rather than two stacked ones.
+
+**The core's size is a function of the viewport and of nothing else.** No
+selector keyed on a reply or an analysis resizes it. When a report is taller than
+the field, the core stays put and only the report moves. An earlier revision let
+the layout halve the core whenever a reply arrived, which inverted the hierarchy
+the whole mission is built around.
+
+**Three defects were found by rendering the page, not by reasoning about it.**
+`.voice::before` was an absolutely positioned pseudo-element inset *outward*
+inside a scroll container — overflow by construction, which gave the field both a
+horizontal and a vertical accent-coloured scrollbar across the composition; it is
+now a background, which cannot overflow. The absolutely positioned development
+corner sat underneath the command line at 1024×768, fixed with one reserved
+lane rather than a per-viewport rule. And the thinking-state lattice rotated
+about the corner of its own viewBox (`-50 -50 100 100`) rather than its centre,
+rendering a few hundred pixels clear of the core; `transform-box: fill-box`
+measures against the group's own bounding box instead.
+
+**Verified by driving a real browser, not by arithmetic.** Chrome over the
+DevTools Protocol at 1920×1080, 1440×900, 1366×768, 1280×800, 1024×768, 844×844,
+844×390 and mobile portrait: zero page scroll on both axes, no nested scroll
+regions on any listed viewport, core 422–560px on desktop, and identical geometry
+across idle, listening, thinking and speaking. `devIndicators: false` turns off
+Next's own dev badge, which is framework tooling that anchored itself over the
+application and read as part of the product.
+
+**Files modified:** `src/orion/orchestrator/{intent,response,schemas}.py`,
+`src/orion/interface/service.py`, `frontend/next.config.ts`,
+`frontend/src/components/{OrionInterface.tsx,OrionInterface.module.css,
+OrionCore.module.css,OrionAnalysisDeck.module.css}`,
+`frontend/src/hooks/use-orion-turn.ts`, plus three test files. **Files added:**
+`tests/orchestrator/test_local_response.py`. 14 files, 1452 insertions. No
+dependency was added.
+
+**A note on scope, recorded because it is unusual.** Five of the Python files in
+that commit — `interface/service.py`, `orchestrator/{response,schemas}.py` and
+two interface test files — were already modified in the working tree before the
+session that produced it, and carry the local-response layer
+(`IntentKind.GREETING`/`CAPABILITIES`, `LocalResponseProvider`, and its service
+wiring). They were committed together because they are prerequisites, not
+companions: `intent.py` returns `IntentKind.CAPABILITIES`, which that `schemas.py`
+defines, and `test_local_response.py` imports `LocalResponseProvider`, which that
+`response.py` defines. Splitting them would have produced a commit that does not
+build.
