@@ -425,10 +425,20 @@ class TestNothingLeaksBetweenRequests:
         assert "analysis" not in response.json()
 
     def test_two_analyses_are_independent(self, analysing: TestClient) -> None:
+        """MISSION 8 v2.2's IDENTITY DECISION, SEEN FROM THE WIRE.
+
+        Two requests over the same bars are two analyses, and the identifier
+        now says so: `build_analysis_id` mints it from the bar the analysis is
+        about *and* the instant it was made, so the second request is no longer
+        indistinguishable from the first. What the bars determine — the
+        structure read off them — is still identical, which is what this class
+        is actually about: nothing leaks between requests, and nothing is
+        recomputed differently either.
+        """
         first = analysing.post(TEXT_URL, json={"text": ANALYZE}).json()["analysis"]
         second = analysing.post(TEXT_URL, json={"text": ANALYZE}).json()["analysis"]
 
-        assert first["analysis_id"] == second["analysis_id"]
+        assert first["analysis_id"] != second["analysis_id"]
         assert first["structure"] == second["structure"]
 
 

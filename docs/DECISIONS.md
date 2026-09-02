@@ -4897,3 +4897,162 @@ computed observations and registry-authored interpretations, six unevaluated
 concepts with reasons, and a thesis with its canonical summary — while the same
 payload contains no 64-character fingerprint and no vendor name, and the turn
 writes zero bytes to an isolated working directory.
+
+## 2026-09-02 — Mission 8 v2.2: `analysis_id` names an analysis, the thesis is persisted, and reflection reads it back
+
+**THIS ENTRY SUPERSEDES v2.1's PHASE B REFUSAL.** That entry refused to persist
+a `MarketThesis` and named the two things that would unblock it: "a stable
+identity for a thesis within the decision chain that does not point *at* the
+decision", and "a home for the `MarketThesis` *schema* that both `orion.paper`
+and `orion.memory` may already see". Both now exist, so the record is written.
+Nothing in the earlier entry was edited; the refusal was correct for what
+existed when it was made, and this is what changed underneath it.
+
+**BLOCKER 1 — `analysis_id` NOW NAMES AN ANALYSIS, NOT A BAR, AND THAT IS THE
+CENTRAL DECISION OF THIS MILESTONE.** `build_analysis_id` minted
+`analysis-{symbol}-{timeframe}-{as_of}`, deriving the id from the evidence's
+last bar rather than the wall clock. v2.1 demonstrated the cost: a cron at :05
+and again at :35 produces two proposals, two verdicts and two theses under one
+identifier, so a record found by that key cannot say which chain it belongs to.
+The id now also carries `analyzed_at` — the same `now` already stamped on
+`ProposedDecision.decided_at`, `RiskVerdict.reviewed_at` and
+`MarketThesis.formed_at` — so one id covers exactly one chain.
+
+**The alternatives were considered and rejected for reasons, not by taste.**
+`uuid4()` was refused for the third time in this codebase: an identifier that
+changes on every call makes a journaled record unreproducible from its own
+inputs, and `run_backtest` and this module both derive theirs deliberately.
+Putting a `decision_fingerprint` on the thesis was refused again, and for the
+reason v2.1 gave — it would couple advisory evidence to the authority that
+reviewed it, in the one direction that must stay closed. **Folding
+`evidence_fingerprint` into the id was refused too, and this is the subtler
+one**: the fingerprint is the *market-evidence* identity, it is content-
+addressed, and it is what proves a finding describes the same bars a proposal
+was reasoned from. Two analyses of one bar still share it — they looked at
+identical bytes, which is true and must stay expressible. An id that carried
+both would give one name to two different questions ("which market state" and
+"which run over it"), and the second is the one a journal lookup asks. So the
+two identities stay separate and each keeps its own meaning.
+
+**What was given up is stated rather than glossed.** The old docstring promised
+that "re-asking the same question before a new bar closes yields the same id".
+That promise is gone on purpose: re-asking *is* a second analysis, and it now
+says so. Determinism is unchanged — every component is still an input the caller
+already holds, so the same bar analysed at the same instant yields the same id,
+and `test_is_deterministic` passes untouched. A collision now requires two
+analyses of one bar at the identical microsecond.
+
+**THAT RESIDUAL COLLISION IS WHY NOTHING FAIL-CLOSED WAS RELAXED.** It would
+have been tempting to treat uniqueness as guaranteed and simplify the readers.
+Instead: the `market_thesis.analysis_id` column stays **not unique**, the list
+methods still return tuples, and `orion.reflection._find_thesis` still raises on
+more than one match. The journal is append-only and holds rows minted under the
+older rule — a UNIQUE constraint would make an existing database fail to *open*
+rather than fail closed on *read*, which is a worse trade for an audit store.
+Uniqueness removes the ordinary ambiguity; it does not replace the check that
+catches the extraordinary one.
+
+**AND THE AMBIGUITY IS NEVER RESOLVED BY DROPPING DATA.** Returning `None` when
+two theses share an id was rejected explicitly: it would hide that specialist
+evidence exists, and quietly picking one would attach a reading to a trade it
+may not describe. The trade lands in `ReflectionBatch.unreflectable_fingerprints`
+— *named*, never silently omitted — and every other trade in the batch still
+reflects, which is the contract a missing verdict already has.
+`_find_opening_fee` refuses to guess between duplicate fills for the same
+reason.
+
+**BLOCKER 2 — THE SCHEMA MOVED, THE WALL DID NOT.** `orion.thesis` is a
+schema-only package importing `orion.analysis.structure`, `orion.data.models`
+and `orion.provenance` and nothing else — no analyst, engine, store, provider or
+orchestrator. It exists because `orion.paper` journals a thesis, `orion.memory`
+stores one and `orion.reflection` reads one back, and all three are forbidden to
+import `orion.analysts`; that ban is the single mechanism keeping specialist
+output away from every decision path, so the schema moved rather than the wall.
+`orion.analysts.synthesis` remains the only thing that *builds* a thesis,
+exactly as `orion.risk.guardian` is the only thing that builds a `RiskVerdict`
+while `orion.risk.schemas` holds its shape. The vocabulary enums moved with it
+and are re-exported from their original modules, so every existing import path
+still resolves and the JSON schema the Macro Analyst sends to Claude is
+byte-identical.
+
+**THE WRITER IS THE ONE THAT OWNS THE ORDERING, AND IT IS PROVABLY BLIND.**
+`orion.paper.session._persist` writes the thesis, so Mission 5's Finding A
+survives intact: the account is saved first, then the journal, and a failed save
+journals nothing at all. The thesis goes in **first** of the chain because it
+references nothing, so no prefix of an interrupted write can leave a stored
+record pointing at a fingerprint the journal does not hold. Mission 5's Finding
+B is intact too — still one production writer, and no second one in `orion.cli`.
+**`orion.paper.session` may hold a `MarketThesis` and may not look inside one**:
+`test_the_thesis_is_carried_and_never_read` walks that module's AST and fails on
+any attribute access into the value, spelled `thesis.anything` or
+`chain.thesis.anything`, and also asserts the name is really there so the
+guarantee cannot become vacuous. The module docstring has claimed that test
+since the code was written; until now it did not exist.
+
+**REFLECTION RECOVERS IT BY THE SIBLING KEY AND CONCLUDES NOTHING FROM IT.**
+`TradeReflection.thesis` is optional enrichment in exactly the sense
+`opening_fee` is: `reflect_on_closed_position` computes every
+prediction-versus-outcome fact from the decision, the verdict and the closed
+position, then attaches the thesis found under the verdict's own `analysis_id`.
+A test serialises a reflection with and without one and asserts every other
+field is identical. A trade opened before this existed reflects perfectly well
+without one, permanently.
+
+**THE THESIS REACHES A READER, WHICH IS THE POINT OF STORING IT.** `orion
+reflect` prints the alignment, the technical bias and condition, the macro
+condition when there is one, each agreement and conflict, and the thesis's own
+canonical `summary` — between the prediction and the outcome, with no line drawn
+between them. Every string is the record's own: `MarketThesis` validates that
+`summary` is the canonical sentence for its alignment and that each
+`ThesisPoint.detail` is the committed one, so the renderer authors no market
+commentary, the same discipline `render_specialists` follows. Absence is a row
+of its own (`no thesis was journaled for this trade`) rather than a blank a
+reader could mistake for "the specialists had no opinion". **`orion.cli` still
+does not import `orion.thesis`** — it reads fields off the `TradeReflection` it
+already holds, the same way it reads `report.thesis.thesis` — so the package's
+importer set is unchanged at exactly five.
+
+**THE REPORT NOW VALIDATES THE THIRD MEMBER OF THE CHAIN.** `AnalysisReport`
+checked `decision.analysis_id` and `risk.verdict.analysis_id` against its own
+and did not check the thesis. It does now. A thesis points at nothing, so that
+id is the only thing tying it to the analysis it was formed for, and `orion.cli`
+takes it straight off the report and hands it to the journal: an unchecked
+mismatch would file advisory evidence that is either invisible to reflection or
+findable from a trade it was never formed beside.
+
+**NOTHING ABOUT THE RISK GUARDIAN'S AUTHORITY MOVED.** `orion.decision` and
+`orion.risk` still cannot import `orion.thesis` or `orion.analysts` — asserted
+positively by name, not merely by absence. The thesis is still computed *after*
+the decision and the verdict exist, still has no field capable of expressing an
+action, direction-to-trade, quantity, entry, stop, target or approval, and is
+still journaled only behind an APPROVED verdict that produced a fill: a veto
+writes no chain and therefore no thesis, because advisory evidence is not a
+reason to record a trade that never happened. Journal idempotency is unchanged
+and now exercised for the seventh record through the real cycle — replaying an
+identical thesis returns the same fingerprint and stores one row.
+
+**Deliberately not in this milestone:** the six other Mission 8 roles; the News
+Analyst (still blocked on a data source); any HTTP or frontend surface for the
+reflected thesis — `orion.interface` is byte-identical and no frontend file was
+touched; any reflection endpoint at all; multi-timeframe fetching; any UNIQUE
+constraint or migration on the journal; any judgement, score or aggregate over a
+thesis and an outcome; telemetry; and anything resembling live or broker
+execution. No dependency was added.
+
+**Files changed.** `src/orion/orchestrator/analysis.py` (the id, and its call
+site), `src/orion/orchestrator/schemas.py` (the report validator),
+`src/orion/cli.py` (`_thesis_rows`, `NO_THESIS_RECORDED`, `render_reflections`),
+`src/orion/memory/journal.py` and `src/orion/memory/schema.py` (why the key is
+not unique), `src/orion/reflection/analysis.py` and `src/orion/thesis/schemas.py`
+(why the refusal stays, and what the two identities now mean), `README.md`.
+Tests: `tests/paper/test_session.py` (the AST guarantee, nine persistence
+tests, `record_thesis` on the recording double), `tests/paper/conftest.py` and
+`tests/reflection/conftest.py` (an `analysis_id` and theses in the builders),
+`tests/reflection/test_analysis.py` (six), `tests/reflection/test_batch.py`
+(three), `tests/orchestrator/test_analysis.py` (the identity rule, restated as
+three tests), `tests/orchestrator/test_schemas.py` (two),
+`tests/test_cli_reflect.py` (seven, plus a thesis through `seed_history`),
+`tests/thesis/builders.py` and `tests/memory/test_journal_thesis.py` (the new id
+shape, and why the store still tolerates a collision). No frontend file, no
+`orion.interface` file, no `orion.analysts` file, no `orion.paper`/`orion.risk`/
+`orion.decision` source file and no dependency manifest was touched.

@@ -45,6 +45,45 @@ so and exits non-zero. **It never places an order**, and it writes nothing to di
 paper account is opened, so the risk panel honestly reports `no_portfolio_store`.
 `orion --help` lists the commands.
 
+## The specialists and the thesis (Mission 8)
+
+Every analysis also runs the **Technical Analyst** — deterministic computation
+over the bars the analysis already fetched, no credential, no second request,
+no model call — and, when a calendar provider and an analyst are wired, the
+**Macro Analyst**. Their two readings are combined into a **market thesis**,
+which compares how *eventful* each domain is rather than fusing them into a
+direction: ORION has run no study that would justify turning "tightening
+pressure" into "bullish for gold", so it does not pretend to have one.
+
+The thesis is **advisory and has no authority**. It is computed *after* the
+proposal and the Risk Guardian's verdict already exist, it has no field that
+can express an action, size, entry, stop, target or approval, and neither
+`orion.decision` nor `orion.risk` can import it. `orion analyze` prints it;
+nothing acts on it.
+
+### Where it goes
+
+```
+analysis  ──▶  analysis_id  ──▶  decision ──▶ verdict ──▶ paper cycle ──▶ journal
+                    │                                                       ▲
+                    └────────────────▶  MarketThesis  ─────────────────────┘
+```
+
+`analysis_id` identifies **one analysis** — it is derived from the symbol, the
+timeframe, the last bar's timestamp *and* the instant of the analysis, so two
+runs over the same bar are two chains with two ids. It is stamped on the
+proposal, the verdict and the thesis alike, and the thesis carries no reference
+back to either of the other two — that is what lets it be found later without
+ever pointing at the authority that reviewed it. "Which bars was this reasoned
+from" is a different question with a different answer: the content-addressed
+`evidence_fingerprint`, which two analyses of the same bar do share.
+
+`orion paper SYMBOL` journals the thesis alongside the chain that authorised a
+simulated trade, and `orion reflect SYMBOL` reads it back for each closed
+position — printing what the specialists were reading between what ORION
+predicted and what actually happened, and drawing no conclusion from the pair.
+A trade whose analysis recorded no thesis says so rather than leaving a gap.
+
 ## Development
 
 ```bash
@@ -139,10 +178,15 @@ src/orion/
     data/             # market data provider abstraction + Twelve Data implementation + validation
     analysis/         # deterministic indicators and market structure (evidence, not decisions)
     reasoning/        # AI reasoning provider abstraction + Claude implementation + structured schemas
+    analysts/         # Mission 8 - the Technical and Macro Analysts, and the synthesis seam
+    thesis/           # Mission 8 - the MarketThesis schema, shared by paper/memory/reflection
     risk/             # independent deterministic Risk Guardian (can veto the AI's proposal)
+    decision/         # the Decision Engine: reasoning + evidence -> a ProposedDecision
+    paper/            # Mission 4 - the simulated account, execution and the forward cycle
+    reflection/       # Mission 5 - what was predicted, beside what happened. No score.
     memory/           # append-only SQLite decision journal
     orchestrator/     # Mission 10 Phase 5.1 - wires the above into one auditable analysis
-    cli.py            # `orion analyze <symbol>` - the console entrypoint
+    cli.py            # `orion analyze|account|paper|reflect` - the console entrypoint
 
     interface/        # Mission 10 Phase 2 - localhost HTTP adapter over the voice runtime
     voice/            # Mission 9 - STT/TTS providers, audio I/O, the voice state machine

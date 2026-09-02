@@ -340,4 +340,17 @@ class AnalysisReport(BaseModel):
                 f"risk verdict analysis_id ({self.risk.verdict.analysis_id!r}) does not "
                 f"match report analysis_id ({self.analysis_id!r})"
             )
+        # The third member of the chain, checked like the other two. A thesis is
+        # advisory and points at nothing, so `analysis_id` is the *only* thing
+        # tying it to the analysis it was formed for -- which is exactly why a
+        # mismatch cannot be allowed to leave this function: `orion.cli` reads
+        # the thesis off this report and hands it to the journal, and
+        # `orion.reflection` finds it again by this key alone. An unchecked
+        # mismatch would journal advisory evidence that is either invisible to
+        # reflection or, worse, findable from a trade it was never formed for.
+        if self.thesis.thesis is not None and self.thesis.thesis.analysis_id != self.analysis_id:
+            raise ValueError(
+                f"thesis analysis_id ({self.thesis.thesis.analysis_id!r}) does not match "
+                f"report analysis_id ({self.analysis_id!r})"
+            )
         return self

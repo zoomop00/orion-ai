@@ -122,9 +122,13 @@ market_thesis_table = Table(
     # analysis and stamped identically on the decision, the verdict and the
     # thesis, so this column is what lets a journaled verdict find the thesis
     # formed for the same analysis -- without the thesis ever referencing the
-    # proposal. Indexed and deliberately NOT unique: `list_verdicts_by_analysis_
-    # id` already returns a tuple for exactly the same reason, because one
-    # analysis id can legitimately cover more than one record.
+    # proposal. Indexed and deliberately NOT unique, even though Mission 8
+    # v2.2 made `orion.orchestrator.analysis.build_analysis_id` mint one id per
+    # analysis: this table is append-only and holds rows written under the
+    # older rule, a UNIQUE constraint would make an existing database fail to
+    # open rather than fail closed on read, and enforcing the minter's promise
+    # in the schema would turn a duplicate into an unrecoverable write error
+    # instead of the ambiguity `orion.reflection` reports honestly.
     Column("analysis_id", String, nullable=False, index=True),
     Column("symbol", String, nullable=False, index=True),
     Column("formed_at", String, nullable=False, index=True),

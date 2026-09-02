@@ -52,9 +52,7 @@ class TestItRoundTrips:
         assert stored.macro_policy_pressure is thesis.macro_policy_pressure
         assert stored.agreements == thesis.agreements
 
-    def test_an_unknown_fingerprint_reads_as_absent(
-        self, journal: SqliteDecisionJournal
-    ) -> None:
+    def test_an_unknown_fingerprint_reads_as_absent(self, journal: SqliteDecisionJournal) -> None:
         assert journal.get_thesis("f" * 64) is None
 
     def test_the_fingerprint_is_the_shared_hashing_mechanism(
@@ -90,9 +88,7 @@ class TestReplayIsSafe:
         self, engine: Engine, journal: SqliteDecisionJournal
     ) -> None:
         journal.record_thesis(build_thesis(), recorded_at=RECORDED_AT)
-        journal.record_thesis(
-            build_thesis(bias=StructureBias.BEARISH), recorded_at=RECORDED_AT
-        )
+        journal.record_thesis(build_thesis(bias=StructureBias.BEARISH), recorded_at=RECORDED_AT)
 
         with engine.begin() as connection:
             rows = list(connection.execute(market_thesis_table.select()))
@@ -152,22 +148,24 @@ class TestTheAnalysisIdIsASiblingKey:
         assert "analysis_id" in fields
         assert not {f for f in fields if "decision" in f or "verdict" in f or "fill" in f}
 
-    def test_an_unknown_analysis_id_returns_nothing(
-        self, journal: SqliteDecisionJournal
-    ) -> None:
+    def test_an_unknown_analysis_id_returns_nothing(self, journal: SqliteDecisionJournal) -> None:
         journal.record_thesis(build_thesis(), recorded_at=RECORDED_AT)
 
         assert journal.list_theses_by_analysis_id("analysis-nothing") == ()
 
-    def test_two_theses_can_share_one_analysis_id(
-        self, journal: SqliteDecisionJournal
-    ) -> None:
-        """NOT A DEFECT, AND THE REASON THE METHOD RETURNS A TUPLE.
-        `analysis_id` is derived from the symbol, the timeframe and the last
-        bar's timestamp, so two analyses inside one bar share it and each can
-        form its own thesis at a different `formed_at`.
+    def test_two_theses_can_share_one_analysis_id(self, journal: SqliteDecisionJournal) -> None:
+        """THE STORE DOES NOT ENFORCE WHAT THE MINTER PROMISES, AND THAT IS
+        WHY THE METHOD RETURNS A TUPLE.
+
+        Mission 8 v2.2 made `orion.orchestrator.analysis.build_analysis_id`
+        name one analysis rather than one bar, so this build no longer *writes*
+        a collision. It must still be able to *read* one: this journal is
+        append-only and holds rows minted under the older rule, and nothing
+        stops another caller from choosing its own id. A UNIQUE constraint here
+        would turn those permanent rows into a database that fails to open.
         `list_verdicts_by_analysis_id` and `list_decisions_by_analysis_id`
-        already behave this way for the same reason.
+        behave this way for the same reason, and `orion.reflection` is where
+        the ambiguity is refused rather than guessed at.
         """
         first = build_thesis(formed_at=THESIS_TIME)
         second = build_thesis(formed_at=THESIS_TIME + timedelta(minutes=30))
@@ -179,9 +177,7 @@ class TestTheAnalysisIdIsASiblingKey:
         found = journal.list_theses_by_analysis_id(ANALYSIS_ID)
         assert set(found) == {first, second}
 
-    def test_theses_come_back_oldest_recorded_first(
-        self, journal: SqliteDecisionJournal
-    ) -> None:
+    def test_theses_come_back_oldest_recorded_first(self, journal: SqliteDecisionJournal) -> None:
         first = build_thesis(formed_at=THESIS_TIME)
         second = build_thesis(formed_at=THESIS_TIME + timedelta(minutes=30))
         journal.record_thesis(first, recorded_at=RECORDED_AT)
@@ -191,7 +187,9 @@ class TestTheAnalysisIdIsASiblingKey:
 
     def test_another_analysis_sees_none_of_it(self, journal: SqliteDecisionJournal) -> None:
         journal.record_thesis(build_thesis(), recorded_at=RECORDED_AT)
-        other = build_thesis(analysis_id="analysis-XAUUSD-4h-2026-08-31T08:00:00+00:00")
+        other = build_thesis(
+            analysis_id="analysis-XAUUSD-4h-2026-08-31T08:00:00+00:00-2026-08-31T12:00:00+00:00"
+        )
         journal.record_thesis(other, recorded_at=RECORDED_AT)
 
         assert journal.list_theses_by_analysis_id(ANALYSIS_ID) == (build_thesis(),)

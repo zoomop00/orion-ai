@@ -14,7 +14,7 @@ closed_positions.py`.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -27,6 +27,7 @@ from orion.paper.execution import execute, resolve_stop_take_profit
 from orion.paper.policy import PaperExecutionPolicy
 from orion.paper.schemas import ClosedPosition, Fill
 from orion.risk.schemas import RiskVerdict
+from orion.thesis.schemas import MarketThesis
 from tests.memory.conftest import BASE_TIME, build_approved_trade, build_evidence
 
 __all__ = [
@@ -78,14 +79,27 @@ def open_close_and_journal(
     journal_decision: bool = True,
     journal_verdict: bool = True,
     journal_fill: bool = True,
+    analysis_id: str = "test-analysis-1",
+    theses: Sequence[MarketThesis] = (),
 ) -> JournaledTrade:
     """Run a real BUY -> APPROVED -> filled -> closed cycle and journal it,
     returning every fingerprint a test needs. The `journal_*` flags let a
     test deliberately omit one link (to exercise `reflect_on_closed_
     position`'s fail-closed behavior on an incomplete chain) without
-    hand-constructing anything."""
+    hand-constructing anything.
+
+    `theses` is a sequence rather than one optional record, deliberately: the
+    ambiguity `_find_thesis` refuses to resolve is *two* theses under one
+    `analysis_id`, and a helper that could only ever write one would make that
+    case unreachable from a test. Nothing is defaulted in -- a trade with no
+    thesis is the state every trade opened before Mission 8 v2.2 is
+    permanently in, so it stays the default here too."""
     trade = build_approved_trade(
-        cash=cash, entry_price=entry_price, stop_loss=stop_loss, take_profit=take_profit
+        cash=cash,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        analysis_id=analysis_id,
     )
     result = execute(
         trade.proposal,
@@ -105,6 +119,10 @@ def open_close_and_journal(
     )
     assert closed is not None
 
+    for index, thesis in enumerate(theses):
+        # Distinct `recorded_at` values so `list_theses_by_analysis_id`'s
+        # oldest-recorded-first ordering is exercised rather than assumed.
+        journal.record_thesis(thesis, recorded_at=RECORDED_AT + timedelta(minutes=index))
     if journal_evidence:
         journal.record_evidence(trade.evidence, recorded_at=RECORDED_AT)
     if journal_decision:

@@ -61,8 +61,10 @@ from .test_technical_schemas import _TRADE_INSTRUCTION_WORDS, finding
 
 NOW = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
 #: The id the orchestrator mints per analysis and stamps on the decision, the
-#: verdict and the thesis alike -- a sibling key, never a back-reference.
-ANALYSIS_ID = "analysis-XAUUSD-1h-2026-08-30T11:00:00+00:00"
+#: verdict and the thesis alike -- a sibling key, never a back-reference. Since
+#: Mission 8 v2.2 it names the analysis rather than the bar, so it carries the
+#: instant of the analysis (`NOW`) as well as the bar it was about.
+ANALYSIS_ID = "analysis-XAUUSD-1h-2026-08-30T11:00:00+00:00-2026-08-30T12:00:00+00:00"
 FINGERPRINT = "c" * 64
 MACRO_FINGERPRINT = "d" * 64
 EVENT_ID = "e" * 64

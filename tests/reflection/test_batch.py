@@ -24,7 +24,9 @@ from orion.memory.sqlite_journal import SqliteDecisionJournal
 from orion.provenance import canonical_hash
 from orion.reflection.analysis import ReflectionError, reflect_on_recent_closed_positions
 from orion.reflection.schemas import ReflectionBatch, TradeReflection
+from orion.thesis.schemas import StructureBias
 from tests.reflection.conftest import BASE_TIME, open_close_and_journal
+from tests.thesis.builders import build_thesis
 
 NOW = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
 SYMBOL = "XAUUSD"
@@ -268,6 +270,107 @@ def test_a_non_positive_limit_is_refused(journal: SqliteDecisionJournal, limit: 
     everything rather than nothing. Refused instead of interpreted."""
     with pytest.raises(ReflectionError, match="at least 1"):
         reflect_on_recent_closed_positions(journal, SYMBOL, limit=limit, now=NOW)
+
+
+# ------------------------------------------------- the specialists' reading
+
+
+def test_each_trade_gets_its_own_analysis_thesis_and_no_other(
+    journal: SqliteDecisionJournal,
+) -> None:
+    """ONE ANALYSIS, ONE THESIS, AND THE BATCH KEEPS THEM APART.
+
+    Mission 8 v2.2 made `analysis_id` name a single analysis, so two trades in
+    one journal carry two ids and each reflection must come back with the
+    thesis filed under its own. A batch that cross-attached them would put one
+    trade's reasoning beside another's outcome, which is worse than reporting
+    none at all.
+    """
+    first_thesis = build_thesis(analysis_id="analysis-first", bias=StructureBias.BULLISH)
+    second_thesis = build_thesis(analysis_id="analysis-second", bias=StructureBias.BEARISH)
+    open_close_and_journal(
+        journal, opened_at=BASE_TIME, analysis_id="analysis-first", theses=[first_thesis]
+    )
+    open_close_and_journal(
+        journal,
+        opened_at=BASE_TIME + timedelta(hours=2),
+        closed_at=BASE_TIME + timedelta(hours=3),
+        entry_price=1900.0,
+        stop_loss=1850.0,
+        take_profit=2000.0,
+        analysis_id="analysis-second",
+        theses=[second_thesis],
+    )
+
+    batch = reflect_on_recent_closed_positions(journal, SYMBOL, limit=10, now=NOW)
+
+    assert [r.thesis for r in batch.reflections] == [first_thesis, second_thesis]
+
+
+def test_a_trade_without_a_thesis_reflects_beside_one_that_has_it(
+    journal: SqliteDecisionJournal,
+) -> None:
+    """A journal that predates v2.2 in part is the ordinary case for anyone
+    who has been paper trading already: some trades have a thesis, some never
+    will, and both reflect."""
+    thesis = build_thesis(analysis_id="analysis-second")
+    open_close_and_journal(journal, opened_at=BASE_TIME, analysis_id="analysis-first")
+    open_close_and_journal(
+        journal,
+        opened_at=BASE_TIME + timedelta(hours=2),
+        closed_at=BASE_TIME + timedelta(hours=3),
+        entry_price=1900.0,
+        stop_loss=1850.0,
+        take_profit=2000.0,
+        analysis_id="analysis-second",
+        theses=[thesis],
+    )
+
+    batch = reflect_on_recent_closed_positions(journal, SYMBOL, limit=10, now=NOW)
+
+    assert [r.thesis for r in batch.reflections] == [None, thesis]
+    assert batch.unreflectable_fingerprints == ()
+
+
+def test_an_ambiguous_thesis_is_named_not_dropped_and_hides_nothing(
+    journal: SqliteDecisionJournal,
+) -> None:
+    """FAIL CLOSED, AND ONLY FOR THE TRADE THAT IS ACTUALLY AMBIGUOUS.
+
+    Two theses under one `analysis_id` make that trade unreflectable -- the
+    batch refuses to guess which reading belongs to it. It is *named* in
+    `unreflectable_fingerprints` rather than silently omitted, and every other
+    trade still reflects, which is the same contract a missing verdict already
+    has.
+    """
+    ambiguous = open_close_and_journal(
+        journal,
+        opened_at=BASE_TIME,
+        analysis_id="analysis-ambiguous",
+        theses=[
+            build_thesis(analysis_id="analysis-ambiguous"),
+            build_thesis(analysis_id="analysis-ambiguous", bias=StructureBias.BEARISH),
+        ],
+    )
+    good = open_close_and_journal(
+        journal,
+        opened_at=BASE_TIME + timedelta(hours=2),
+        closed_at=BASE_TIME + timedelta(hours=3),
+        entry_price=1900.0,
+        stop_loss=1850.0,
+        take_profit=2000.0,
+        analysis_id="analysis-clean",
+    )
+
+    batch = reflect_on_recent_closed_positions(journal, SYMBOL, limit=10, now=NOW)
+
+    assert [r.closed_position_fingerprint for r in batch.reflections] == [
+        good.closed_position_fingerprint
+    ]
+    assert batch.unreflectable_fingerprints == (ambiguous.closed_position_fingerprint,)
+    assert batch.total_closed_positions == 2
+    examined = len(batch.reflections) + len(batch.unreflectable_fingerprints)
+    assert examined == batch.total_closed_positions
 
 
 # ------------------------------------------------------ still only the facts

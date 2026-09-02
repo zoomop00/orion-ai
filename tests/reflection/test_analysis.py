@@ -17,6 +17,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import Engine
 
+from orion.memory.engine import create_memory_engine
 from orion.memory.journal import DecisionJournalIntegrityError
 from orion.memory.schema import closed_position_table
 from orion.memory.sqlite_journal import SqliteDecisionJournal
@@ -27,6 +28,7 @@ from orion.provenance import canonical_hash
 from orion.reasoning.schemas import Action, Direction, RiskLevel
 from orion.reflection.analysis import ReflectionError, reflect_on_closed_position
 from orion.reflection.schemas import TradeReflection
+from orion.thesis.schemas import StructureBias
 from tests.memory.conftest import build_evidence
 from tests.paper.conftest import build_approved_trade
 from tests.reflection.conftest import (
@@ -34,6 +36,11 @@ from tests.reflection.conftest import (
     RECORDED_AT,
     open_close_and_journal,
 )
+from tests.thesis.builders import build_thesis
+
+#: The id the default trade's chain carries, so a thesis filed under it is
+#: findable from that trade's verdict -- and only from that one.
+ANALYSIS_ID = "test-analysis-1"
 
 # --- positive path ---
 
@@ -275,6 +282,141 @@ def test_reflect_ignores_a_fill_with_a_different_filled_at(
         journal, trade.closed_position_fingerprint, now=BASE_TIME + timedelta(hours=2)
     )
     assert reflection.opening_fee == trade.fill.fee
+
+
+# --- the MarketThesis: found by the sibling key, absent, or ambiguous ---
+
+
+def test_reflect_recovers_the_thesis_journaled_for_the_same_analysis(
+    journal: SqliteDecisionJournal,
+) -> None:
+    """MISSION 8 v2.2's WHOLE POINT, END TO END. A thesis is journaled under an
+    `analysis_id`; the trade's verdict carries the same one; reflection returns
+    the thesis whole -- every field, macro half included, not a summary of it.
+    """
+    thesis = build_thesis(analysis_id=ANALYSIS_ID, with_macro=True)
+    trade = open_close_and_journal(journal, analysis_id=ANALYSIS_ID, theses=[thesis])
+
+    reflection = reflect_on_closed_position(
+        journal, trade.closed_position_fingerprint, now=BASE_TIME + timedelta(hours=2)
+    )
+
+    assert reflection.thesis == thesis
+    assert reflection.thesis is not None
+    assert reflection.thesis.macro_provenance == thesis.macro_provenance
+    assert reflection.thesis.agreements == thesis.agreements
+
+
+def test_the_thesis_is_found_by_the_sibling_key_and_points_at_nothing(
+    journal: SqliteDecisionJournal,
+) -> None:
+    """FOUND WITHOUT A BACK-REFERENCE, WHICH IS THE ARCHITECTURE, NOT A DETAIL.
+
+    The thesis is recovered from a trade even though it holds no fingerprint of
+    the verdict, the decision or the closed position -- only the `analysis_id`
+    the verdict independently carries. That is what keeps the advisory record
+    from pointing at the authority that reviewed it.
+    """
+    thesis = build_thesis(analysis_id=ANALYSIS_ID)
+    trade = open_close_and_journal(journal, analysis_id=ANALYSIS_ID, theses=[thesis])
+
+    reflection = reflect_on_closed_position(
+        journal, trade.closed_position_fingerprint, now=BASE_TIME + timedelta(hours=2)
+    )
+
+    assert reflection.thesis is not None
+    assert reflection.thesis.analysis_id == trade.verdict.analysis_id
+    serialised = reflection.thesis.model_dump_json()
+    for fingerprint in (
+        trade.closed_position.opened_by_verdict_fingerprint,
+        trade.verdict.decision_ref.content_hash,
+        trade.closed_position_fingerprint,
+    ):
+        assert fingerprint not in serialised
+
+
+def test_a_trade_with_no_journaled_thesis_reflects_without_one(
+    journal: SqliteDecisionJournal,
+) -> None:
+    """The permanent state of every trade opened before v2.2, and of any
+    analysis where neither specialist had anything to say. Optional
+    enrichment: absent, not an error."""
+    trade = open_close_and_journal(journal)
+
+    reflection = reflect_on_closed_position(
+        journal, trade.closed_position_fingerprint, now=BASE_TIME + timedelta(hours=2)
+    )
+
+    assert reflection.thesis is None
+
+
+def test_a_thesis_from_another_analysis_is_never_attached(
+    journal: SqliteDecisionJournal,
+) -> None:
+    """The key is exact. A thesis in the same journal under a different
+    `analysis_id` belongs to a different analysis and must not be borrowed --
+    the failure mode that would attach one trade's reasoning to another."""
+    elsewhere = build_thesis(analysis_id="analysis-somewhere-else")
+    journal.record_thesis(elsewhere, recorded_at=BASE_TIME)
+    trade = open_close_and_journal(journal, analysis_id=ANALYSIS_ID)
+
+    reflection = reflect_on_closed_position(
+        journal, trade.closed_position_fingerprint, now=BASE_TIME + timedelta(hours=2)
+    )
+
+    assert reflection.thesis is None
+
+
+def test_two_theses_under_one_analysis_id_are_refused_not_guessed(
+    journal: SqliteDecisionJournal,
+) -> None:
+    """FAIL CLOSED, EXACTLY LIKE THE AMBIGUOUS FILL.
+
+    v2.2 made `analysis_id` name one analysis, so a journal this build wrote
+    should never hold two theses under one. A journal that does is older than
+    that change or was written by something else, and neither picking one nor
+    quietly reporting none is honest about a record whose entire purpose is to
+    say what ORION was looking at.
+    """
+    trade = open_close_and_journal(
+        journal,
+        analysis_id=ANALYSIS_ID,
+        theses=[
+            build_thesis(analysis_id=ANALYSIS_ID),
+            build_thesis(analysis_id=ANALYSIS_ID, bias=StructureBias.BEARISH),
+        ],
+    )
+
+    with pytest.raises(ReflectionError, match="cannot determine which one"):
+        reflect_on_closed_position(
+            journal, trade.closed_position_fingerprint, now=BASE_TIME + timedelta(hours=2)
+        )
+
+
+def test_the_thesis_changes_no_other_reflected_fact(journal: SqliteDecisionJournal) -> None:
+    """ENRICHMENT, NOT AN INPUT. Every prediction-versus-outcome fact is
+    computed from the decision, the verdict and the closed position; the thesis
+    is attached afterwards and nothing is derived from it. Asserted by
+    serialising both reflections and comparing everything except the thesis
+    itself."""
+    reflected_at = BASE_TIME + timedelta(hours=2)
+    without = reflect_on_closed_position(
+        journal, open_close_and_journal(journal).closed_position_fingerprint, now=reflected_at
+    )
+
+    other_engine = create_memory_engine(":memory:")
+    try:
+        other = SqliteDecisionJournal(other_engine)
+        trade = open_close_and_journal(other, theses=[build_thesis(analysis_id="test-analysis-1")])
+        with_thesis = reflect_on_closed_position(
+            other, trade.closed_position_fingerprint, now=reflected_at
+        )
+    finally:
+        other_engine.dispose()
+
+    assert with_thesis.thesis is not None
+    assert without.thesis is None
+    assert with_thesis.model_dump(exclude={"thesis"}) == without.model_dump(exclude={"thesis"})
 
 
 # --- TradeReflection is frozen: no mutation, no update/delete capability ---

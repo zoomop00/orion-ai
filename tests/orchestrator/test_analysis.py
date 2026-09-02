@@ -128,16 +128,55 @@ class TestTheHappyPath:
         )
         assert first == second
 
-    def test_the_analysis_id_is_derived_from_the_bar_not_the_wall_clock(
+    def test_the_analysis_id_names_the_analysis_not_the_bar(
         self, permissive_policy: RiskPolicy
     ) -> None:
+        """MISSION 8 v2.2's IDENTITY DECISION, ASSERTED WHERE IT IS MINTED.
+
+        Two analyses of the same bar are two analyses: two proposals, two
+        verdicts, two theses, and now two identifiers. Until v2.2 they shared
+        one, which is why a journaled `MarketThesis` could not say which chain
+        it belonged to. `evidence_fingerprint` is unchanged and still the
+        market-evidence identity — the same bars, so the same fingerprint —
+        which is the whole point of separating the two.
+        """
         early = analyse(policy=permissive_policy, now=NOW)
         later = analyse(policy=permissive_policy, now=NOW + timedelta(minutes=20))
 
-        # Same bar, same question, same identifier — no uuid4() anywhere.
-        assert early.analysis_id == later.analysis_id
-        assert early.analysis_id == build_analysis_id("XAUUSD", Timeframe.H1, LAST_BAR_TIME)
-        assert "XAUUSD" in early.analysis_id
+        assert early.analysis_id != later.analysis_id
+        assert early.evidence == later.evidence
+        assert early.decision.evidence_ref.content_hash == later.decision.evidence_ref.content_hash
+
+    def test_the_analysis_id_is_derived_from_its_inputs_not_from_uuid4(
+        self, permissive_policy: RiskPolicy
+    ) -> None:
+        """Still reproducible from what produced it: the same bar analysed at
+        the same instant yields the same id, so a journaled record can be
+        recomputed from its own inputs. That property is what ruled out
+        `uuid4()` in the first place and it did not change."""
+        report = analyse(policy=permissive_policy, now=NOW)
+
+        assert report.analysis_id == build_analysis_id("XAUUSD", Timeframe.H1, LAST_BAR_TIME, NOW)
+        assert "XAUUSD" in report.analysis_id
+        assert LAST_BAR_TIME.isoformat() in report.analysis_id
+        assert NOW.isoformat() in report.analysis_id
+
+    def test_every_member_of_the_chain_carries_the_same_analysis_id(
+        self, permissive_policy: RiskPolicy
+    ) -> None:
+        """THE SIBLING KEY, END TO END. The proposal, the verdict and the
+        thesis are stamped with one id and none of them references another —
+        that is what lets `orion.reflection` recover the thesis for a closed
+        trade from the verdict alone."""
+        report = analyse(
+            policy=permissive_policy, portfolio_store=FakePortfolioStore(make_portfolio())
+        )
+
+        assert report.risk.verdict is not None
+        assert report.thesis.thesis is not None
+        assert report.decision.analysis_id == report.analysis_id
+        assert report.risk.verdict.analysis_id == report.analysis_id
+        assert report.thesis.thesis.analysis_id == report.analysis_id
 
     def test_a_wait_proposal_is_a_complete_analysis_not_a_failure(
         self, permissive_policy: RiskPolicy

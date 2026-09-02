@@ -213,11 +213,20 @@ def _find_thesis(journal: DecisionJournal, verdict: RiskVerdict) -> MarketThesis
 
     Returns `None` when no thesis was recorded — the permanent state of every
     trade opened before this existed — and raises `ReflectionError` when more
-    than one shares the id. That is a real, reachable ambiguity rather than a
-    hypothetical: `analysis_id` is derived from the symbol, the timeframe and
-    the last bar's timestamp, so two analyses inside one bar share it, and each
-    can form its own thesis at a different `formed_at`. `_find_opening_fee`
-    refuses to guess between duplicates for the same reason and this does too.
+    than one shares the id.
+
+    THE AMBIGUITY IS NOW RARE, AND THAT IS EXACTLY WHY THE REFUSAL STAYS.
+    Mission 8 v2.2 made `analysis_id` name one analysis rather than one bar
+    (`orion.orchestrator.analysis.build_analysis_id`), so a fresh journal
+    written by this build should never present two. A journal that *does* is
+    then either older than that change or was written by something else — the
+    two cases where quietly returning one of them, or quietly returning `None`,
+    would attach the wrong specialist evidence to a real trade or hide that it
+    exists. Neither is a small enough lie to tell about a record whose whole
+    purpose is to say what ORION was looking at. `_find_opening_fee` refuses to
+    guess between duplicates for the same reason and this does too; the trade
+    lands in `ReflectionBatch.unreflectable_fingerprints`, named rather than
+    dropped.
     """
     candidates = journal.list_theses_by_analysis_id(verdict.analysis_id)
     if len(candidates) > 1:

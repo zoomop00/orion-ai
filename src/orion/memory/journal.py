@@ -202,14 +202,17 @@ class DecisionJournal(ABC):
     def list_theses_by_analysis_id(self, analysis_id: str) -> tuple[MarketThesis, ...]:
         """All MarketTheses recorded under `analysis_id`, oldest-recorded first.
 
-        A tuple, not `MarketThesis | None`, and for the established reason:
-        `analysis_id` is minted from the symbol, the timeframe and the last
-        bar's timestamp, so two analyses inside the same bar share one — and
-        each can legitimately form its own thesis at a different `formed_at`.
-        `list_verdicts_by_analysis_id` and `list_decisions_by_analysis_id`
-        return tuples for exactly this reason; nothing in this interface
-        assumes one record per analysis, and a caller that needs exactly one
-        must say what it does about more.
+        A tuple, not `MarketThesis | None`, and it stays one even though
+        Mission 8 v2.2 made the orchestrator's `analysis_id` name a single
+        analysis. THE JOURNAL DOES NOT ENFORCE WHAT THE MINTER PROMISES.
+        Rows written before that change carry ids minted from the bar alone
+        and can genuinely collide; nothing stops another caller from writing
+        its own id; and this store is append-only, so a collision that exists
+        is permanent and must remain readable. `list_verdicts_by_analysis_id`
+        and `list_decisions_by_analysis_id` return tuples for the same reason.
+        Nothing in this interface assumes one record per analysis, and a caller
+        that needs exactly one has to say what it does about more —
+        `orion.reflection` refuses to guess.
         """
         raise NotImplementedError
 

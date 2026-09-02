@@ -32,7 +32,11 @@ from orion.thesis.schemas import (
 )
 
 THESIS_TIME = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
-ANALYSIS_ID = "analysis-XAUUSD-1h-2026-08-31T11:00:00+00:00"
+#: Shaped exactly like `orion.orchestrator.analysis.build_analysis_id`'s output
+#: since Mission 8 v2.2: the bar the analysis was about *and* the instant it was
+#: made, so a test's fixture is the shape production actually mints rather than
+#: a shorter string that would never occur.
+ANALYSIS_ID = "analysis-XAUUSD-1h-2026-08-31T11:00:00+00:00-2026-08-31T12:00:00+00:00"
 EVIDENCE_FINGERPRINT = "a" * 64
 MACRO_FINGERPRINT = "b" * 64
 

@@ -141,6 +141,30 @@ class TestAnalysisReport:
         with pytest.raises(ValidationError):
             AnalysisReport.model_validate(payload)
 
+    def test_rejects_a_thesis_from_a_different_analysis(self, report) -> None:  # type: ignore[no-untyped-def]
+        """THE THIRD MEMBER OF THE CHAIN, CHECKED LIKE THE OTHER TWO.
+
+        A `MarketThesis` points at nothing, so `analysis_id` is the only thing
+        tying it to the analysis it was formed for. `orion.cli` reads it off
+        this report and hands it to the journal, and `orion.reflection` finds
+        it again by that key alone -- so a mismatch that left this validator
+        would journal advisory evidence that is either invisible to reflection
+        or findable from a trade it was never formed beside.
+        """
+        assert report.thesis.thesis is not None
+        payload = report.model_dump()
+        payload["thesis"]["thesis"]["analysis_id"] = "analysis-somewhere-else"
+        with pytest.raises(ValidationError, match="thesis analysis_id"):
+            AnalysisReport.model_validate(payload)
+
+    def test_accepts_a_report_that_formed_no_thesis(self, report) -> None:  # type: ignore[no-untyped-def]
+        """The absent thesis is a real state, not a mismatch: a report whose
+        specialists produced nothing carries `thesis=None` and validates."""
+        payload = report.model_dump()
+        payload["thesis"] = {"detail": "no thesis", "thesis": None}
+
+        assert AnalysisReport.model_validate(payload).thesis.thesis is None
+
     def test_is_frozen_and_closed(self, report) -> None:  # type: ignore[no-untyped-def]
         with pytest.raises(ValidationError):
             report.symbol = "EURUSD"

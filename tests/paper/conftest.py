@@ -57,15 +57,23 @@ def build_approved_trade(
     stop_loss: float = 2350.0,
     take_profit: float = 2500.0,
     cash: float = 100_000.0,
+    analysis_id: str = "test-analysis-1",
 ) -> ApprovedTrade:
     """A coherent, affordable trade proposal, reviewed through the real
     `decide()`/`review()` pipeline and asserted APPROVED -- the standard
-    starting point for `orion.paper.execution` tests."""
+    starting point for `orion.paper.execution` tests.
+
+    `analysis_id` is threaded through because Mission 8 v2.2 made it the key a
+    `MarketThesis` is found by: a test that journals one alongside a trade
+    needs the trade's own chain to carry the id it filed the thesis under, and
+    a test about two different analyses needs two different ids.
+    """
     evidence = build_evidence(last_price=entry_price)
     proposal = build_proposal(
         action=action,
         direction=direction,
         evidence=evidence,
+        analysis_id=analysis_id,
         stop_loss=stop_loss,
         take_profit=take_profit,
     )

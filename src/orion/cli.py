@@ -156,7 +156,7 @@ from orion.paper.schemas import CloseReason
 from orion.paper.session import CycleOutcome, CycleResult, JournalWriter, run_cycle
 from orion.paper.store import PortfolioRecord, PortfolioStore
 from orion.reflection.analysis import reflect_on_recent_closed_positions
-from orion.reflection.schemas import ReflectionBatch
+from orion.reflection.schemas import ReflectionBatch, TradeReflection
 from orion.risk.policy import RiskPolicy
 from orion.risk.portfolio import initial_portfolio_state
 
@@ -691,6 +691,50 @@ _EXIT_MATCH: dict[CloseReason, str] = {
     CloseReason.STOP_LOSS_HIT: "the predicted stop-loss",
 }
 
+#: Printed where the specialists' reading would go when the journal holds none
+#: for that trade -- every trade opened before Mission 8 v2.2, and any analysis
+#: where neither specialist had anything to say. Absence is stated, never left
+#: as a blank line a reader could mistake for "no opinion".
+NO_THESIS_RECORDED = "no thesis was journaled for this trade"
+
+
+def _thesis_rows(item: TradeReflection) -> tuple[tuple[str, str], ...]:
+    """The journaled specialists' reading for one trade, as label/value rows.
+
+    Takes the `TradeReflection` rather than the `MarketThesis` on purpose:
+    `orion.cli` deliberately never names that type, so it never imports
+    `orion.thesis` either, and `tests/thesis/test_import_hygiene.py` asserts
+    the package's importers are exactly the five that must name it. Reading
+    fields off an attribute of a report is how this module already handles
+    `report.thesis.thesis` in `render_specialists`.
+
+    Absence gets a row of its own. A trade opened before v2.2, or one whose
+    analysis formed no thesis, prints `NO_THESIS_RECORDED` -- the same
+    "absence is reported, never filled in" rule the Technical Analyst applies
+    to a concept it could not evaluate.
+    """
+    thesis = item.thesis
+    if thesis is None:
+        return (("specialists", NO_THESIS_RECORDED),)
+
+    reading = f"technical {thesis.technical_bias.value} ({thesis.technical_condition.value})"
+    if thesis.macro_condition is not None:
+        reading += f", macro {thesis.macro_condition.value}"
+    rows = [("specialists", thesis.alignment.value), ("reading", reading)]
+    for point in thesis.agreements + thesis.conflicts:
+        macro_reading = "" if point.macro_reading is None else f" vs macro {point.macro_reading}"
+        rows.append(
+            (
+                "agree" if point.agreed else "conflict",
+                f"{point.topic.value}: technical {point.technical_reading}{macro_reading}",
+            )
+        )
+    # Last of the thesis rows, and the analyst's own sentence: `MarketThesis`
+    # validates that `summary` is the canonical wording for its alignment, so
+    # this line is looked up rather than written, here as everywhere else.
+    rows.append(("thesis", thesis.summary))
+    return tuple(rows)
+
 
 def render_reflections(batch: ReflectionBatch) -> str:
     """A deterministic, terminal-shaped rendering of one `ReflectionBatch`.
@@ -704,6 +748,18 @@ def render_reflections(batch: ReflectionBatch) -> str:
     approval margin and the matched exit level are printed side by side because
     that is what tells a bad outcome apart from a bad decision -- the reading is
     the user's.
+
+    THE THESIS IS PRINTED BESIDE THE OUTCOME, AND NOTHING IS CONCLUDED FROM THE
+    PAIR. Mission 8 v2.2 journals the specialists' reading with the chain that
+    authorised a trade and `orion.reflection` recovers it by `analysis_id`;
+    without these lines it would be stored and never read, which is the state
+    v2.1 fixed for the analysis path and this fixes for the reflection one.
+    Every value comes off the `MarketThesis` itself -- its own enum values and
+    the canonical `summary` its schema validated -- so this renderer authors no
+    market commentary, exactly like `render_specialists`. It draws no line
+    between what the specialists saw and how the trade ended: a bullish thesis
+    before a loss is one fact printed beside another, and the reading is the
+    user's here too.
     """
     header = [
         ("closed trades", str(batch.total_closed_positions)),
@@ -731,6 +787,9 @@ def render_reflections(batch: ReflectionBatch) -> str:
                 f"{item.predicted_risk_reward:.2f} predicted against a "
                 f"{item.policy_min_risk_reward:.2f} minimum ({margin})",
             ),
+            # Between the prediction and the outcome, because that is what it
+            # is: what the specialists were reading when this trade was opened.
+            *_thesis_rows(item),
             ("exit matched", _EXIT_MATCH[item.close_reason]),
             ("entry / exit", f"{item.entry_price:.2f} / {item.exit_price:.2f}"),
             ("realised", f"{item.realized_pnl:.2f}"),

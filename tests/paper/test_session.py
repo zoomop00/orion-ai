@@ -46,6 +46,7 @@ from orion.risk.guardian import review
 from orion.risk.policy import KillSwitchState, RiskPolicy
 from orion.risk.portfolio import PortfolioState, initial_portfolio_state, mark_to_market
 from orion.risk.schemas import RiskOutcome, RiskVerdict, risk_verdict_fingerprint
+from orion.thesis.schemas import MarketThesis
 
 from ..orchestrator.conftest import (
     LAST_BAR_TIME,
@@ -54,6 +55,7 @@ from ..orchestrator.conftest import (
     make_bars,
     make_snapshot,
 )
+from ..thesis.builders import build_thesis
 
 SYMBOL = "XAUUSD"
 #: The four chain writes `_persist` makes before a fill, in the order it makes
@@ -151,6 +153,7 @@ class RecordingJournal:
         self.reasoning: list[ReasoningOutput] = []
         self.decisions: list[ProposedDecision] = []
         self.verdicts: list[RiskVerdict] = []
+        self.theses: list[MarketThesis] = []
         self.fills: list[Fill] = []
         self.closed: list[ClosedPosition] = []
         self.recorded_at: list[datetime] = []
@@ -160,6 +163,11 @@ class RecordingJournal:
         self.recorded_at.append(recorded_at)
         if self.fail or self.fail_on == method:
             raise RuntimeError("journal is down")
+
+    def record_thesis(self, thesis: MarketThesis, *, recorded_at: datetime) -> str:
+        self._enter("record_thesis", recorded_at)
+        self.theses.append(thesis)
+        return "thesis-fingerprint"
 
     def record_evidence(self, evidence: Evidence, *, recorded_at: datetime) -> str:
         self._enter("record_evidence", recorded_at)
@@ -223,8 +231,14 @@ def cycle(
     policy: RiskPolicy | None = None,
     verdict: RiskVerdict | None = None,
     use_verdict: bool = True,
+    thesis: MarketThesis | None = None,
 ):
-    """Run one cycle against real engines, with only the policy varied."""
+    """Run one cycle against real engines, with only the policy varied.
+
+    `thesis` defaults to `None` -- the shape every pre-Mission-8-v2.2 caller
+    has, and the one a backtest or a credential-less deployment still has, so
+    the existing assertions keep testing the case they were written for.
+    """
     evidence = evidence or make_evidence()
     reasoning = make_reasoning(evidence)
     decision = make_decision(evidence, reasoning)
@@ -234,6 +248,7 @@ def cycle(
         decision=decision,
         evidence=evidence,
         reasoning=reasoning,
+        thesis=thesis,
         verdict=verdict if use_verdict else None,
         store=store,
         journal=journal,
@@ -846,6 +861,216 @@ class TestTheAuditChainIsJournaled:
             assert journal.get_decision(first[2]) == decision
         finally:
             engine.dispose()
+
+
+# ----------------------------------------------- the thesis, carried and blind
+
+
+class TestTheThesisIsJournaledWithTheChain:
+    """Mission 8 v2.2's seventh record, written by the one writer that may.
+
+    THE TWO THINGS THAT HAVE TO BE TRUE AT ONCE. The thesis must reach the
+    journal -- advisory evidence that never got stored would leave reflection
+    with nothing to recover -- and it must not reach anything else. These
+    tests hold both ends: the record goes in, first and whole, and the module
+    that carries it there is proven blind to its contents by
+    `test_the_thesis_is_carried_and_never_read` below.
+    """
+
+    def test_an_executed_cycle_journals_the_thesis_it_was_given(self) -> None:
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+        thesis = build_thesis()
+
+        result = cycle(store=store, journal=journal, thesis=thesis)
+
+        assert result.outcome is CycleOutcome.EXECUTED
+        assert journal.theses == [thesis]
+        assert len(result.audit_chain_fingerprints) == 5
+
+    def test_the_thesis_is_written_first_of_all(self) -> None:
+        """IT REFERENCES NOTHING, SO IT GOES IN AHEAD OF EVERYTHING.
+
+        The chain is written leaf-first so an interrupted write leaves a
+        shorter chain rather than a broken one. A `MarketThesis` holds no
+        fingerprint of any other record, so it is the deepest leaf there is --
+        and putting it first means no prefix of an interrupted write can leave
+        a stored record pointing at a fingerprint the journal does not hold.
+        """
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        cycle(store=store, journal=journal, thesis=build_thesis())
+
+        # The same sequence `test_the_chain_is_written_leaf_first_and_before_
+        # the_fill` pins, with the thesis inserted ahead of the chain.
+        assert calls == ["load", "load", "save", "record_thesis", *_CHAIN_CALLS, "record_fill"]
+
+    def test_the_account_is_still_saved_before_anything_is_journaled(self) -> None:
+        """Finding A, re-asserted with the new record in the sequence: the
+        seventh write must not have moved the store/journal ordering."""
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        cycle(store=store, journal=journal, thesis=build_thesis())
+
+        assert calls.index("save") < calls.index("record_thesis")
+
+    def test_the_journaled_thesis_is_the_object_it_was_handed(self) -> None:
+        """Not a copy, not a re-validation, not a reconstruction: the exact
+        object the caller passed, exactly as `test_the_session_passes_the_
+        engines_own_objects_through_untouched` requires of a `Fill`."""
+        journal = RecordingJournal(calls=[])
+        store = InMemoryPortfolioStore()
+        store.initialize(fresh_account())
+        thesis = build_thesis(with_macro=True)
+
+        cycle(store=store, journal=journal, thesis=thesis)
+
+        assert journal.theses[0] is thesis
+
+    def test_a_cycle_with_no_thesis_journals_no_thesis(self) -> None:
+        """`None` is a real state, not a defect: a backtest forms no thesis,
+        and neither does an analysis where both specialists came back empty.
+        The chain is then exactly the four records it has always been."""
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        result = cycle(store=store, journal=journal, thesis=None)
+
+        assert journal.theses == []
+        assert "record_thesis" not in calls
+        assert len(result.audit_chain_fingerprints) == 4
+
+    def test_a_veto_journals_no_thesis_either(self) -> None:
+        """The thesis rides with the chain that authorised a fill. No fill, no
+        chain, no thesis -- advisory evidence is not a reason to start writing
+        rows for a trade that never happened."""
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        result = cycle(
+            store=store,
+            journal=journal,
+            policy=RiskPolicy(kill_switch=KillSwitchState.ENGAGED),
+            thesis=build_thesis(),
+        )
+
+        assert result.outcome is CycleOutcome.VETOED
+        assert journal.theses == []
+        assert result.audit_chain_fingerprints == ()
+
+    def test_a_journal_that_fails_on_the_thesis_reports_one_incomplete_write(self) -> None:
+        """The first write in the sequence is now the thesis, so this is the
+        earliest point the journal can fail. The account is already durable and
+        stays so; the cycle reports JOURNAL_UNAVAILABLE once, for the whole
+        write, and `audit_chain_fingerprints` stays empty rather than claiming
+        a partial chain."""
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls, fail_on="record_thesis")
+
+        result = cycle(store=store, journal=journal, thesis=build_thesis())
+
+        assert result.outcome is CycleOutcome.JOURNAL_UNAVAILABLE
+        assert result.audit_chain_fingerprints == ()
+        assert result.fill is not None
+        assert "save" in calls
+
+    def test_a_failed_account_save_journals_no_thesis(self) -> None:
+        """Finding A's other half. If the account never changed, nothing about
+        the trade is recorded -- including the specialists' reading, which
+        would otherwise be the one surviving trace of a trade that did not
+        happen."""
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls, fail_save=True)
+        journal = RecordingJournal(calls=calls)
+
+        result = cycle(store=store, journal=journal, thesis=build_thesis())
+
+        assert result.outcome is CycleOutcome.ACCOUNT_UNAVAILABLE
+        assert journal.theses == []
+        assert not any(call.startswith("record_") for call in calls)
+
+    def test_replaying_an_identical_thesis_adds_no_duplicate_row(self, tmp_path) -> None:
+        """Idempotency, against the real journal: the crash window between the
+        account save and the journal write is recoverable only if replaying the
+        write is a no-op, and a `MarketThesis` is content-addressed like every
+        other record."""
+        engine = create_memory_engine(str(tmp_path / "acct.db"))
+        try:
+            journal = SqliteDecisionJournal(engine)
+            state = fresh_account()
+            store = SqlitePortfolioStore(engine)
+            store.initialize(state)
+            thesis = build_thesis()
+            first = journal.record_thesis(thesis, recorded_at=NOW)
+
+            evidence = make_evidence()
+            reasoning = make_reasoning(evidence)
+            decision = make_decision(evidence, reasoning)
+            result = run_cycle(
+                decision=decision,
+                evidence=evidence,
+                reasoning=reasoning,
+                thesis=thesis,
+                verdict=make_verdict(decision, evidence, state),
+                store=store,
+                journal=journal,
+                policy=POLICY,
+                risk_per_trade_fraction=RISK_FRACTION,
+                now=NOW,
+            )
+
+            assert result.outcome is CycleOutcome.EXECUTED
+            assert result.audit_chain_fingerprints[0] == first
+            assert journal.get_thesis(first) == thesis
+            assert journal.list_theses_by_analysis_id(thesis.analysis_id) == (thesis,)
+        finally:
+            engine.dispose()
+
+
+def test_the_thesis_is_carried_and_never_read() -> None:
+    """`orion.paper.session` may hold a `MarketThesis` and may not look inside one.
+
+    THIS IS THE TEST THE MODULE DOCSTRING NAMES, AND IT IS STRUCTURAL. A
+    specialist reading must not be one edit away from influencing an execution.
+    The session is allowed to take a thesis, pass it on and ask whether it is
+    `None`; reading a *field* of it is the first step toward branching on one,
+    so an attribute access into the value is a failure here, whether it is
+    spelled `thesis.technical_bias` or `chain.thesis.technical_bias`.
+
+    Checked against this file's AST rather than by grep, so a rename or a
+    reformat cannot quietly retire it, and asserted positively as well: if the
+    module stopped carrying a thesis at all the guarantee would be vacuous, so
+    the scan also proves the name is really there to be misused.
+    """
+    import ast
+    from pathlib import Path
+
+    from orion.paper import session as session_module
+
+    tree = ast.parse(Path(session_module.__file__ or "").read_text(encoding="utf-8"))
+    reads: list[str] = []
+    carried = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "thesis":
+            carried = True
+        if not isinstance(node, ast.Attribute):
+            continue
+        value = node.value
+        if isinstance(value, ast.Name) and value.id == "thesis":
+            reads.append(f"thesis.{node.attr}")
+        if isinstance(value, ast.Attribute) and value.attr == "thesis":
+            reads.append(f"{ast.unparse(value)}.{node.attr}")
+
+    assert carried, "orion.paper.session no longer carries a thesis; this guarantee is vacuous"
+    assert not reads, f"orion.paper.session reads into the thesis it carries: {reads}"
 
 
 # ------------------------------------------------- the protocol is satisfied

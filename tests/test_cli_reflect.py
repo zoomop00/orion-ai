@@ -36,6 +36,7 @@ from orion.cli import (
     EXIT_REFLECTION_FAILED,
     EXIT_USAGE,
     NO_HISTORY_MESSAGE,
+    NO_THESIS_RECORDED,
     REFLECTION_FAILED_MESSAGE,
     build_parser,
     main,
@@ -54,6 +55,7 @@ from orion.reflection.analysis import reflect_on_recent_closed_positions
 from orion.risk.guardian import review
 from orion.risk.policy import KillSwitchState, RiskPolicy
 from orion.risk.portfolio import initial_portfolio_state, mark_to_market
+from orion.thesis.schemas import ALIGNMENT_SUMMARY
 
 from .orchestrator.conftest import (
     LAST_BAR_TIME,
@@ -62,6 +64,7 @@ from .orchestrator.conftest import (
     make_bars,
     make_snapshot,
 )
+from .thesis.builders import build_thesis
 
 FAKE_KEY = "sk-live-supersecret-1234567890"
 SYMBOL = "XAUUSD"
@@ -97,7 +100,9 @@ def databases_in(root: Path) -> set[str]:
     return names
 
 
-def seed_history(db_path: Path, *, trades: int = 1, journal_chain: bool = True) -> None:
+def seed_history(
+    db_path: Path, *, trades: int = 1, journal_chain: bool = True, theses: bool = False
+) -> None:
     """Run `trades` real open-then-close paper cycles into a real database.
 
     Not fixtures and not doubles: the real `decide`/`review`/`run_cycle`, so the
@@ -105,6 +110,12 @@ def seed_history(db_path: Path, *, trades: int = 1, journal_chain: bool = True) 
     written. `journal_chain=False` writes the fill and the close but not the
     records that authorised them -- the state every position opened before this
     phase is permanently in, and the one `reflect` must report rather than hide.
+
+    `theses=True` hands each cycle a `MarketThesis` under that trade's own
+    `analysis_id`, exactly as `orion paper` hands one off the report. The whole
+    Mission 8 v2.2 path is then real end to end for the rendering tests: the
+    session journals it, `orion.reflection` recovers it by the sibling key, and
+    `render_reflections` prints what came back -- no hand-built batch anywhere.
     """
     engine = create_memory_engine(str(db_path))
     try:
@@ -140,6 +151,11 @@ def seed_history(db_path: Path, *, trades: int = 1, journal_chain: bool = True) 
                 decision=decision,
                 evidence=evidence,
                 reasoning=reasoning,
+                thesis=(
+                    build_thesis(analysis_id=f"a-{index}", with_macro=index % 2 == 0)
+                    if theses
+                    else None
+                ),
                 verdict=verdict,
                 store=store,
                 journal=writer,
@@ -190,6 +206,9 @@ class _FillsOnlyJournal:
         return "0" * 64
 
     def record_verdict(self, verdict, *, recorded_at):  # type: ignore[no-untyped-def]
+        return "0" * 64
+
+    def record_thesis(self, thesis, *, recorded_at):  # type: ignore[no-untyped-def]
         return "0" * 64
 
     def record_fill(self, fill, *, recorded_at):  # type: ignore[no-untyped-def]
@@ -455,8 +474,8 @@ class TestReflectRefusesSafely:
 
 
 class TestTheRenderingJudgesNothing:
-    def _batch(self, account_home: Path):  # type: ignore[no-untyped-def]
-        seed_history(account_home / "orion.db", trades=2)
+    def _batch(self, account_home: Path, *, theses: bool = False):  # type: ignore[no-untyped-def]
+        seed_history(account_home / "orion.db", trades=2, theses=theses)
         engine = create_memory_engine(str(account_home / "orion.db"))
         try:
             return reflect_on_recent_closed_positions(
@@ -507,6 +526,131 @@ class TestTheRenderingJudgesNothing:
         item = batch.reflections[0].model_copy(update={"opening_fee": None})
         text = render_reflections(batch.model_copy(update={"reflections": (item,)}))
         assert "unknown opening" in text
+
+
+class TestTheThesisReachesTheReader:
+    """Mission 8 v2.2's last mile: the journaled thesis is printed.
+
+    THE WHOLE PATH IS REAL HERE. `seed_history(theses=True)` hands each cycle a
+    `MarketThesis`, `run_cycle` journals it, `reflect_on_recent_closed_
+    positions` recovers it by `analysis_id`, and these tests read what
+    `render_reflections` did with it. A thesis that was stored and never shown
+    is the state Mission 8 v2 was criticised for, and it is what this section
+    exists to prevent recurring on the reflection path.
+    """
+
+    def _batch(self, account_home: Path, *, theses: bool = True):  # type: ignore[no-untyped-def]
+        seed_history(account_home / "orion.db", trades=2, theses=theses)
+        engine = create_memory_engine(str(account_home / "orion.db"))
+        try:
+            return reflect_on_recent_closed_positions(
+                SqliteDecisionJournal(engine), SYMBOL, limit=10, now=NOW
+            )
+        finally:
+            engine.dispose()
+
+    def test_the_specialists_reading_is_printed_for_a_trade_that_has_one(
+        self, account_home: Path
+    ) -> None:
+        batch = self._batch(account_home)
+        item = batch.reflections[0]
+        assert item.thesis is not None
+
+        text = render_reflections(batch)
+
+        assert item.thesis.alignment.value in text
+        assert item.thesis.technical_bias.value in text
+        assert item.thesis.summary in text
+
+    def test_every_printed_sentence_is_the_thesis_own_canonical_one(
+        self, account_home: Path
+    ) -> None:
+        """AUTHORED BY THE REGISTRY, NOT BY THE RENDERER. `MarketThesis`
+        validates that `summary` is the canonical sentence for its alignment
+        and that every `ThesisPoint.detail` is the committed one, so printing
+        those verbatim is the only way this command shows market commentary --
+        and it is commentary ORION committed, not composed at render time."""
+        batch = self._batch(account_home)
+        text = render_reflections(batch)
+
+        for item in batch.reflections:
+            assert item.thesis is not None
+            assert item.thesis.summary in ALIGNMENT_SUMMARY.values()
+            assert item.thesis.summary in text
+            for point in item.thesis.agreements + item.thesis.conflicts:
+                assert point.topic.value in text
+
+    def test_the_macro_half_is_printed_only_when_the_thesis_carries_one(
+        self, account_home: Path
+    ) -> None:
+        """`seed_history` alternates: the first trade's thesis has the macro
+        half, the second's does not. A rendering that printed a macro *reading*
+        for the technical-only thesis would be inventing one.
+
+        The check is for the reading rather than the word: a technical-only
+        thesis is `macro_absent` and its canonical sentence says the macro half
+        is missing, so "macro" appears in that block and should -- absence is
+        stated here, exactly as it is everywhere else in this codebase.
+        """
+        batch = self._batch(account_home)
+        blocks = render_reflections(batch).split("\n\n")
+        with_macro = next(b for b in blocks if "1. " in b)
+        without_macro = next(b for b in blocks if "2. " in b)
+
+        first, second = batch.reflections[0].thesis, batch.reflections[1].thesis
+        assert first is not None and first.macro_condition is not None
+        assert second is not None and second.macro_condition is None
+        assert f", macro {first.macro_condition.value}" in with_macro
+        assert ", macro " not in without_macro
+        assert second.alignment.value in without_macro
+
+    def test_a_trade_with_no_thesis_says_so_rather_than_printing_nothing(
+        self, account_home: Path
+    ) -> None:
+        """Absence is reported, never left blank. Every trade opened before
+        v2.2 is permanently in this state, and a silent gap would read as "the
+        specialists had no opinion" rather than "nothing was recorded"."""
+        batch = self._batch(account_home, theses=False)
+
+        text = render_reflections(batch)
+
+        assert batch.reflections[0].thesis is None
+        assert NO_THESIS_RECORDED in text
+
+    def test_the_thesis_is_printed_between_the_prediction_and_the_outcome(
+        self, account_home: Path
+    ) -> None:
+        """Placement is the point: what the specialists were reading sits
+        between what ORION predicted and how the trade ended, with no line
+        drawn between them."""
+        text = render_reflections(self._batch(account_home))
+
+        assert text.index("risk/reward") < text.index("specialists") < text.index("exit matched")
+
+    def test_the_rendering_still_judges_nothing_with_a_thesis_attached(
+        self, account_home: Path
+    ) -> None:
+        """The thesis is evidence printed beside an outcome, and the renderer
+        draws no conclusion from the pair -- no "confirmed", no "wrong", no
+        agreement score between the reading and the result."""
+        text = render_reflections(self._batch(account_home)).lower()
+
+        for banned in (
+            "score",
+            "grade",
+            "correct",
+            "incorrect",
+            "wrong",
+            "right call",
+            "confirmed by",
+            "as predicted by",
+            "thesis was",
+        ):
+            assert banned not in text, f"the rendering must judge nothing: {banned!r}"
+
+    def test_it_is_still_deterministic(self, account_home: Path) -> None:
+        batch = self._batch(account_home)
+        assert render_reflections(batch) == render_reflections(batch)
 
 
 class TestTheClosedMappingsAreComplete:

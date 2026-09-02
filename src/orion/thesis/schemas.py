@@ -61,9 +61,11 @@ from orion.provenance import canonical_hash
 THESIS_VERSION = "2026-08-31.1"
 
 #: Matches `orion.interface.schemas.MAX_ID_CHARS`. An `analysis_id` is minted by
-#: `orion.orchestrator.analysis.build_analysis_id` from a symbol, a timeframe
-#: and a bar timestamp; the bound exists so a value that could not have come
-#: from there is not constructible here either.
+#: `orion.orchestrator.analysis.build_analysis_id` from a symbol, a timeframe,
+#: a bar timestamp and the instant of the analysis; the bound exists so a value
+#: that could not have come from there is not constructible here either. The
+#: longest id that function can produce — a symbol, a short timeframe code and
+#: two microsecond-resolution ISO timestamps — is comfortably inside it.
 MAX_ANALYSIS_ID_CHARS = 128
 
 _FINGERPRINT_FIELD = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
@@ -317,14 +319,22 @@ class MarketThesis(BaseModel):
 
     `analysis_id` IS A SIBLING KEY, NOT A BACK-REFERENCE, and that distinction
     is the whole of Mission 8 v2.2's first blocker. The orchestrator mints one
-    id per analysis from the symbol, the timeframe and the last bar's
-    timestamp, *before* any decision exists, and stamps it on
-    `ProposedDecision` and `RiskVerdict` alike. A thesis carrying the same id is
-    therefore findable from a journaled verdict without ever pointing *at* the
-    proposal — which is what lets the thesis stay strictly advisory while
-    becoming part of the auditable chain. A thesis that instead carried a
-    `decision_fingerprint` would couple advisory evidence to the authority that
-    reviewed it, in the one direction that must stay closed.
+    id per analysis — from the symbol, the timeframe, the last bar's timestamp
+    and the instant the analysis was made — *before* any decision exists, and
+    stamps it on `ProposedDecision` and `RiskVerdict` alike. A thesis carrying
+    the same id is therefore findable from a journaled verdict without ever
+    pointing *at* the proposal, and identifies *which* chain it was formed
+    beside rather than merely which bar — which is what lets the thesis stay
+    strictly advisory while becoming part of the auditable chain. A thesis that
+    instead carried a `decision_fingerprint` would couple advisory evidence to
+    the authority that reviewed it, in the one direction that must stay closed.
+
+    THE EVIDENCE IDENTITY IS A DIFFERENT FIELD, AND STAYS ONE.
+    `ThesisTimeframe.evidence_fingerprint` says which bytes the technical half
+    read, and equals `ProposedDecision.evidence_ref.content_hash` for the same
+    analysis. Two analyses of one bar share that fingerprint and no longer
+    share an `analysis_id`: the first is a statement about the market, the
+    second about the run.
 
     ADVISORY. Nothing here authorises, sizes, times or places anything. There is
     no action, no entry, no stop, no target, no quantity and no approval — the

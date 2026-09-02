@@ -150,18 +150,49 @@ class AnalysisDataQualityError(AnalysisError):
     """
 
 
-def build_analysis_id(symbol: str, timeframe: Timeframe, as_of: datetime) -> str:
-    """A deterministic identifier for one analysis.
+def build_analysis_id(
+    symbol: str, timeframe: Timeframe, as_of: datetime, analyzed_at: datetime
+) -> str:
+    """A deterministic identifier for one analysis, and for one only.
 
-    Derived from what the analysis *is* rather than minted with `uuid4()`,
-    for exactly the reason `run_backtest` derives its own the same way: two
-    runs over the same bar must be recognisably the same analysis, and an
-    identifier that changes every call makes a journaled record
-    unreproducible from its own inputs. `as_of` is the evidence's latest bar
-    timestamp, not wall-clock time, so re-asking the same question before a
-    new bar closes yields the same id.
+    IT NAMES THE ANALYSIS, NOT THE BAR — and that distinction is Mission 8
+    v2.2's identity decision. Mission 8 v2.1 recorded that a thesis could not
+    be journaled because `analysis_id` was minted from `(symbol, timeframe,
+    as_of)` alone: two analyses inside one bar (a cron at :05 and again at :35
+    is the ordinary case) produced two different decision chains under one
+    identifier, so a record found by that key could not say which chain it
+    belonged to. `analyzed_at` closes that: the id now covers the bar the
+    analysis was *about* and the instant it was *made*, which together are one
+    chain — one `ProposedDecision`, one `RiskVerdict`, at most one
+    `MarketThesis`, all stamped with the same value.
+
+    THE MARKET-EVIDENCE IDENTITY IS SOMEWHERE ELSE, DELIBERATELY.
+    "Which bytes was this reasoned from" is `evidence_fingerprint`, it is
+    content-addressed, and it is what `ThesisTimeframe.evidence_fingerprint`
+    and `ProposedDecision.evidence_ref.content_hash` both carry. Two analyses
+    of the same bar still share that fingerprint, which is correct and
+    unchanged — they looked at identical bars. Folding it into the analysis id
+    instead would give one name to two questions: which market state, and
+    which run over it.
+
+    STILL DERIVED, STILL NOT `uuid4()`. Every component is an input the caller
+    already holds, so the same call yields the same id and a journaled record
+    stays reproducible from what produced it — the property `run_backtest`
+    derives its own identifier for, and the reason `test_is_deterministic`
+    still passes. What is no longer claimed is that re-asking before a new bar
+    closes is the *same* analysis: it is a second analysis of the same bar,
+    and it now says so.
+
+    A COLLISION NEEDS TWO ANALYSES OF ONE BAR AT THE IDENTICAL MICROSECOND,
+    and the journal does not assume they are impossible: the `analysis_id`
+    column is not unique, the list methods still return tuples, and
+    `orion.reflection` still refuses to guess between two records rather than
+    picking one. Uniqueness here removes the ordinary ambiguity; it does not
+    replace the fail-closed check that catches the extraordinary one, nor the
+    historical rows minted under the old rule, which keep their old ids
+    forever.
     """
-    return f"analysis-{symbol}-{timeframe.value}-{as_of.isoformat()}"
+    return f"analysis-{symbol}-{timeframe.value}-{as_of.isoformat()}-{analyzed_at.isoformat()}"
 
 
 def _risk_panel(
@@ -396,7 +427,9 @@ def run_analysis(
     evidence = build_evidence(snapshot)
     reasoning = reasoning_provider.reason(evidence)
 
-    analysis_id = build_analysis_id(symbol, timeframe, evidence.as_of)
+    # The bar this analysis is about, and the instant it was made. Both, so the
+    # id names this chain and not merely this bar -- see `build_analysis_id`.
+    analysis_id = build_analysis_id(symbol, timeframe, evidence.as_of, now)
     decision = decide(evidence, reasoning, analysis_id=analysis_id, now=now)
 
     risk = _risk_panel(
