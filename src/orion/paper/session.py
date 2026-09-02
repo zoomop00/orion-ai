@@ -95,9 +95,21 @@ target from the proposal the Guardian approved, the resulting balances from
 invents no quantity, and never writes a `ClosedPosition` that
 `resolve_stop_take_profit` did not actually produce.
 
+RESOLVING AND CONSIDERING ARE TWO CALLS NOW, NOT TWO BRANCHES (Mission 9).
+`resolve_position` is the first half — close the open position if it reached a
+level — and it is exported so a caller holding nothing but a price can run it.
+`run_cycle` calls it first and returns whatever it returned, so resolve-before-
+consider and "a closing cycle does not also open" hold because there is one
+implementation, not because two agree. What the split removes is a dependency:
+checking a stop no longer requires an `Evidence`, and therefore no longer
+requires the market data, the indicators, the model call and the verdict that
+building one costs. Nothing about the *outcome* of a resolution changed.
+
 NO VENUE, NO SCHEDULE, NO LOOP. One cycle per call, returning a value. There is
 no retry, no sleep, no thread, no background work, and nothing that reaches a
-broker — a paper account is a local simulation of one.
+broker — a paper account is a local simulation of one. Mission 9 makes frequent
+resolution cheap; it never runs one on a timer, and nothing here starts work the
+caller did not ask for.
 """
 
 from __future__ import annotations
@@ -107,14 +119,23 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from orion.analysis.evidence import Evidence
+from orion.data.models import MarketSnapshot, OHLCVBar
+from orion.data.validation import TIMEFRAME_INTERVAL
 from orion.decision.schemas import ProposedDecision
-from orion.paper.execution import execute, resolve_stop_take_profit
+from orion.paper.execution import (
+    ObservedPrice,
+    eligible_bars,
+    execute,
+    resolve_stop_take_profit,
+    resolve_stop_take_profit_bars,
+)
 from orion.paper.policy import PaperExecutionPolicy
 from orion.paper.schemas import ClosedPosition, Fill, PaperExecutionError
-from orion.paper.store import PortfolioStore
+from orion.paper.store import PortfolioRecord, PortfolioStore
 from orion.reasoning.schemas import ReasoningOutput
 from orion.risk.portfolio import (
     PortfolioState,
+    Position,
     compute_position_size,
     mark_to_market,
     portfolio_state_fingerprint,
@@ -246,6 +267,115 @@ _PERSISTED = frozenset(
 )
 
 
+class ResolutionCoverage(StrEnum):
+    """How much of the window since the position opened a resolution actually saw.
+
+    WHY THIS IS NOT A `CycleOutcome`. What happened is one question — closed,
+    holding, refused — and how much was examined is another. A bar-aware
+    resolution that finds no hit reports `HOLDING`, and `HOLDING` says "neither
+    stop nor target was reached". That sentence is only true if every bar since
+    the entry was looked at. Folding the two into one enum would either
+    multiply its members or, worse, let an unexamined window masquerade as a
+    clean hold — so coverage rides alongside the outcome instead of inside it,
+    and `CycleOutcome` keeps exactly the members it has always had.
+
+    THREE STATES, NOT A BOOL, for the reason `orion.risk.schemas.ControlStatus`
+    already gives for its own three: a reader who is told "incomplete" will ask
+    why, and the two reasons call for different responses — a truncated window
+    is fixed by asking for more bars, a gapped one is the vendor's answer being
+    short and cannot be. Collapsing them would throw that away at the exact
+    moment it matters.
+
+    NONE OF THESE CLAIMS THE NEWEST BAR IS FINISHED. The market-data provider
+    exposes no completion flag, so the most recent bar may still be forming and
+    its range may still grow. `COMPLETE` therefore means "every bar the window
+    should contain was present and examined", never "nothing further can
+    happen" — a distinction stated here because it is the one a reader is most
+    likely to over-read.
+    """
+
+    #: Every bar from the entry to the newest fetched one was present and
+    #: examined. The newest of them may still be forming; see above.
+    COMPLETE = "complete"
+    #: The window did not reach back to `Position.opened_at`: bars between the
+    #: entry and the oldest bar fetched were never seen. A level could have
+    #: been crossed in them.
+    TRUNCATED = "truncated"
+    #: The window reached back far enough but is missing bars inside itself.
+    #: Reported in preference to nothing at all; `TRUNCATED` wins over this
+    #: when both are true, being the larger and earlier blind spot.
+    GAPPED = "gapped"
+
+
+#: Coverage states in which a `HOLDING` result must not be read as "nothing
+#: happened" -- exported so a renderer cannot invent its own list.
+INCOMPLETE_COVERAGE = frozenset({ResolutionCoverage.TRUNCATED, ResolutionCoverage.GAPPED})
+
+#: How far apart two consecutive bars may sit before the window is called
+#: gapped. The same figure `orion.data.validation.validate_snapshot` uses for
+#: its own GAP finding, named here rather than imported because this scan
+#: answers a different question over a different set of bars -- see
+#: `window_coverage`.
+_GAP_TOLERANCE_BARS = 1.5
+
+
+def window_coverage(snapshot: MarketSnapshot, position: Position | None) -> ResolutionCoverage:
+    """How much of the since-entry window `snapshot` actually establishes.
+
+    NOT A SECOND `validate_snapshot`, AND THE DIFFERENCE IS THE POINT. That
+    function asks "is this data fit to reason over?" and its GAP finding makes a
+    snapshot invalid. This asks "does this data prove nothing was missed since
+    the entry?" over a different set of bars — only those after `opened_at` —
+    and its answer is never a refusal. A missing bar must not stop a real stop
+    from being honoured; it must stop the *result* from claiming a clean hold.
+    Fetching a window wide enough to span a market weekend can legitimately
+    contain a gap, so refusing on one would leave positions unresolved every
+    Monday, which is the failure mode this exit path exists to remove.
+
+    The bars acted on are `orion.paper.execution.eligible_bars` — the same set
+    the resolver acts on, obtained from the same function, so what was examined
+    and what is reported can never diverge.
+
+    THE SCAN STARTS ONE BAR BEFORE THE FIRST EXAMINED ONE, AND THAT BAR IS WHY
+    THIS IS CORRECT. Checking gaps across the eligible bars alone leaves the
+    entry boundary itself unchecked: a window holding the last bar before the
+    entry and then nothing until hours later is contiguous *within* its eligible
+    set, and would have claimed COMPLETE while never seeing the hours in
+    between. That is not a corner case — it is the ordinary shape of a position
+    opened just after the last bar before a market weekend, where the first
+    eligible bar is the Monday one and the whole weekend is the hole. So the
+    boundary bar is prepended to the scan: it is never examined for a trigger
+    (the resolver still ignores it, correctly — its range predates the entry),
+    it exists here solely to make the interval across the entry measurable.
+    """
+    if position is None:
+        return ResolutionCoverage.COMPLETE
+
+    bars = snapshot.bars
+    # Reaching back means holding at least one bar at or before the entry:
+    # that is what proves the bar containing `opened_at` is not itself missing.
+    if not bars or bars[0].timestamp > position.opened_at:
+        return ResolutionCoverage.TRUNCATED
+
+    examined = eligible_bars(snapshot, position)
+    if not examined:
+        # The window ends at or before the entry: nothing after it was seen.
+        return ResolutionCoverage.TRUNCATED
+
+    # The newest bar at or before the entry. Non-empty by the reach-back check
+    # above, and the last such bar because `bars` is ordered oldest-first --
+    # the same ordering that check already relies on.
+    boundary = [bar for bar in bars if bar.timestamp <= position.opened_at][-1]
+    scanned = (boundary, *examined)
+
+    interval = TIMEFRAME_INTERVAL[snapshot.source.timeframe]
+    limit = interval * _GAP_TOLERANCE_BARS
+    for earlier, later in zip(scanned, scanned[1:], strict=False):
+        if later.timestamp - earlier.timestamp > limit:
+            return ResolutionCoverage.GAPPED
+    return ResolutionCoverage.COMPLETE
+
+
 class CycleResult:
     """What one cycle did, with the real objects it produced.
 
@@ -266,6 +396,16 @@ class CycleResult:
     write was attempted and failed, which `JOURNAL_UNAVAILABLE` reports
     separately. It is never partially populated: a chain either went in whole or
     is reported as absent.
+
+    `coverage` and `triggering_bar_at` are Mission 9 Phase 2's, and both are
+    `None` on every path that did not resolve against bars — every `run_cycle`
+    result, and every last-price resolution. Neither is journaled: this
+    container is not a record, and `ClosedPosition` was deliberately left
+    unchanged by that phase so no stored fingerprint moved. `coverage` is what
+    stops a `HOLDING` from being read as "nothing happened" when the window
+    could not establish that; `triggering_bar_at` names the bar that caused a
+    close, for rendering and audit by eye — `ClosedPosition.closed_at` remains
+    the caller-supplied `now`, never a bar timestamp.
     """
 
     __slots__ = (
@@ -275,6 +415,8 @@ class CycleResult:
         "closed_position",
         "journal_fingerprint",
         "audit_chain_fingerprints",
+        "coverage",
+        "triggering_bar_at",
     )
 
     def __init__(
@@ -286,6 +428,8 @@ class CycleResult:
         closed_position: ClosedPosition | None = None,
         journal_fingerprint: str | None = None,
         audit_chain_fingerprints: tuple[str, ...] = (),
+        coverage: ResolutionCoverage | None = None,
+        triggering_bar_at: datetime | None = None,
     ) -> None:
         self.outcome = outcome
         self.portfolio = portfolio
@@ -293,6 +437,8 @@ class CycleResult:
         self.closed_position = closed_position
         self.journal_fingerprint = journal_fingerprint
         self.audit_chain_fingerprints = audit_chain_fingerprints
+        self.coverage = coverage
+        self.triggering_bar_at = triggering_bar_at
 
     @property
     def account_was_written(self) -> bool:
@@ -303,6 +449,135 @@ class CycleResult:
     def executed(self) -> bool:
         """Whether a position was opened. Exactly when there is a `Fill`."""
         return self.fill is not None
+
+    @property
+    def coverage_is_incomplete(self) -> bool:
+        """Whether this result's window failed to establish that nothing was
+        missed. `False` for a resolution that saw everything *and* for every
+        path where coverage does not apply — a caller asking this is asking
+        "should I distrust a hold?", and the answer for `run_cycle` is no."""
+        return self.coverage in INCOMPLETE_COVERAGE
+
+
+def resolve_position(
+    *,
+    record: PortfolioRecord,
+    price: ObservedPrice,
+    store: PortfolioStore,
+    journal: JournalWriter,
+    policy: PaperExecutionPolicy,
+    now: datetime,
+    bars: MarketSnapshot | None = None,
+) -> CycleResult | None:
+    """Resolve `record`'s open position against `price`. Never raises.
+
+    MISSION 9: THIS IS THE HALF OF A CYCLE THAT NEEDS NO ANALYSIS. It was the
+    first branch of `run_cycle`, reachable only by running a full analysis
+    first — market data, indicators, structure, a model call, a decision and a
+    verdict — none of which it read. A stop-loss that can only be checked by
+    asking Claude is a stop-loss that stops working when a credential expires,
+    a rate limit is hit, or nobody types the command. Extracting it changes
+    nothing about *what* resolution does; it changes what has to happen before
+    it can. `orion.cli` now has a path that fetches a price and calls exactly
+    this.
+
+    IT IS STILL THE SAME FUNCTION `run_cycle` RUNS. `run_cycle` calls it first
+    and returns its result whenever there was one, so resolve-before-consider
+    and "a closing cycle does not also open" are preserved by construction
+    rather than by two implementations agreeing. There is no second resolver.
+
+    `None` MEANS "NOTHING TO RESOLVE", NOT "NOTHING HAPPENED". A `CycleOutcome`
+    is not invented for the flat-account case: `run_cycle` needs to fall
+    through to its entry branch, and a caller that only monitors needs to say
+    "there is no position here" — which is a different sentence from every
+    outcome in that enum, and inventing a member for it would make `HOLDING`
+    ambiguous between "a position is open and waiting" and "there is nothing".
+    `None` is the same not-applicable idiom `orion.decision.rules` and
+    `orion.risk.controls` already use for a check that did not apply.
+
+    IT TAKES A `PortfolioRecord`, NOT A `PortfolioStore`, TO READ FROM. The
+    record carries the revision the compare-and-swap needs, and taking it as an
+    argument means `run_cycle` still loads the account exactly once — the
+    extraction adds no second read, and the caller keeps the load-failure
+    branch it already had.
+
+    EXIT NEEDS NO NEW AUTHORITY, AND NONE IS ADDED. The stop and target being
+    honoured here were proposed by the model and approved by the Risk Guardian
+    at the moment the position was opened; reaching one is the execution of a
+    permission already granted, not a request for a new one. So there is no
+    control, no policy and no verdict on this path, `orion.risk` is not
+    consulted, and `CloseReason` gains no member that could express a close
+    nobody approved.
+
+    PERSISTENCE IS THE EXISTING ORDER, THROUGH THE EXISTING WRITER: the account
+    first, the journal second, and no `AuditChain` — the records that authorised
+    this position were journaled by the cycle that opened it. A `HOLDING` result
+    writes nothing at all, so monitoring at any frequency adds no revision to
+    the account and no row to the journal.
+
+    `bars` SELECTS THE RESOLVER, AND DEFAULTS TO THE ONE THAT WAS ALWAYS HERE
+    (Mission 9 Phase 2). Without it this behaves exactly as Phase 1 did:
+    last-price detection, no coverage, `run_cycle` unchanged. With it, the
+    intrabar resolver scans every bar since the entry and catches a crossing
+    that happened between two observations — the case a single last price
+    cannot represent, because a price that touched a stop and came back leaves
+    no trace in any close. Both paths share one persistence branch below, so
+    there is no second way to write a close.
+
+    COVERAGE IS REPORTED, NEVER ASSUMED. On the bar path the result carries a
+    `ResolutionCoverage`, computed over exactly the bars the resolver acted on.
+    A window that did not reach the entry, or that is missing bars inside
+    itself, still resolves — a real stop must be honoured even when the data
+    around it is imperfect — but it can never be presented as a clean hold.
+    """
+    stored = record.state
+    position = stored.open_position
+    if position is None:
+        return None
+
+    coverage: ResolutionCoverage | None = None
+    triggering_bar: OHLCVBar | None = None
+    try:
+        if bars is None:
+            resolved, closed = resolve_stop_take_profit(stored, price, policy=policy, now=now)
+        else:
+            coverage = window_coverage(bars, position)
+            resolved, closed, triggering_bar = resolve_stop_take_profit_bars(
+                stored, bars, policy=policy, now=now
+            )
+    except PaperExecutionError:
+        return CycleResult(
+            outcome=CycleOutcome.EXECUTION_REFUSED, portfolio=stored, coverage=coverage
+        )
+
+    if closed is None:
+        # Marked to market but not closed. The projection is deliberately
+        # not saved: it is derived, and writing a revision per cycle would
+        # grow the account with rows that record no decision.
+        #
+        # `coverage` rides along so this HOLDING can be read correctly: on the
+        # bar-aware path it is the difference between "nothing happened" and
+        # "nothing that could be seen happened", and only the first of those is
+        # what HOLDING's own docstring claims.
+        return CycleResult(outcome=CycleOutcome.HOLDING, portfolio=resolved, coverage=coverage)
+
+    # No chain: the records that authorised this position were journaled by
+    # the cycle that *opened* it. A resolving caller's own analysis, if it ran
+    # one at all, produced a different decision and a different verdict, and
+    # neither of them closed anything -- the resolver did, from the price.
+    return _persist(
+        store=store,
+        journal=journal,
+        portfolio=resolved,
+        expected_revision=record.revision,
+        fill=None,
+        closed_position=closed,
+        outcome=CycleOutcome.CLOSED,
+        chain=None,
+        now=now,
+        coverage=coverage,
+        triggering_bar_at=None if triggering_bar is None else triggering_bar.timestamp,
+    )
 
 
 def run_cycle(
@@ -357,33 +632,16 @@ def run_cycle(
     stored = record.state
 
     # ------------------------------------------------ an open position first
-    if stored.open_position is not None:
-        try:
-            resolved, closed = resolve_stop_take_profit(stored, evidence, policy=policy, now=now)
-        except PaperExecutionError:
-            return CycleResult(outcome=CycleOutcome.EXECUTION_REFUSED, portfolio=stored)
-
-        if closed is None:
-            # Marked to market but not closed. The projection is deliberately
-            # not saved: it is derived, and writing a revision per cycle would
-            # grow the account with rows that record no decision.
-            return CycleResult(outcome=CycleOutcome.HOLDING, portfolio=resolved)
-
-        # No chain: the records that authorised this position were journaled by
-        # the cycle that *opened* it. This cycle's own analysis produced a
-        # different decision and a different verdict, and neither of them
-        # closed anything -- `resolve_stop_take_profit` did, from the price.
-        return _persist(
-            store=store,
-            journal=journal,
-            portfolio=resolved,
-            expected_revision=record.revision,
-            fill=None,
-            closed_position=closed,
-            outcome=CycleOutcome.CLOSED,
-            chain=None,
-            now=now,
-        )
+    resolution = resolve_position(
+        record=record,
+        price=evidence,
+        store=store,
+        journal=journal,
+        policy=policy,
+        now=now,
+    )
+    if resolution is not None:
+        return resolution
 
     # ------------------------------------------------------- a new position
     if verdict is None:
@@ -477,6 +735,8 @@ def _persist(
     outcome: CycleOutcome,
     chain: AuditChain | None,
     now: datetime,
+    coverage: ResolutionCoverage | None = None,
+    triggering_bar_at: datetime | None = None,
 ) -> CycleResult:
     """Save the account, then journal what happened. Never the other way round.
 
@@ -501,7 +761,11 @@ def _persist(
         # Includes `PortfolioStoreConcurrencyError` — another writer moved the
         # account under this cycle. Nothing is journaled: as far as any record
         # is concerned, this trade did not happen, which is the truth.
-        return CycleResult(outcome=CycleOutcome.ACCOUNT_UNAVAILABLE, portfolio=portfolio)
+        return CycleResult(
+            outcome=CycleOutcome.ACCOUNT_UNAVAILABLE,
+            portfolio=portfolio,
+            coverage=coverage,
+        )
 
     try:
         # LEAF-FIRST, AND THE FILL LAST. Each record is written only after
@@ -541,6 +805,8 @@ def _persist(
             portfolio=portfolio,
             fill=fill,
             closed_position=closed_position,
+            coverage=coverage,
+            triggering_bar_at=triggering_bar_at,
         )
 
     return CycleResult(
@@ -550,4 +816,6 @@ def _persist(
         closed_position=closed_position,
         journal_fingerprint=fingerprint,
         audit_chain_fingerprints=chain_fingerprints,
+        coverage=coverage,
+        triggering_bar_at=triggering_bar_at,
     )

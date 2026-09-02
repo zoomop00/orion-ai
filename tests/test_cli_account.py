@@ -586,7 +586,18 @@ class TestTheCommandSurfaceStaysHonest:
             for action in parser._subparsers._group_actions  # type: ignore[union-attr]
             if hasattr(action, "choices") and action.choices
         ]
-        assert set(actions[0].choices) == {"analyze", "account", "paper", "reflect"}
+        assert set(actions[0].choices) == {
+            "analyze",
+            "account",
+            "paper",
+            "reflect",
+            # Mission 9. Closes a simulated position against an already-approved
+            # level; it can never open one, and reaches no venue.
+            "resolve",
+            # Mission 9 Phase 3. `resolve` on an interval -- the same work, more
+            # often. Still no entry, no model, no venue.
+            "monitor",
+        }
 
     def test_the_paper_verb_exists_and_requires_a_symbol(self) -> None:
         """Phase 2a asserted `paper` was *not* reachable, anticipating this

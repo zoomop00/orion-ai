@@ -84,6 +84,90 @@ position — printing what the specialists were reading between what ORION
 predicted and what actually happened, and drawing no conclusion from the pair.
 A trade whose analysis recorded no thesis says so rather than leaving a gap.
 
+## Resolving an open position (Mission 9)
+
+```bash
+uv run orion resolve XAUUSD
+```
+
+Fetches the latest price and closes the open paper position **if and only if** it
+has reached the stop-loss or take-profit the Risk Guardian approved when the
+position was opened. It runs no analysis, **calls no AI model**, and needs only
+`TWELVE_DATA_API_KEY` — a deployment with no `ANTHROPIC_API_KEY` can still
+honour a stop.
+
+Until Mission 9 this check lived inside `orion paper`, which runs a full
+analysis first, so verifying a stop cost a market-data request *and* a Claude
+call. That was the wrong dependency: a stop and a target are pre-committed
+exits the model already proposed and the Risk Guardian already approved, so
+reaching one is the execution of a permission already granted, not a request
+for a new one. **No new authority was introduced** — no exit-side risk control,
+no new close reason, and nothing under `src/orion/risk/` changed.
+
+It reports one of four things: it closed the position, it is holding (neither
+level reached — nothing is written, so this can be run as often as you like), a
+refusal, or that there is no open position at all. **It can never open one.**
+
+### It looks at the whole bar, not just the last price
+
+A price can cross a stop and come back before you next look, leaving no trace in
+any bar's closing price. So `resolve` fetches every bar since the position
+opened and closes on the first whose **high/low range** reached a level —
+catching exactly the crossings a single last price cannot see. If both levels
+were touched inside one bar it resolves as a stop-loss: the data cannot say
+which came first, and ORION never assumes the better outcome.
+
+**Gaps fill at the gapped open, not at the level.** If a bar *opened* beyond the
+stop or target, that level was never available once the bar began, so the fill is
+the open. This is deliberately different from the backtest engine, which fills at
+the level: a backtest may model a resting order, but a forward paper account
+doing the same would report a better result than the market gave it.
+
+Every result also states **coverage** — whether the window really did reach back
+to when the position opened, and whether any bars inside it were missing. A hold
+whose window fell short says `INCOMPLETE` rather than quietly reading as "nothing
+happened". Missing bars never suppress a real exit; they only downgrade what the
+result claims. The newest bar may still be forming — the data provider exposes no
+way to tell — so a complete window means "everything that should be there was
+examined", never "nothing further can happen".
+
+Like every other command here it runs exactly once and exits.
+`orion paper` is unchanged and still resolves on the last price.
+
+### Watching a position continuously (Mission 9 Phase 3)
+
+```bash
+uv run orion monitor XAUUSD --interval 300
+```
+
+Runs the check above every `--interval` seconds until you stop it. A stop-loss
+that is only checked when somebody types a command is not really a stop-loss,
+and this is the one ORION command that keeps running — everything else does one
+thing once.
+
+`--interval` is **required and has no default**, minimum 60 seconds: a cadence
+is your deployment decision, and ORION will not pick one for you.
+
+Each pass is completely independent — it re-reads the account, re-reads `.env`
+(so the kill switch still takes effect without a restart), opens and closes its
+own database handles, and remembers nothing. A crash costs at most the check in
+flight. Nothing is scheduled or daemonised: it runs in the foreground because
+you typed it, and restarting it is your process supervisor's job.
+
+**Ctrl-C or SIGTERM stops it after the check in progress finishes**, never
+during one — an interrupted check could leave a real trade with no audit record.
+A check that fails is not retried; the next one starts fresh. Three consecutive
+failures stop it with exit code 7, because a lost race with another writer fixes
+itself on the next pass while a broken disk or a dead vendor does not.
+
+An account with nothing open keeps the monitor alive and costs **zero** vendor
+requests per pass, so a short interval is cheap. Running two monitors against
+one account is safe — the account's compare-and-swap refuses the stale writer
+rather than letting it overwrite — but wasteful, and unsupported.
+
+It calls no AI model, needs no `ANTHROPIC_API_KEY`, never opens a position, and
+reaches no broker or venue.
+
 ## Development
 
 ```bash
@@ -186,7 +270,8 @@ src/orion/
     reflection/       # Mission 5 - what was predicted, beside what happened. No score.
     memory/           # append-only SQLite decision journal
     orchestrator/     # Mission 10 Phase 5.1 - wires the above into one auditable analysis
-    cli.py            # `orion analyze|account|paper|reflect` - the console entrypoint
+    monitor/          # Mission 9 Phase 3 - one stateless pass, and the only loop in ORION
+    cli.py            # `orion analyze|account|paper|resolve|monitor|reflect` - the entrypoint
 
     interface/        # Mission 10 Phase 2 - localhost HTTP adapter over the voice runtime
     voice/            # Mission 9 - STT/TTS providers, audio I/O, the voice state machine

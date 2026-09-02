@@ -5056,3 +5056,521 @@ three tests), `tests/orchestrator/test_schemas.py` (two),
 shape, and why the store still tolerates a collision). No frontend file, no
 `orion.interface` file, no `orion.analysts` file, no `orion.paper`/`orion.risk`/
 `orion.decision` source file and no dependency manifest was touched.
+
+## 2026-09-03 — Mission 9 Phase 1: resolving a position is separated from analysing the market
+
+**The problem, stated exactly.** `orion.paper.session.run_cycle` had two
+branches. The first resolved an open position against a price; the second
+considered a new one. Only the second needed an analysis — but both sat behind
+one function, reachable only through `orion paper`, which runs
+`AnalysisService.run` before it calls `run_cycle` at all. So checking whether a
+stop-loss had been reached required a market-data request, `build_evidence`, a
+**Claude call**, a `ProposedDecision` and a `RiskVerdict`, and the branch doing
+the checking read none of them. Three consequences, all real: a deployment
+without `ANTHROPIC_API_KEY` could not honour a stop it had already committed to;
+an Anthropic outage or rate limit disabled exit handling; and an open position
+was checked only when a human typed a command, because the only thing that could
+check it was the analysis command.
+
+**The decision: extract the branch, narrow its input, and give it a verb.**
+`resolve_position` is that first branch, exported from the same module.
+`resolve_stop_take_profit` now takes an `ObservedPrice` — the two fields it
+actually reads — instead of an `Evidence`. `orion resolve SYMBOL` fetches one
+price and calls it. Nothing about what a resolution *does* changed; what changed
+is what must happen before one can.
+
+**The resolver was asking for far more than it used.** It read exactly
+`evidence.symbol` and `evidence.last_price`. `Evidence` additionally carries a
+timeframe, a bar count, an `IndicatorSnapshot` and a `StructureSnapshot`, none of
+which it touched. The precedent for the narrower shape was already in the
+repository: `orion.backtest.execution.resolve_stop_take_profit_ohlc` has always
+taken `(portfolio, bar, policy, now)` and never an `Evidence`, because the
+backtest engine had no reason to build one for a resolution either.
+
+**`ObservedPrice` is a Protocol, so no existing caller changed.** It declares
+`symbol` and `last_price` as read-only properties, and `Evidence` satisfies it
+structurally. Every pre-Mission-9 call site — `run_cycle`, and the twenty-odd in
+`tests/paper/`, `tests/memory/` and `tests/reflection/` that drive real closes
+through the real engine — compiles and passes untouched. The idiom is the one
+`JournalWriter` in the same package already uses: restate a *surface* so two
+unrelated types can satisfy it without either importing the other. Properties
+rather than plain annotations, so a frozen model satisfies it as readily as a
+mutable one. `as_of` is deliberately **not** a member: the resolver stamps a
+close with the caller-supplied `now`, and declaring a timestamp would claim a
+dependency this function does not have.
+
+**`PriceObservation` is the concrete value type, and it lives in
+`orion.data.models`.** A symbol, a last price, and the bar timestamp the price
+was true at — frozen, `extra="forbid"`, positive price, timezone-aware `as_of`:
+exactly the discipline every other model in that module already has. It sits
+beside `OHLCVBar`/`MarketSnapshot` because it is a market-data shape, not a paper
+one, and that module is a leaf importing nothing from the engines. It carries
+`as_of` even though the resolver does not read it: a price without a time is not
+evidence of anything, the CLI prints it, and that limit is documented rather than
+left for a reader to discover. It must never grow an indicator — the moment it
+can answer "what is the trend", something will reason from it, and reasoning is
+`Evidence`'s job.
+
+**EXIT NEEDS NO NEW AUTHORITY, AND NONE WAS ADDED. THIS IS THE LOAD-BEARING
+CLAIM OF THE MISSION.** A stop-loss and a take-profit are not decisions taken at
+resolution time. They were proposed by the model, narrowed by the Decision
+Engine, approved by `orion.risk.guardian.review`, and stamped onto the `Position`
+at the moment it was opened — `Position.stop_loss`, `Position.take_profit`,
+`Position.opened_by_verdict_fingerprint`. Reaching one is the *execution of a
+permission already granted*, not a request for a new one — the same way a real
+broker's resting stop order does not re-ask permission to fill.
+`orion.paper.execution`'s module docstring has said exactly this since Mission 4;
+Mission 9 relies on that rather than inventing it. Concretely, therefore: no
+control was added to `orion.risk`, no `RiskControlName` member, no `ExitPolicy`,
+no `ExitAuthority`, no `CloseReason` member, and **no file under
+`src/orion/risk/` was modified at all**. `CloseReason` still has exactly two
+members, so a close nobody approved remains unrepresentable. Had exit genuinely
+required new authority, the correct response would have been to build it in
+`orion.risk` — it does not, and building one anyway would have created a second
+authority able to diverge from the Guardian, which is precisely the failure
+`orion.reflection` already refuses to become.
+
+**`resolve_position` returns `CycleResult | None`, and `None` is not an
+outcome.** A flat account has nothing to resolve. Reporting `HOLDING` would make
+that outcome ambiguous between "a position is open and neither level was
+reached" and "there is no position at all", and adding a `CycleOutcome` member
+for it would widen an enum every renderer and exit-code table reads. `None` is
+the not-applicable idiom `orion.decision.rules` and `orion.risk.controls`
+already use. `run_cycle` falls through to its entry branch on `None`; the CLI
+prints one sentence and exits 0.
+
+**It takes a `PortfolioRecord`, not a `PortfolioStore`, to read from.** The
+record carries the revision the compare-and-swap needs, so `run_cycle` still
+loads the account exactly once and the extraction adds no second read. The
+load-failure branch stays with the caller that already had it.
+
+**Persistence, ordering and the sole-writer guarantee are untouched.** The
+account is saved before the journal is written, always (Mission 5's Finding A);
+a close writes no `AuditChain`, because the records that authorised the position
+were journaled by the cycle that opened it; journal writes remain
+content-addressed and idempotent, so the crash window is still recoverable by
+replay. The extraction stays **inside `paper/session.py`** specifically so
+`tests/paper/test_session.py::test_nothing_else_in_src_calls_record_fill_or_record_closed_position`
+— which asserts `callers == {"paper/session.py"}` — keeps passing unweakened. A
+second module journaling closes would have been a second production writer,
+which Mission 5's Finding B says must not exist.
+
+**HOLDING still writes nothing, and that matters more than it used to.** The
+marked-to-market projection is computed and returned but never saved. At one
+invocation a day that was tidiness; at monitoring frequency it is the difference
+between an account that records decisions and one that records that somebody
+looked. `tests/paper/test_resolution.py` asserts the *revision* is unchanged
+across five consecutive holds, not merely that `save` was not called.
+
+**The CLI verb is `orion resolve SYMBOL`, a bare verb.** Three of the four
+existing top-level commands (`analyze`, `paper`, `reflect`) are bare verbs;
+`account` is a noun group because it has two actions. Resolution has one action,
+and a noun group containing a single verb is structure built ahead of need,
+which this codebase's own precedents refuse. It fetches one bar, validates it
+with `validate_snapshot` against the same `RiskPolicy.max_staleness_bars` the
+analysis path uses (a month-old bar must never resolve a stop; with one bar only
+EMPTY and STALE can fire, the rest need two), builds a `PriceObservation` and
+calls `resolve_position`. New exit code `EXIT_PRICE_UNAVAILABLE = 9`, distinct
+from `EXIT_ANALYSIS_FAILED` because no analysis was attempted.
+
+**One credential, and the wiring says so.**
+`orion.orchestrator.wiring.market_data_available` tests only
+`TWELVE_DATA_API_KEY`, and `build_market_data_provider` returns the bare
+`MarketDataProvider` ABC with no reasoning provider, no policy and no analyst
+around it. `NOT_CONFIGURED_FOR_PRICES_MESSAGE` names only the key this command
+uses — telling a user to set `ANTHROPIC_API_KEY` for a command that never calls
+a model would be a false statement in the one place a user is most likely to
+believe it. This is a second construction of `TwelveDataProvider` in the same
+file rather than a shared helper: the two callers want different things, and
+collapsing them is exactly how a reasoning provider would find its way back onto
+the resolution path. `tests/test_secret_handling.py`'s exact
+`get_secret_value()` count moves 4 to 5 to record it.
+
+**What is deliberately still absent.** No scheduler, no daemon, no loop, no
+thread, no sleep, no retry, no broker, no MT5, no live execution —
+`tests/paper/test_session.py::test_the_session_contains_no_sleep_retry_or_thread`
+still passes. Mission 9 Phase 1 makes frequent resolution *possible and cheap*;
+it schedules nothing, and scheduling remains a separate mission with its own
+approval. Intrabar resolution is also still deferred: the forward path remains
+last-price-only, so a price that travels through a level and back between two
+invocations is not seen. Adopting `resolve_stop_take_profit_ohlc` on the forward
+path changes fill semantics and deserves its own entry. Multi-symbol and
+multi-position remain out of scope; `PortfolioState` is still one symbol and at
+most one position.
+
+**Tests.** 24 added, none weakened or deleted.
+`tests/paper/test_resolution.py` (12): resolution with no reasoning provider,
+stop and target both, the verdict fingerprint surviving a close performed with no
+verdict in sight, a flat account returning `None`, symbol mismatch failing
+closed, HOLDING leaving the revision untouched across five passes, a price sweep
+across the whole geometry producing no `Fill`, an AST walk of
+`resolve_position`'s own body asserting it calls no
+`execute`/`record_fill`/`compute_position_size`/`review`/`decide`, the extracted
+path journaling identically to `run_cycle` (same `ClosedPosition`, same
+fingerprint, same writes, same resulting account), and `Evidence` still
+satisfying `ObservedPrice`. `tests/test_cli_resolve.py` (12): every one runs with
+`ANTHROPIC_API_KEY` deleted *and* `anthropic.Anthropic` monkeypatched to raise if
+constructed, so "no model was called" is proven by the call being impossible;
+plus one fetch of one bar on the configured timeframe, holding writing no
+revision, a flat account never reopening, refusals that create no database and
+spend no vendor credit before checking for an account, a provider error leaking
+neither vendor nor key, and a stale price refusing rather than closing.
+
+**Files changed.** `src/orion/data/models.py` (`PriceObservation`),
+`src/orion/paper/execution.py` (`ObservedPrice`, the narrowed resolver signature
+and its message), `src/orion/paper/session.py` (`resolve_position`, and
+`run_cycle` delegating to it), `src/orion/orchestrator/wiring.py`
+(`market_data_available`, `build_market_data_provider`), `src/orion/cli.py` (the
+verb, `render_resolution`, `_run_resolve`, `_default_market_data_factory`,
+`MarketDataFactory`, one exit code and three messages), `README.md`. Tests:
+`tests/paper/test_resolution.py` and `tests/test_cli_resolve.py` (new),
+`tests/paper/test_execution.py` (one `match=` string, for the renamed parameter),
+`tests/test_cli.py` (the verb surface, the import allowlist, and a new ban on
+reasoning imports in the CLI), `tests/test_cli_account.py` (the verb surface),
+`tests/test_secret_handling.py` (the unwrap count). **No file under
+`src/orion/risk/` was touched**, nor `orion.memory`, `orion.paper.store`,
+`orion.decision`, `orion.reflection`, `orion.backtest`, `orion.interface`, any
+frontend file, or any dependency manifest.
+
+## 2026-09-03 — Mission 9 Phase 2: exits resolve on the bar range, and gaps fill honestly
+
+**The hole Phase 1 left.** Phase 1 made resolution cheap — no model call, one
+credential — but it still asked the same question it always had: *is the last
+price beyond the level?* A price that crosses a stop and comes back before the
+next observation leaves **no trace in any bar's close**, so a position that
+genuinely stopped out reported `HOLDING` and stayed open. Making resolution
+frequent did not fix that; it only narrowed the window in which it could happen.
+The information was never missing — `OHLCVBar` has carried `high` and `low`
+since Mission 0, and `orion resolve` was fetching them and reading only `close`.
+
+**The decision: detect on the bar range, scan every bar since the entry, and
+report how much of that window was actually seen.**
+`resolve_stop_take_profit_bars` is a new sibling in `orion.paper.execution`;
+`resolve_stop_take_profit` is untouched and still what `run_cycle` calls.
+
+**WHY OHLC DETECTION IS NOT LOOK-AHEAD.** Mission 4's B6 chose last-price-only
+resolution and justified it as "correct for live trading (no visibility into the
+future)". That reasoning is about *future* bars. A bar that has already closed is
+the past: its low is a price that genuinely traded, and refusing to look at it
+does not make the system more conservative, it makes it blind. The detection rule
+is the Mission 6 one, reused verbatim and cited rather than re-decided —
+including M6-Q2's stop-first tie-break when a single bar reaches both levels,
+because OHLC still cannot say which came first.
+
+**WHY FORWARD FILLS DIFFER FROM BACKTEST FILLS — THE LOAD-BEARING DIVERGENCE.**
+`orion.backtest.execution.resolve_stop_take_profit_ohlc` always fills at the
+level: a bar with `low=2340` against a stop at `2350` books the exit at `2350`,
+pinned by `tests/backtest/test_execution.py`. That models a resting order and is
+defensible for replaying history. Adopting it forward would have been a silent
+regression in honesty — on every adverse gap the paper account would report a
+smaller loss than the market handed out, in a module whose own fill helpers are
+documented as never being more favourable than the real cost of trading. So the
+backtest keeps its rule, unmodified, and the forward path gets its own.
+
+**THE WORST-OF GAP RULE.** Fill at the level, **unless the bar had already
+opened through it**, in which case fill at the open. Stated once and symmetric
+in all four cases: if `bar.open` on its own already satisfies the trigger
+condition, the level was never available after the bar began.
+
+    LONG  stop    triggers on price <= stop_loss    -> an open below it wins
+    LONG  target  triggers on price >= take_profit  -> an open above it wins
+    SHORT stop    triggers on price >= stop_loss    -> an open above it wins
+    SHORT target  triggers on price <= take_profit  -> an open below it wins
+
+Deterministic, computed only from `open` and the position's own levels, using no
+data the bar does not already carry and inventing no vendor behaviour. Spread,
+slippage and fees still apply on top through the existing helper, so a gapped
+exit is never better than a clean one. `_close_at` was extracted so both forward
+resolvers share one copy of the cash-conservation arithmetic rather than growing
+a third.
+
+**BARS AT OR BEFORE `Position.opened_at` ARE EXCLUDED.** The bar the position was
+opened from had already traded its range before the entry existed; honouring its
+extremes would close a position on prices that predate it. Excluding the whole
+bar containing `opened_at` also discards the part of it after entry — a missed
+exit, never an invented one, and the conservative direction. `orion.backtest.
+engine` reaches the same exclusion positionally by resolving from the bar after
+the entry; forward has no loop index, so the boundary is a timestamp comparison
+and is documented as a convention rather than a derivation.
+
+**WHY `ClosedPosition` WAS NOT TOUCHED.** It is journaled and content-addressed:
+adding a triggering-bar field would move the fingerprint of every future record
+and split the journal into pre- and post-Phase-2 shapes for a value nothing reads
+back. The bar timestamp is exposed on `CycleResult.triggering_bar_at` and printed
+by `orion resolve` instead — a container that is never journaled or hashed.
+`closed_at` remains the caller-supplied `now`, exactly as before; a close is
+still stamped when it was *recorded*, and the bar that caused it is provenance
+for a reader, not a second timestamp competing to be authoritative.
+
+**WHY COVERAGE LIVES OUTSIDE `CycleOutcome`.** `HOLDING` says "neither stop nor
+target was reached". That sentence is only true if every bar since the entry was
+examined, and a window can fall short two ways: it may not reach back to the
+entry, or it may be missing bars inside itself. Folding those into `CycleOutcome`
+would either multiply an enum that every renderer and exit-code table reads, or —
+worse — let an unexamined window pass as a clean hold. So `ResolutionCoverage`
+(`COMPLETE` / `TRUNCATED` / `GAPPED`) rides alongside the outcome on
+`CycleResult`, is `None` on every path that resolved no window (all of
+`run_cycle`), and is printed unconditionally by `render_resolution` so the happy
+case cannot be told apart from the blind one by omission. Three states rather
+than a bool, for the reason `orion.risk.schemas.ControlStatus` already gives for
+its own three: a truncated window is fixed by asking for more bars, a gapped one
+is the vendor's answer being short and cannot be.
+
+**A GAP DOWNGRADES THE CLAIM; IT DOES NOT REFUSE.** `orion resolve` still runs
+`validate_snapshot` and still refuses outright on EMPTY, STALE, NON_MONOTONIC and
+DUPLICATE_TIMESTAMP — data it cannot trust at all. `GAP` alone is treated
+differently, and that asymmetry is the whole design: a gap means *some bars are
+missing*, which is exactly what `GAPPED` reports, and refusing on it would leave
+a real stop unhonoured every time the window spans a market weekend. Fail-closed
+here means failing the *claim*, not the exit.
+
+**THE VENDOR-GAP QUESTION IS OPEN, AND THE DESIGN DOES NOT DEPEND ON IT.** Every
+Twelve Data test in this repository uses synthetic, contiguous two-bar payloads,
+so nothing here establishes whether real XAUUSD H1 output actually contains
+weekend gaps; determining it would need a live network call, which no test adds.
+The uncertainty is recorded rather than resolved, and the behaviour is correct
+either way: if such gaps occur, resolution proceeds and says `GAPPED`; if they do
+not, nothing changes.
+
+**THE FORMING BAR, WITHOUT INVENTING A FLAG.** The provider exposes no
+completion marker and none was fabricated. The asymmetry that follows is stated
+in the code: a hit seen in the newest bar closes the position, because those
+prices traded; the *absence* of a hit in a possibly-forming bar proves nothing
+about the rest of it. `COMPLETE` therefore means "every bar the window should
+contain was present and examined", never "nothing further can happen", and the
+rendered text says so.
+
+**THE FETCH WINDOW IS DERIVED, THEN CAPPED.** `orion resolve` now reads the
+account *before* asking the vendor — the window comes from `opened_at`, and an
+account with nothing open costs zero vendor requests instead of one.
+`resolution_window_bars` requests one bar per elapsed interval plus a two-bar
+margin (the margin is what lets coverage *prove* the window reached back rather
+than assume it), capped at `MAX_RESOLUTION_BARS = 500` so a position left open
+for months cannot turn one command into an unbounded request. A window that hits
+the cap reports `TRUNCATED`; it is never passed off as complete.
+
+**`orion paper` IS THE COMPATIBILITY PATH AND IS UNCHANGED.** `run_cycle` keeps
+its signature and its last-price resolver, and its results carry no coverage and
+no triggering bar. Making it intrabar-aware would mean widening `AnalysisReport`
+to carry bars — `Evidence` has no `high`/`low` — which is a change to the
+orchestrator contract for no gain the new verb does not already provide. The two
+forward paths therefore differ deliberately: `orion paper` opens positions and
+resolves on a last price, `orion resolve` resolves on the bar range. Both share
+one persistence branch, so there is still exactly one way a close is written.
+
+**NO NEW EXIT AUTHORITY EXISTS, AND THAT IS UNCHANGED FROM PHASE 1.** The stop
+and target honoured here were proposed by the model, narrowed by the Decision
+Engine and approved by `orion.risk.guardian.review` when the position opened;
+reaching one executes a permission already granted. Phase 2 changes only *how a
+crossing is detected* and *what price it fills at* — never who may close. No
+control was added to `orion.risk`, no `RiskControlName` member, no `ExitPolicy`,
+no `ExitAuthority`, no `CloseReason` member, no `JournalWriter` method, and **no
+file under `src/orion/risk/` or `src/orion/backtest/` was modified at all**.
+
+**Preserved, and asserted.** Account-before-journal ordering; no second
+`AuditChain` on a close; content-addressed idempotent journal writes; immutable
+portfolio state; `HOLDING` creating no `PortfolioStore` revision (now across
+repeated bar-path passes); `paper/session.py` remaining the sole production
+caller of `record_fill`/`record_closed_position`; no network imports in
+`paper/session.py`; no sleep, retry, thread or loop anywhere. All four structural
+guards in `tests/paper/test_session.py` pass unmodified.
+
+**Tests.** 54 added, none weakened or deleted.
+`tests/paper/test_resolution_bars.py` (30): the four directional cases on
+`[low, high]`; both-touched resolving as a stop for LONG and SHORT; a bar range
+that touches nothing; the same bar holding on last price and closing on its
+range; all four gap-through cases filling at the open; a non-gapped bar still
+filling at the level; a gapped stop booking a worse loss than the level would;
+spread and slippage still worsening the fill on top; first-triggering-bar wins
+and later bars ignored; quiet bars before a hit; the entry bar excluded;
+`eligible_bars` boundaries; a window entirely before the entry leaving the
+account untouched; symbol mismatch raising; a flat account closing nothing; no
+bar ever producing a fill; and seven `window_coverage` cases including a hole
+*before* the entry correctly not counting as gapped.
+`tests/paper/test_resolution.py` (+13): the bar path through `resolve_position` —
+closing where a last price holds, account-then-journal ordering, no fill, the
+triggering bar reported but not journaled, repeated holding creating no revision,
+symbol mismatch failing closed, all three coverage states surfacing on the
+result, an imperfect window still closing a real hit, the last-price path
+claiming no coverage, and `run_cycle` results carrying neither field.
+`tests/test_cli_resolve.py` (+11, fixtures reworked): the derived window sized
+from `opened_at` and bounded by the cap, wick-through-target and
+wick-through-stop closing from the command line, the triggering bar rendered, a
+gap through the stop filling at the open as read back *from the journal*, all
+three coverage states rendered with `INCOMPLETE` spelled out, a gapped window
+still closing a real hit, and a flat account now spending no vendor request at
+all. Every one still runs with `ANTHROPIC_API_KEY` deleted and
+`anthropic.Anthropic` monkeypatched to raise if constructed.
+
+**Files changed.** `src/orion/paper/execution.py` (`resolve_stop_take_profit_bars`,
+`eligible_bars`, `_levels_reached`, `_trigger_price`, and `_close_at` extracted
+from the existing resolver), `src/orion/paper/session.py` (`ResolutionCoverage`,
+`INCOMPLETE_COVERAGE`, `window_coverage`, two `CycleResult` slots and a
+`coverage_is_incomplete` property, `resolve_position`'s optional `bars`),
+`src/orion/cli.py` (`resolution_window_bars`, `MAX_RESOLUTION_BARS`,
+`_COVERAGE_SUMMARY`, `_COVERAGE_ONLY_DATA_ISSUES`, account-before-fetch
+reordering, coverage and triggering-bar rendering), `README.md`. Tests:
+`tests/paper/test_resolution_bars.py` (new), `tests/paper/test_resolution.py`,
+`tests/test_cli_resolve.py`. **No file under `src/orion/risk/` or
+`src/orion/backtest/` was touched**, nor `orion.memory`, `orion.paper.schemas`,
+`orion.paper.store`, `orion.decision`, `orion.reflection`, `orion.orchestrator`,
+any frontend file, or any dependency manifest.
+
+## 2026-09-03 — Mission 9 Phase 3: a supervised monitor, and the one loop ORION has
+
+**What Phases 1 and 2 left.** Resolution became cheap (no model, one credential)
+and then accurate (intrabar, coverage-reported). It was still only ever run when
+somebody typed `orion resolve`. A stop-loss checked by hand is not a stop-loss,
+and the gap between two hand-typed invocations is exactly the interval Phase 2
+worked to make visible. Phase 3 closes it with a foreground supervisor and
+nothing else.
+
+**The decision: one new package, one new verb, one loop.**
+`src/orion/monitor/` holds `iteration.py` (one stateless pass) and
+`supervisor.py` (the loop). `orion monitor SYMBOL --interval N` enters it.
+`orion resolve` is unchanged in behaviour, output and exit codes, and now
+delegates to the same pass.
+
+**THE ITERATION WAS EXTRACTED, NOT REWRITTEN.** Phase 2 put the sequence — read
+the account, derive a window, fetch it, validate it, resolve — inside
+`orion.cli._run_resolve`, welded to `print` and exit codes. A second copy on a
+timer would have drifted from the first within a mission. `resolve_once` is that
+sequence with the printing removed and every collaborator taken as an argument,
+and both verbs call it. There is one implementation of what a monitoring pass
+does, and `tests/monitor/test_iteration.py` drives it directly.
+
+**THE SUPERVISOR KNOWS NOTHING ABOUT TRADING, AND THAT IS THE SAFETY ARGUMENT.**
+`run_monitor` takes `Callable[[], bool]` — `True` for progress, `False` for a
+failed pass — and that is its entire contract. It never sees a `PortfolioStore`,
+a `CycleResult`, a price or a position, so "stateless between iterations" is a
+property of the type signature rather than a discipline someone must keep. A
+test walks its AST and asserts the words `store`, `journal`, `record`,
+`portfolio`, `revision`, `price` and `cycle` appear nowhere in it.
+
+**EVERY COLLABORATOR IS BUILT AND DESTROYED PER PASS.** `_one_iteration` opens
+the engine, store and journal, runs the pass, and disposes them; the vendor
+client is constructed inside the pass and dies with it. No account state, no
+revision, no connection and no HTTP client crosses an iteration boundary, so a
+crash costs at most the pass in flight and a restart simply performs the next
+one. The `PortfolioStore` is the only thing that remembers anything, which is
+what makes repetition safe.
+
+**SETTINGS ARE RE-READ EVERY PASS, NEVER CAPTURED.**
+`RiskPolicy.from_settings` documents that a fresh, uncached `get_settings()` per
+cycle is what gives an operator kill-switch response with no restart. A monitor
+that read `.env` once at startup would have been the first thing in ORION
+requiring a restart to respect it — which matters more over a process that runs
+for days, not less.
+
+**NO RETRY, AND THE DIFFERENCE IS WHAT MAKES THE CEILING WORK.** A failed pass is
+never attempted again; the next scheduled pass does fresh work from the store.
+That is what lets a single counter distinguish two very different things without
+inspecting one exception: **a lost race against another writer heals itself** —
+the position is simply gone, and the next pass reports nothing to resolve —
+while a broken disk or a dead vendor does not. So consecutive failures are the
+signal, any success clears the count, and three in a row stop the loop with the
+existing `EXIT_CYCLE_FAILED`. No new `CycleOutcome`, no new exit code.
+
+**SHUTDOWN NEVER INTERRUPTS A PASS.** `_persist` writes the account and then the
+journal, and a process torn down between those two leaves a real trade with no
+audit row. So SIGINT and SIGTERM set a flag rather than raising: Python's default
+SIGINT raises `KeyboardInterrupt` at whatever line is executing, which could be
+exactly there. The flag is read only between passes and during the wait, the
+wait is a `threading.Event` so a signal wakes it immediately instead of after a
+full interval, and every exit path is taken *before* sleeping — a stopping loop
+never waits first. No thread is started anywhere; the `Event` is used solely for
+its interruptible wait.
+
+**THE INTERVAL IS REQUIRED AND HAS NO DEFAULT.** A cadence is a deployment
+assumption, and a shipped default becomes the number everybody runs without
+having chosen it — the same reasoning that makes `orion account open --balance`
+required. `nan` and `inf` both parse as floats and neither is a duration, so
+both are refused along with anything under `MIN_MONITOR_INTERVAL_SECONDS = 60`,
+which on the default 1h chart is already sixty checks per bar. Nothing was added
+to `Settings`: two surfaces for one decision would immediately raise the question
+of which wins.
+
+**PREFLIGHT RUNS BEFORE THE LOOP.** An unknown symbol, a missing account and a
+missing market-data credential cannot heal by waiting. Discovering one on the
+first pass and then sleeping an hour would be the worst available behaviour, so
+all three are checked up front, exit with the codes `orion resolve` already
+returns, and reach no vendor and no sleep.
+
+**A FLAT ACCOUNT KEEPS THE MONITOR ALIVE AND COSTS NOTHING.** Phase 2 made the
+pass read the account before the vendor, so an account with nothing open builds
+no HTTP client and makes no request. That is what makes a short interval
+defensible against a rate-limited free tier, and it is why "nothing to resolve"
+counts as progress rather than a failure.
+
+**OVERLAPPING MONITORS ARE PERMITTED AND UNGUARDED, DELIBERATELY.**
+`SqlitePortfolioStore.save` compares the revision inside its transaction and
+inserts under a primary-key constraint, so a stale writer raises
+`PortfolioStoreConcurrencyError`, writes nothing and overwrites nothing. CAS is
+the concurrency authority and needs no help. A lockfile would add stale-lock
+recovery — its own failure mode — for no safety gain, so none was added. Two
+monitors on one account is wasteful (double vendor spend), not unsafe, and is
+documented as unsupported rather than blocked.
+
+**`JOURNAL_UNAVAILABLE` IS NOT SELF-HEALING, AND NOTHING PRETENDS OTHERWISE.**
+If the account write succeeds and the journal write then fails, the trade is real
+and its audit row is missing (Mission 5's Finding A, unchanged). The next pass
+cannot repair it: being stateless, it has lost the `ClosedPosition` the replay
+would need, and the position is already gone from the account, so the pass
+correctly reports nothing to resolve. A monitor makes this more likely to occur
+than a hand-typed command did, purely by running more often. It is recorded here
+rather than papered over with an invented recovery.
+
+**NO OBSERVABILITY WAS ADDED.** No logging framework, no metrics, no health
+endpoint, no alerting, no systemd unit, no container. `orion.cli` states it
+imports no logging framework and that is still true. Each pass prints the same
+human rendering `orion resolve` prints, to stdout, which whatever supervises the
+process already captures. Mission 13 owns this and would likely replace anything
+bespoke added now.
+
+**WHAT THE LOOP STILL CANNOT DO.** No entry analysis, no proposal, no Risk
+Guardian call, no `execute()`, no model. `tests/monitor/test_import_hygiene.py`
+asserts `orion.monitor` imports none of `anthropic`, `orion.reasoning`,
+`orion.analysts`, `orion.risk.guardian`, `orion.risk.controls`,
+`orion.decision`, `orion.orchestrator`, `orion.config` or `orion.paper.execution`
+— that last one because `execute()` is what opens positions. Every CLI monitor
+test runs with `ANTHROPIC_API_KEY` deleted and `anthropic.Anthropic` replaced by
+something that raises.
+
+**Tests.** 65 added, none weakened or deleted.
+`tests/monitor/test_supervisor.py` (17): exact iteration counts; a wait between
+passes and none after the last; a single pass never waiting; the configured
+interval passed through exactly; a flag set before the loop running zero passes;
+a signal arriving mid-pass honoured only after it completes and without a wait;
+shutdown during the wait; handler idempotence; the installed handler setting a
+flag rather than raising; one failure not stopping; three consecutive failures
+stopping; a success resetting the count; an unbroken run being required; an
+exception propagating rather than being counted or swallowed; and the AST check
+that no domain name appears in the loop. Not one of them sleeps.
+`tests/monitor/test_iteration.py` (13): a wick through the stop closing where a
+last price holds; a quiet window holding and writing no revision; coverage
+surfacing as COMPLETE and TRUNCATED; the window derived from how long the
+position has been open; a flat account building no client at all; unreadable
+account, missing credential, vendor failure, stale data and symbol mismatch each
+reported rather than raised; no fill ever written; and identical inputs producing
+identical results down to the journal fingerprint.
+`tests/monitor/test_import_hygiene.py` (7) and `tests/test_cli_monitor.py` (28):
+the verb, the required interval, ten rejected interval values, the exact minimum
+accepted, preflight before any loop/vendor/sleep, a bounded run closing a
+position, a flat account staying alive and spending nothing, three failures
+exiting 7, each pass reading the account fresh, no Anthropic client ever
+constructed, and `orion resolve` still doing one thing once.
+
+**Files changed.** `src/orion/monitor/__init__.py`, `iteration.py`,
+`supervisor.py` (new); `src/orion/cli.py` (the verb, `_monitor_interval`,
+`_run_monitor`, `_resolvable_symbol`, `_one_iteration`, `_report_iteration`,
+`_iteration_exit_code`, four messages, the corrected "no loop" docstring, and
+`_run_resolve` reduced to preflight plus delegation); `tests/conftest.py` (the
+`account_home` and `no_model` fixtures, shared by both Mission 9 verbs);
+`tests/test_cli.py`, `tests/test_cli_account.py` (verb surface and import
+allowlist); `tests/test_cli_resolve.py` (fixtures moved to conftest, window
+helper imported from its new home); `README.md`. **No file under
+`src/orion/risk/`, `src/orion/backtest/` or `src/orion/memory/` was touched**,
+nor `orion.paper` (`run_cycle`, `resolve_position`, `CycleOutcome`,
+`ClosedPosition`, `CloseReason` and the journal writer interfaces are all
+exactly as Phase 2 left them), nor `orion.orchestrator` schemas, nor any
+frontend file or dependency manifest.

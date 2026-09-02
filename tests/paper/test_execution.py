@@ -634,7 +634,9 @@ def test_resolve_short_position_at_take_profit_closes_with_a_gain() -> None:
 def test_resolve_rejects_a_symbol_mismatch() -> None:
     portfolio = build_portfolio(symbol="EURUSD", open_position=build_position())
     evidence = build_evidence(last_price=2500.0)  # symbol="XAUUSD"
-    with pytest.raises(PaperExecutionError, match="does not match evidence.symbol"):
+    # "price.symbol", not "evidence.symbol": Mission 9 narrowed this parameter
+    # to `ObservedPrice`, and the message names the parameter it actually has.
+    with pytest.raises(PaperExecutionError, match="does not match price.symbol"):
         resolve_stop_take_profit(portfolio, evidence, policy=ZERO_COST_POLICY, now=BASE_TIME)
 
 

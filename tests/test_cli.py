@@ -362,13 +362,24 @@ def test_the_verb_surface_is_exactly_analyze_account_paper_and_reflect() -> None
     unchanged and the assertion is narrowed rather than dropped. `open` and
     `show` are the account verb's own actions; both are listed, so a third one
     cannot appear here unnoticed.
+
+    Mission 9 adds `resolve`, and it is the least venue-shaped verb here: it
+    closes a *simulated* position against the stop or target the Risk Guardian
+    already approved, it cannot open one, and it reaches no broker for the same
+    reason nothing else does -- there is no broker anywhere in this codebase.
+
+    Mission 9 Phase 3 adds `monitor`, which is `resolve` on a repeating
+    interval and nothing more. It is the one verb that keeps running, and it
+    still cannot open a position, call a model, or reach a venue -- the loop
+    changes how often the same refusal-bounded work happens, never what it is
+    allowed to do.
     """
     choices = {
         name
         for action in build_parser()._actions
         for name in getattr(action, "choices", None) or ()
     }
-    assert choices == {"analyze", "account", "paper", "reflect"}
+    assert choices == {"analyze", "account", "paper", "reflect", "resolve", "monitor"}
 
 
 def test_no_verb_or_flag_offers_live_execution() -> None:
@@ -551,9 +562,42 @@ def test_the_cli_imports_only_what_an_entrypoint_needs() -> None:
         "orion.memory.journal",
         "orion.reflection.analysis",
         "orion.reflection.schemas",
+        # Mission 9: the resolution path. `orion.data.provider_base` is the ABC
+        # this module types its seam against -- the concrete provider is still
+        # built in `orion.orchestrator.wiring`, never here -- and the other two
+        # are the price value type it constructs and the quality check it runs
+        # before trusting one. No reasoning module appears, and none may: the
+        # whole point of this path is that it calls no model.
+        "orion.data.models",
+        "orion.data.provider_base",
+        # Mission 9 Phase 3: the shared monitoring iteration and the supervisor
+        # that repeats it. `orion.monitor` is where the loop and the sleep live,
+        # so this file keeps none of either -- see the module docstring.
+        "orion.monitor.iteration",
+        "orion.monitor.supervisor",
         "__future__",
     }
     assert _imported_modules(_cli_source()) <= allowed
+
+
+def test_the_cli_never_imports_a_reasoning_or_analyst_module() -> None:
+    """Mission 9's decoupling, asserted where it could be undone.
+
+    `resolve` exists so a stop can be honoured without a model call. The way
+    that guarantee dies quietly is an import added here -- a reasoning provider
+    constructed "just for this one case" -- so the ban is explicit rather than
+    implied by the allowlist above.
+    """
+    imported = _imported_modules(_cli_source())
+    for forbidden in (
+        "anthropic",
+        "orion.reasoning",
+        "orion.reasoning.claude_provider",
+        "orion.analysts",
+        "orion.analysts.claude_macro_provider",
+        "orion.analysis.evidence",
+    ):
+        assert forbidden not in imported
 
 
 def test_the_cli_imports_no_engine_package_wholesale() -> None:

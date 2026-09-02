@@ -30,10 +30,21 @@ not a record, and it is the same seam every other verb here opens through.
 all, and it reports what was predicted beside what happened without scoring
 either.
 
-ONE CYCLE PER INVOCATION, AND THEN THE PROCESS EXITS. There is no scheduler, no
-daemon, no retry and no loop: `orion paper` does one thing once. Anything
-recurring is the operating system's job — a cron entry the user wrote — never a
-background thread this command started without being asked.
+ONE CYCLE PER INVOCATION, AND THEN THE PROCESS EXITS — WITH ONE NAMED
+EXCEPTION. `analyze`, `paper`, `resolve`, `reflect` and `account` each do one
+thing once and return; there is no retry, no daemon and no background thread any
+of them starts without being asked.
+
+`orion monitor` IS THE EXCEPTION, AND IT IS EXPLICIT (Mission 9 Phase 3). It
+repeats `resolve` on an interval the user supplies and keeps running until a
+signal stops it — because a stop-loss that is only checked when somebody types a
+command is not a stop-loss. The loop and the only sleep in `src/orion/` live in
+`orion.monitor.supervisor`, never in this file; this module builds the
+collaborators for each pass and hands them over, exactly as it does for every
+other verb. Nothing schedules that verb either: it runs in the foreground
+because someone typed it, and restarting it is a process supervisor's job.
+`tests/monitor/test_import_hygiene.py` asserts that the supervisor is the one
+place in the package tree that loops or sleeps.
 
 THE REPORT IS UNPACKED HERE, BECAUSE ONLY HERE CAN IT BE.
 `tests/orchestrator/test_import_hygiene.py` forbids every engine package,
@@ -143,17 +154,33 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from orion.config import get_settings
+from orion.data.models import PriceObservation
+from orion.data.provider_base import MarketDataProvider
 from orion.memory.engine import create_memory_engine
 from orion.memory.journal import DecisionJournal
 from orion.memory.portfolio_store import SqlitePortfolioStore
 from orion.memory.sqlite_journal import SqliteDecisionJournal
+from orion.monitor.iteration import IterationResult, IterationStatus, resolve_once
+from orion.monitor.supervisor import (
+    MonitorStop,
+    ShutdownSignal,
+    Sleeper,
+    install_shutdown_handlers,
+    run_monitor,
+)
 from orion.orchestrator.analysis import AnalysisService
 from orion.orchestrator.intent import DEFAULT_TIMEFRAME, known_symbols, parse_intent
 from orion.orchestrator.schemas import AnalysisReport, IntentKind, RiskAvailability
-from orion.orchestrator.wiring import build_analysis_service
+from orion.orchestrator.wiring import build_analysis_service, build_market_data_provider
 from orion.paper.policy import PaperExecutionPolicy
 from orion.paper.schemas import CloseReason
-from orion.paper.session import CycleOutcome, CycleResult, JournalWriter, run_cycle
+from orion.paper.session import (
+    CycleOutcome,
+    CycleResult,
+    JournalWriter,
+    ResolutionCoverage,
+    run_cycle,
+)
 from orion.paper.store import PortfolioRecord, PortfolioStore
 from orion.reflection.analysis import reflect_on_recent_closed_positions
 from orion.reflection.schemas import ReflectionBatch, TradeReflection
@@ -178,6 +205,11 @@ EXIT_CYCLE_FAILED = 7
 #: The journal could not be opened or read. A journal holding no closed trade
 #: yet is not this: an empty history is an ordinary answer, printed and exit 0.
 EXIT_REFLECTION_FAILED = 8
+
+#: The market price could not be fetched or was not usable. Separate from
+#: `EXIT_ANALYSIS_FAILED` because no analysis was attempted: the only thing that
+#: failed is the one request `resolve` makes.
+EXIT_PRICE_UNAVAILABLE = 9
 
 #: Fixed sentences. Nothing in this file is ever built from an exception, a
 #: vendor response, or the argument the user supplied.
@@ -211,6 +243,38 @@ NO_HISTORY_MESSAGE = "No paper history exists. Run 'orion paper SYMBOL' first."
 #: is bound, formatted or re-raised; this fixed sentence is printed instead.
 REFLECTION_FAILED_MESSAGE = "ORION could not read the trading journal."
 
+#: `resolve` needs one credential, not two. Named separately from
+#: `NOT_CONFIGURED_MESSAGE` so it never tells a user to set a key it does not
+#: use -- see `orion.orchestrator.wiring.market_data_available`.
+NOT_CONFIGURED_FOR_PRICES_MESSAGE = (
+    "ORION is not configured to fetch prices. Set TWELVE_DATA_API_KEY in .env."
+)
+#: `MarketDataProviderError` messages name the vendor and can carry response
+#: text; the data-quality path names bar timestamps. Neither is formatted here.
+PRICE_UNAVAILABLE_MESSAGE = "ORION could not fetch a usable market price."
+#: Not a failure and not a refusal: an account with nothing open has nothing to
+#: resolve, which is an ordinary answer printed on stdout with exit 0.
+NO_OPEN_POSITION_MESSAGE = "No open position. There is nothing to resolve."
+
+#: The smallest interval `orion monitor` accepts, in seconds. A floor, not a
+#: recommendation: on the default 1h chart even this is sixty checks per bar,
+#: and anything faster is spending a rate-limited vendor quota to learn nothing.
+#: There is deliberately no default interval -- see `_monitor_interval`.
+MIN_MONITOR_INTERVAL_SECONDS = 60.0
+INVALID_INTERVAL_MESSAGE = (
+    f"must be a finite number of seconds, at least {MIN_MONITOR_INTERVAL_SECONDS:g}"
+)
+#: Graceful stop: a signal arrived, the pass in flight finished, nothing was
+#: interrupted. Printed on stdout because it is the expected way to end.
+MONITOR_STOPPED_MESSAGE = "ORION stopped monitoring. The last check completed before exiting."
+#: The ceiling was reached -- see `orion.monitor.supervisor.MAX_CONSECUTIVE_FAILURES`.
+MONITOR_CEILING_MESSAGE = (
+    "ORION stopped monitoring after repeated failures. The paper account was not changed by them."
+)
+#: An unexpected exception escaped an iteration. Fixed, like every other
+#: failure here: the exception is never bound, formatted or printed.
+MONITOR_FAILED_MESSAGE = "ORION could not continue monitoring."
+
 #: How many closed trades `reflect` reports when no limit is given. A default,
 #: not a cap: the journal keeps every trade and `--limit` reaches further back.
 DEFAULT_REFLECTION_LIMIT = 10
@@ -231,6 +295,12 @@ AccountServiceFactory = Callable[[PortfolioStore], AnalysisService | None]
 #: calling `create_memory_engine`, which would answer it by creating one.
 StoreFactory = Callable[[str], PortfolioStore]
 
+#: How `resolve` obtains a price source. Deliberately *not* `ServiceFactory`:
+#: an `AnalysisService` carries a reasoning provider, and handing one to the
+#: resolution path would put an Anthropic client on it. `None` means "this
+#: deployment cannot fetch prices", the same degradation `ServiceFactory` uses.
+MarketDataFactory = Callable[[], MarketDataProvider | None]
+
 
 def _default_service_factory() -> AnalysisService | None:
     """Build one `AnalysisService` from the environment, or `None`.
@@ -241,6 +311,16 @@ def _default_service_factory() -> AnalysisService | None:
     `get_settings()` so engaging the kill switch never needs a restart.
     """
     return build_analysis_service(get_settings())
+
+
+def _default_market_data_factory() -> MarketDataProvider | None:
+    """Build one market-data provider from the environment, or `None`.
+
+    Settings read per invocation, like every other factory here. Nothing else
+    is constructed: no reasoning provider, no risk policy, no analyst — see
+    `orion.orchestrator.wiring.build_market_data_provider`.
+    """
+    return build_market_data_provider(get_settings())
 
 
 def _account_service_factory(store: PortfolioStore) -> AnalysisService | None:
@@ -361,6 +441,30 @@ def _positive_finite(text: str) -> float:
     return value
 
 
+def _monitor_interval(text: str) -> float:
+    """An `argparse` type for a monitoring interval, in seconds.
+
+    THERE IS NO DEFAULT, AND THAT IS THE POINT. A cadence is a deployment
+    decision, and shipping one would make it the number everybody runs without
+    ever having chosen it -- the same reason `orion account open` refuses to
+    guess a balance. So the flag is required and this only decides which values
+    are sane.
+
+    `nan` and `inf` both parse as floats and neither is a duration: `nan` fails
+    every comparison silently, and `inf` would mean one pass and then a sleep
+    that never ends. Both are refused here, along with anything below
+    `MIN_MONITOR_INTERVAL_SECONDS`, so argparse prints its own one-line usage
+    error and exits 2 without a traceback.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(INVALID_INTERVAL_MESSAGE) from None
+    if not math.isfinite(value) or value < MIN_MONITOR_INTERVAL_SECONDS:
+        raise argparse.ArgumentTypeError(INVALID_INTERVAL_MESSAGE)
+    return value
+
+
 def _positive_int(text: str) -> int:
     """An `argparse` type for a count: a whole number of at least 1.
 
@@ -447,6 +551,53 @@ def build_parser() -> argparse.ArgumentParser:
         "symbol",
         metavar="SYMBOL",
         help=f"The market to trade on paper. One of: {_known_symbols_text()}",
+    )
+
+    resolve = subcommands.add_parser(
+        "resolve",
+        help="Check the open paper position against the latest price. No analysis.",
+        description=(
+            "Fetch the latest price for SYMBOL and close the open paper position if it "
+            "has reached the stop-loss or take-profit the Risk Guardian approved when "
+            "the position was opened. Runs no analysis, calls no AI model and needs no "
+            "ANTHROPIC_API_KEY - only TWELVE_DATA_API_KEY. Runs exactly once and exits: "
+            "there is no scheduler, no daemon and no retry. It never opens a position, "
+            "and nothing reaches a broker or any venue."
+        ),
+    )
+    resolve.add_argument(
+        "symbol",
+        metavar="SYMBOL",
+        help=f"The market whose open position to resolve. One of: {_known_symbols_text()}",
+    )
+
+    monitor = subcommands.add_parser(
+        "monitor",
+        help="Resolve the open position on a repeating interval. Runs until stopped.",
+        description=(
+            "Run 'orion resolve SYMBOL' every --interval seconds until interrupted. This is "
+            "the one command that keeps running: everything else does one thing once. It "
+            "calls no AI model and needs no ANTHROPIC_API_KEY, only TWELVE_DATA_API_KEY. It "
+            "never opens a position, reaches no broker or venue, and places no real order. "
+            "Ctrl-C or SIGTERM stops it after the check in progress finishes, never during "
+            "one. It is a foreground process: restarting it is your process supervisor's "
+            "job, not ORION's."
+        ),
+    )
+    monitor.add_argument(
+        "symbol",
+        metavar="SYMBOL",
+        help=f"The market whose open position to monitor. One of: {_known_symbols_text()}",
+    )
+    monitor.add_argument(
+        "--interval",
+        type=_monitor_interval,
+        required=True,
+        metavar="SECONDS",
+        help=(
+            f"Seconds between checks. Required and has no default: at least "
+            f"{MIN_MONITOR_INTERVAL_SECONDS:g}. ORION does not choose a cadence for you."
+        ),
     )
 
     reflect = subcommands.add_parser(
@@ -982,6 +1133,326 @@ def render_cycle(symbol: str, report: AnalysisReport, result: CycleResult) -> st
     return "\n".join(lines)
 
 
+#: Printed for each coverage state. `COMPLETE` still says what it does *not*
+#: promise: the newest bar may be forming, and the market-data provider exposes
+#: no flag that would say otherwise.
+_COVERAGE_SUMMARY: dict[ResolutionCoverage, str] = {
+    ResolutionCoverage.COMPLETE: (
+        "every bar since the position opened was examined (the newest may still be forming)"
+    ),
+    ResolutionCoverage.TRUNCATED: (
+        "INCOMPLETE - the window did not reach back to when the position opened; "
+        "a level may have been crossed in the bars before it"
+    ),
+    ResolutionCoverage.GAPPED: (
+        "INCOMPLETE - bars are missing inside the window; a level may have been crossed in them"
+    ),
+}
+
+
+def render_resolution(symbol: str, price: PriceObservation, result: CycleResult) -> str:
+    """A deterministic, terminal-shaped rendering of one resolution pass.
+
+    Shorter than `render_cycle` by exactly what did not happen: there is no
+    proposal row and no risk-guardian row, because no proposal was made and no
+    verdict was sought. Printing either would imply this command consulted
+    something it deliberately did not.
+
+    COVERAGE IS ALWAYS PRINTED WHEN IT APPLIES, AND THAT IS THE POINT.
+    `HOLDING` reads as "neither stop nor target was reached", which is only
+    true if everything since the entry was examined. Showing the outcome
+    without the coverage beside it would let an unexamined window look like a
+    quiet market -- so the row is unconditional, never suppressed for the happy
+    case, and the incomplete states say INCOMPLETE in words rather than leaving
+    a reader to infer it from an enum value.
+    """
+    rows = [
+        ("outcome", result.outcome.value),
+        ("summary", _CYCLE_SUMMARY[result.outcome]),
+        ("price", f"{price.last_price:.2f} as of {price.as_of.isoformat()}"),
+    ]
+
+    if result.coverage is not None:
+        rows.append(("coverage", _COVERAGE_SUMMARY[result.coverage]))
+    if result.triggering_bar_at is not None:
+        rows.append(("triggering bar", result.triggering_bar_at.isoformat()))
+
+    if result.closed_position is not None:
+        closed = result.closed_position
+        rows.append(
+            (
+                "closed",
+                f"{closed.direction.value} {closed.quantity:g} @ {closed.exit_price:.2f} "
+                f"({closed.close_reason.value}) realised {closed.realized_pnl:.2f}",
+            )
+        )
+
+    rows.append(("account saved", "yes" if result.account_was_written else "no"))
+
+    if result.journal_fingerprint is not None:
+        journal_status = result.journal_fingerprint
+    elif result.outcome is CycleOutcome.JOURNAL_UNAVAILABLE:
+        journal_status = "not recorded"
+    else:
+        journal_status = "nothing to record"
+    rows.append(("journal", journal_status))
+
+    if result.portfolio is not None:
+        state = result.portfolio
+        held = state.open_position
+        position = (
+            "none"
+            if held is None
+            else (
+                f"{held.direction.value} {held.quantity:g} @ {held.entry_price:.2f} "
+                f"(stop {held.stop_loss:.2f}, target {held.take_profit:.2f})"
+            )
+        )
+        rows.extend(
+            [
+                ("cash", f"{state.cash:.2f}"),
+                ("equity", f"{state.equity:.2f}"),
+                ("open position", position),
+            ]
+        )
+
+    width = max(len(label) for label, _ in rows)
+    lines = [f"{symbol} position resolution"]
+    lines.extend(f"  {label.ljust(width)}  {value}" for label, value in rows)
+    return "\n".join(lines)
+
+
+def _resolvable_symbol(symbol_argument: str) -> str | None:
+    """The known symbol `symbol_argument` names, or `None` after complaining.
+
+    Shared by `resolve` and `monitor` so both refuse an unknown market the same
+    way, and so a monitor never enters its loop over a symbol ORION cannot
+    fetch -- a preflight failure that no amount of waiting would fix.
+    """
+    intent = parse_intent(f"analyze {symbol_argument}")
+    if intent.kind is not IntentKind.ANALYZE or intent.symbol is None:
+        print(UNKNOWN_SYMBOL_MESSAGE, file=sys.stderr)
+        print(f"ORION can analyse: {_known_symbols_text()}", file=sys.stderr)
+        return None
+    return intent.symbol
+
+
+def _one_iteration(
+    symbol: str,
+    *,
+    market_data_factory: MarketDataFactory,
+    paper_resources: PaperResources,
+) -> IterationResult:
+    """Acquire everything one monitoring pass needs, run it, and release.
+
+    EVERY COLLABORATOR IS BUILT HERE AND DIES HERE. The engine, the store, the
+    journal and the vendor client are created for this pass and disposed when
+    it returns, so no account state, revision, connection or HTTP client can
+    survive an iteration boundary. That is what makes the supervisor's loop
+    stateless in fact rather than by intention, and it is why a crash costs at
+    most the pass that was in flight.
+
+    SETTINGS ARE RE-READ EVERY PASS, NEVER CAPTURED.
+    `orion.risk.policy.RiskPolicy.from_settings` documents that a fresh,
+    uncached `get_settings()` per cycle is what gives an operator kill-switch
+    response with no restart. A monitor that read `.env` once at startup would
+    be the first thing in ORION requiring a restart to respect it.
+
+    The market-data factory is passed *through* rather than called: a pass over
+    a flat account must not construct an HTTP client, let alone make a request.
+    """
+    settings = get_settings()
+    with paper_resources(_account_db_path()) as (store, journal):
+        return resolve_once(
+            symbol=symbol,
+            timeframe=DEFAULT_TIMEFRAME,
+            store=store,
+            journal=journal,
+            market_data=market_data_factory,
+            policy=PaperExecutionPolicy.from_settings(settings),
+            max_staleness_bars=RiskPolicy.from_settings(settings).max_staleness_bars,
+            now=datetime.now(UTC),
+        )
+
+
+def _report_iteration(symbol: str, result: IterationResult) -> bool:
+    """Print what one pass did, and answer whether it made progress.
+
+    The return value is what the supervisor counts: `True` for a pass that
+    established something -- a close, a hold, or an account with nothing open --
+    and `False` for one that could not. A veto-like refusal does not exist on
+    this path; there is no proposal to refuse.
+    """
+    if result.status is IterationStatus.NO_POSITION:
+        print(NO_OPEN_POSITION_MESSAGE)
+        return True
+    if result.status is IterationStatus.ACCOUNT_UNREADABLE:
+        print(ACCOUNT_UNAVAILABLE_MESSAGE, file=sys.stderr)
+        return False
+    if result.status is IterationStatus.NOT_CONFIGURED:
+        print(NOT_CONFIGURED_FOR_PRICES_MESSAGE, file=sys.stderr)
+        return False
+    if result.status is IterationStatus.PRICE_UNAVAILABLE:
+        print(PRICE_UNAVAILABLE_MESSAGE, file=sys.stderr)
+        return False
+
+    assert result.cycle is not None and result.price is not None  # RESOLVED, by construction
+    print(render_resolution(symbol, result.price, result.cycle))
+    return result.cycle.outcome not in _CYCLE_FAILURES
+
+
+def _iteration_exit_code(result: IterationResult) -> int:
+    """The one-shot exit code for a pass. Unchanged from Phase 2, verb by verb."""
+    if result.status is IterationStatus.ACCOUNT_UNREADABLE:
+        return EXIT_ACCOUNT_ERROR
+    if result.status is IterationStatus.NOT_CONFIGURED:
+        return EXIT_NOT_CONFIGURED
+    if result.status is IterationStatus.PRICE_UNAVAILABLE:
+        return EXIT_PRICE_UNAVAILABLE
+    if result.cycle is not None and result.cycle.outcome in _CYCLE_FAILURES:
+        return EXIT_CYCLE_FAILED
+    return EXIT_OK
+
+
+def _run_resolve(
+    symbol_argument: str,
+    *,
+    market_data_factory: MarketDataFactory,
+    paper_resources: PaperResources,
+) -> int:
+    """Resolve the open position against every bar since it opened. No analysis.
+
+    THE WHOLE POINT IS WHAT IS ABSENT. No `AnalysisService` is built, no
+    `build_evidence` is called and no reasoning provider is constructed, so this
+    path makes at most one vendor request and needs exactly one credential. A
+    deployment with no `ANTHROPIC_API_KEY` resolves stops normally, which was
+    not true of `orion paper`.
+
+    THE ACCOUNT IS READ BEFORE THE VENDOR IS ASKED (Mission 9 Phase 2), for two
+    reasons. The window to request is derived from the open position's
+    `opened_at`, so it cannot be known earlier; and an account with nothing open
+    now costs zero vendor requests instead of one, which matters for a command
+    meant to be run often against a rate-limited free tier.
+
+    THE WINDOW IS DERIVED, THEN CAPPED. One bar per elapsed interval since the
+    entry, plus a small margin so at least one bar sits at or before it — that
+    margin is what lets `window_coverage` prove the window reached back rather
+    than assume it. `MAX_RESOLUTION_BARS` bounds it so a position left open for
+    a year cannot turn one command into an unbounded request; a window that hits
+    the cap is reported `TRUNCATED`, never silently treated as complete.
+
+    VALIDATION REFUSES ON EVERYTHING EXCEPT A GAP, AND THAT ASYMMETRY IS
+    DELIBERATE. Empty, stale, out-of-order and duplicated data all mean the
+    answer cannot be trusted at all, so this refuses rather than resolving. A
+    *gap* means something narrower and survivable: some bars are missing, so
+    coverage is incomplete — which `ResolutionCoverage.GAPPED` says out loud.
+    Refusing on a gap instead would leave a real stop unhonoured every time the
+    window spans a market weekend, which is exactly the failure this command
+    exists to remove. See `orion.paper.session.window_coverage`.
+    """
+    symbol = _resolvable_symbol(symbol_argument)
+    if symbol is None:
+        return EXIT_USAGE
+    if not _account_exists(_account_db_path()):
+        print(NO_ACCOUNT_MESSAGE, file=sys.stderr)
+        return EXIT_NO_ACCOUNT
+
+    try:
+        result = _one_iteration(
+            symbol, market_data_factory=market_data_factory, paper_resources=paper_resources
+        )
+    except Exception:
+        print(CYCLE_FAILED_MESSAGE, file=sys.stderr)
+        return EXIT_CYCLE_FAILED
+
+    _report_iteration(symbol, result)
+    return _iteration_exit_code(result)
+
+
+def _run_monitor(
+    symbol_argument: str,
+    interval_seconds: float,
+    *,
+    market_data_factory: MarketDataFactory,
+    paper_resources: PaperResources,
+    max_iterations: int | None = None,
+    sleeper: Sleeper | None = None,
+) -> int:
+    """Resolve the open position every `interval_seconds` until asked to stop.
+
+    THE LOOP IS HERE BECAUSE SOMEBODY TYPED THIS VERB. Nothing in ORION starts
+    it, schedules it or daemonises it; this is a foreground process that runs
+    until a signal arrives, and every other command still does one thing once.
+
+    PREFLIGHT RUNS BEFORE THE LOOP, DELIBERATELY. An unknown symbol, a missing
+    account and a missing market-data credential cannot heal by waiting.
+    Discovering one of them on the first pass and then sleeping an interval
+    would be the worst possible behaviour, so they are checked up front and the
+    command exits with the same codes `orion resolve` returns -- before any
+    vendor request and before any sleep.
+
+    EACH PASS IS INDEPENDENT AND STATELESS. `_one_iteration` builds and
+    disposes every collaborator, so the loop below holds nothing but a counter.
+    A pass that fails is not retried: the next one starts fresh from the store,
+    which is a stronger position than a retry, because by then the account may
+    legitimately have been changed by something else.
+
+    `max_iterations` and `sleeper` are test seams and nothing else -- neither is
+    reachable from the command line, so no invocation can bound the loop or
+    change how it waits.
+    """
+    symbol = _resolvable_symbol(symbol_argument)
+    if symbol is None:
+        return EXIT_USAGE
+    if not _account_exists(_account_db_path()):
+        print(NO_ACCOUNT_MESSAGE, file=sys.stderr)
+        return EXIT_NO_ACCOUNT
+    if market_data_factory() is None:
+        # Checked once, up front. A deployment with no market-data credential
+        # cannot resolve anything, and a loop that discovered that once per
+        # interval forever would be noise, not supervision.
+        print(NOT_CONFIGURED_FOR_PRICES_MESSAGE, file=sys.stderr)
+        return EXIT_NOT_CONFIGURED
+
+    shutdown = ShutdownSignal()
+    if sleeper is None:
+        # Only installed for a real run. A test supplying its own sleeper is
+        # driving the clock itself and must not have process-wide signal
+        # handlers replaced underneath it.
+        install_shutdown_handlers(shutdown)
+
+    def iteration() -> bool:
+        return _report_iteration(
+            symbol,
+            _one_iteration(
+                symbol,
+                market_data_factory=market_data_factory,
+                paper_resources=paper_resources,
+            ),
+        )
+
+    try:
+        stop = run_monitor(
+            iteration=iteration,
+            interval_seconds=interval_seconds,
+            shutdown=shutdown,
+            max_iterations=max_iterations,
+            sleeper=sleeper,
+        )
+    except Exception:
+        # An unexpected exception, never an operational failure -- those are
+        # already a `False` from `iteration`. The loop is over; the message is
+        # fixed, like every other failure this module reports.
+        print(MONITOR_FAILED_MESSAGE, file=sys.stderr)
+        return EXIT_CYCLE_FAILED
+
+    if stop is MonitorStop.FAILURE_CEILING:
+        print(MONITOR_CEILING_MESSAGE, file=sys.stderr)
+        return EXIT_CYCLE_FAILED
+    print(MONITOR_STOPPED_MESSAGE)
+    return EXIT_OK
+
+
 def _run_paper(
     symbol_argument: str,
     *,
@@ -1160,6 +1631,8 @@ def main(
     store_factory: StoreFactory | None = None,
     paper_resources: PaperResources | None = None,
     reflection_resources: ReflectionResources | None = None,
+    market_data_factory: MarketDataFactory | None = None,
+    monitor_max_iterations: int | None = None,
 ) -> int:
     """The `orion` console entrypoint. Returns a process exit code.
 
@@ -1191,6 +1664,22 @@ def main(
             str(args.symbol),
             account_service_factory=account_service_factory or _account_service_factory,
             paper_resources=paper_resources or _default_paper_resources,
+        )
+
+    if args.command == "resolve":
+        return _run_resolve(
+            str(args.symbol),
+            market_data_factory=market_data_factory or _default_market_data_factory,
+            paper_resources=paper_resources or _default_paper_resources,
+        )
+
+    if args.command == "monitor":
+        return _run_monitor(
+            str(args.symbol),
+            float(args.interval),
+            market_data_factory=market_data_factory or _default_market_data_factory,
+            paper_resources=paper_resources or _default_paper_resources,
+            max_iterations=monitor_max_iterations,
         )
 
     if args.command == "account":

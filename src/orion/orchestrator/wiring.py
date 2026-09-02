@@ -50,12 +50,30 @@ from __future__ import annotations
 
 from orion.analysts.claude_macro_provider import ClaudeMacroAnalystProvider
 from orion.config import Settings
+from orion.data.provider_base import MarketDataProvider
 from orion.data.twelvedata_provider import TwelveDataProvider
 from orion.orchestrator.analysis import DEFAULT_OUTPUT_SIZE, AnalysisService
 from orion.paper.store import PortfolioStore
 from orion.reasoning.claude_provider import ClaudeReasoningProvider
 from orion.research.finnhub_provider import FinnhubEconomicCalendarProvider
 from orion.risk.policy import RiskPolicy
+
+
+def market_data_available(settings: Settings) -> bool:
+    """Whether this deployment can fetch a price at all.
+
+    ONE CREDENTIAL, NOT TWO, AND THAT IS THE MISSION 9 POINT.
+    `analysis_available` needs Twelve Data *and* Anthropic, because an analysis
+    reasons. Resolving an open position does not reason — it compares a price
+    to two numbers already stamped on the position — so it needs only the
+    market-data key, and a deployment with no `ANTHROPIC_API_KEY` can still
+    honour a stop. Answering that with `analysis_available` would have made a
+    mechanical exit depend on a credential it never uses.
+
+    Booleans only, and `SecretStr` tested for truthiness rather than unwrapped —
+    the same discipline as every other predicate here.
+    """
+    return bool(settings.twelve_data_api_key)
 
 
 def analysis_available(settings: Settings) -> bool:
@@ -82,6 +100,34 @@ def macro_available(settings: Settings) -> bool:
     than unwrapped -- same discipline as `analysis_available`.
     """
     return bool(settings.finnhub_api_key) and bool(settings.anthropic_api_key)
+
+
+def build_market_data_provider(settings: Settings) -> MarketDataProvider | None:
+    """Construct one market-data provider, or `None` when unconfigured.
+
+    The bare provider, with no reasoning provider, no policy, no analyst and no
+    service around it — everything an `AnalysisService` adds is the analysis
+    this caller is deliberately not running. Returning the ABC rather than
+    `TwelveDataProvider` keeps the vendor choice inside this file, exactly as
+    `build_analysis_service` already does for every provider it builds.
+
+    `None` on a missing credential is a degradation, not a failure, and matches
+    `build_analysis_service`'s established contract — never a partially-wired
+    provider and never a placeholder that fabricates a price.
+
+    NO ANTHROPIC CLIENT IS CONSTRUCTED HERE, AND THAT IS LOAD-BEARING. This is
+    the entire wiring the Mission 9 resolution path uses, so a deployment
+    holding only `TWELVE_DATA_API_KEY` can fetch a price and resolve a stop.
+    Adding a reasoning provider to this function would silently restore the
+    dependency Mission 9 removed.
+    """
+    if not market_data_available(settings):
+        return None
+    # `.get_secret_value()` appears here and as the argument itself, never bound
+    # to a local — the same discipline `build_analysis_service` documents.
+    return TwelveDataProvider(
+        settings.twelve_data_api_key.get_secret_value(), settings.twelve_data_base_url
+    )
 
 
 def build_analysis_service(
