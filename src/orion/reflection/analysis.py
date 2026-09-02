@@ -40,6 +40,24 @@ hashing mechanism: every fingerprint on `TradeReflection` is copied
 directly from the fingerprint fields already present on the journaled
 records (`ClosedPosition.opened_by_verdict_fingerprint`, `RiskVerdict.
 decision_ref.content_hash`), never recomputed with a new function.
+
+`TradeReflection.thesis` carries the specialist evidence journaled for the same
+analysis, when there was one. It is enrichment on the same terms as
+`opening_fee`: reported beside the outcome, never scored against it, and absent
+without complaint. Reflection still computes no judgement — a thesis that read
+bullish before a losing trade is a fact about what ORION observed, not evidence
+that the decision was wrong, and this module continues to leave that reading
+entirely to whoever holds the result.
+
+`reflect_on_recent_closed_positions` is the batch form, and the only place in
+this module that hashes anything: `DecisionJournal.list_closed_positions_by_
+symbol` returns `ClosedPosition` objects rather than the fingerprints they are
+stored under, so a fingerprint has to be derived to look each one's chain up.
+It is derived with `orion.provenance.canonical_hash` — literally the function
+`SqliteDecisionJournal.record_closed_position` writes with and
+`get_closed_position` verifies with, since neither `Fill` nor `ClosedPosition`
+has a domain-named wrapper the way `Evidence`/`ProposedDecision`/`RiskVerdict`
+do. One shared mechanism, not a second implementation of it.
 """
 
 from __future__ import annotations
@@ -48,8 +66,11 @@ from datetime import datetime
 
 from orion.memory.journal import DecisionJournal
 from orion.paper.schemas import ClosedPosition, CloseReason
-from orion.reflection.schemas import TradeReflection
+from orion.provenance import canonical_hash
+from orion.reflection.schemas import ReflectionBatch, TradeReflection
 from orion.risk.controls import classify_trade_levels
+from orion.risk.schemas import RiskVerdict
+from orion.thesis.schemas import MarketThesis
 
 
 class ReflectionError(RuntimeError):
@@ -85,6 +106,11 @@ def reflect_on_closed_position(
     ordering), not a hypothetical one — never a partial or best-guess
     result. `DecisionJournalIntegrityError` from a corrupted journal record
     propagates unchanged.
+
+    The `MarketThesis` is optional enrichment too (`thesis`, `None` if none
+    was journaled), looked up by the verdict's own `analysis_id` — see
+    `_find_thesis`. A trade whose analysis recorded no thesis, and every trade
+    opened before Mission 8 v2.2 existed, reflects perfectly well without one.
 
     The opening `Fill` is optional enrichment (`opening_fee`, `None` if
     absent): looked up via `list_fills_by_verdict_fingerprint` and matched
@@ -148,6 +174,7 @@ def reflect_on_closed_position(
     predicted_risk_reward = predicted_reward / predicted_risk
 
     opening_fee = _find_opening_fee(journal, closed)
+    thesis = _find_thesis(journal, verdict)
 
     return TradeReflection(
         closed_position_fingerprint=closed_position_fingerprint,
@@ -170,8 +197,36 @@ def reflect_on_closed_position(
         opening_fee=opening_fee,
         exit_matched_predicted_take_profit=closed.close_reason is CloseReason.TAKE_PROFIT_HIT,
         exit_matched_predicted_stop_loss=closed.close_reason is CloseReason.STOP_LOSS_HIT,
+        thesis=thesis,
         reflected_at=now,
     )
+
+
+def _find_thesis(journal: DecisionJournal, verdict: RiskVerdict) -> MarketThesis | None:
+    """The `MarketThesis` formed for the analysis this trade came from.
+
+    FOUND BY A SIBLING KEY, NEVER BY A BACK-REFERENCE. `analysis_id` is minted
+    once per analysis and stamped identically on the decision, the verdict and
+    the thesis; the thesis holds no fingerprint of the verdict, so nothing in
+    the advisory record points at the authority that reviewed it. This is the
+    whole reason Mission 8 v2.2 could connect the two at all.
+
+    Returns `None` when no thesis was recorded — the permanent state of every
+    trade opened before this existed — and raises `ReflectionError` when more
+    than one shares the id. That is a real, reachable ambiguity rather than a
+    hypothetical: `analysis_id` is derived from the symbol, the timeframe and
+    the last bar's timestamp, so two analyses inside one bar share it, and each
+    can form its own thesis at a different `formed_at`. `_find_opening_fee`
+    refuses to guess between duplicates for the same reason and this does too.
+    """
+    candidates = journal.list_theses_by_analysis_id(verdict.analysis_id)
+    if len(candidates) > 1:
+        raise ReflectionError(
+            f"{len(candidates)} MarketTheses are recorded under analysis_id "
+            f"{verdict.analysis_id!r}; cannot determine which one this trade was formed "
+            "alongside without guessing"
+        )
+    return candidates[0] if candidates else None
 
 
 def _find_opening_fee(journal: DecisionJournal, closed: ClosedPosition) -> float | None:
@@ -191,3 +246,66 @@ def _find_opening_fee(journal: DecisionJournal, closed: ClosedPosition) -> float
             "position without guessing"
         )
     return matches[0].fee if matches else None
+
+
+def reflect_on_recent_closed_positions(
+    journal: DecisionJournal,
+    symbol: str,
+    *,
+    limit: int,
+    now: datetime,
+) -> ReflectionBatch:
+    """Reflect on `symbol`'s `limit` most recently closed trades.
+
+    Pure and read-only, exactly like `reflect_on_closed_position`: this calls
+    it once per position and adds no judgment of its own. `now` is stamped on
+    every `TradeReflection` and on the batch, so one batch is one instant.
+
+    THE TAIL SLICE IS DELIBERATE, AND SO IS NOT PUSHING IT INTO THE QUERY.
+    `list_closed_positions_by_symbol`'s `limit` is applied to a `closed_at`
+    *ascending* order, so passing it through would return the oldest trades
+    under the name "recent". Rather than change a journal contract other
+    callers already depend on, this reads the symbol's closed positions and
+    takes the last `limit` of them — which also yields the honest
+    `total_closed_positions` count the batch reports. For a local paper journal
+    that is a bounded read; if it ever stops being one, the fix belongs in the
+    journal's query surface, not in a narrower answer here.
+
+    Raises `ReflectionError` for a naive `now` or a non-positive `limit` —
+    checked before any read, so a bad call reads nothing rather than
+    misreporting every trade as unreflectable. A `ClosedPosition` whose chain
+    cannot be walked is *not* an error: its fingerprint is listed in
+    `unreflectable_fingerprints`. `DecisionJournalIntegrityError` is never
+    caught and propagates, because corruption is not incompleteness.
+    """
+    if now.tzinfo is None:
+        raise ReflectionError("now must be a timezone-aware datetime")
+    if limit < 1:
+        raise ReflectionError(f"limit must be at least 1, got {limit}")
+
+    closed_positions = journal.list_closed_positions_by_symbol(symbol)
+    window = closed_positions[-limit:] if limit < len(closed_positions) else closed_positions
+
+    reflections: list[TradeReflection] = []
+    unreflectable: list[str] = []
+    for closed in window:
+        # The fingerprint the journal stored this record under. Recomputed with
+        # the journal's own hashing function rather than carried out of the
+        # query, because the read API returns models, not row keys.
+        fingerprint = canonical_hash(closed)
+        try:
+            reflections.append(reflect_on_closed_position(journal, fingerprint, now=now))
+        except ReflectionError:
+            # The exception is not bound, formatted or re-raised: which link is
+            # missing is discoverable from the journal itself, and the batch's
+            # job is to say *that* a reflection is impossible, never to
+            # paraphrase why in a field a caller might parse.
+            unreflectable.append(fingerprint)
+
+    return ReflectionBatch(
+        symbol=symbol,
+        reflections=tuple(reflections),
+        unreflectable_fingerprints=tuple(unreflectable),
+        total_closed_positions=len(closed_positions),
+        reflected_at=now,
+    )

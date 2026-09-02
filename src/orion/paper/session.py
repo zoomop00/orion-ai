@@ -17,15 +17,48 @@ an analysis produced — `ProposedDecision`, `Evidence`, `RiskVerdict` — rathe
 than the `AnalysisReport` that happens to carry them. Unpacking that report is
 the composition root's job, in `orion.cli`.
 
+IT CARRIES A `MarketThesis` AND MUST NEVER READ ONE.
+`orion.thesis.schemas` is a schema-only package with no analyst, engine, store
+or provider in its import list, which is why this module may name a
+`MarketThesis` while still being forbidden to import `orion.analysts` at all.
+The thesis is advisory evidence: it arrives, it goes into the journal, and
+nothing in this file inspects a single field of it. That is not a convention —
+`tests/paper/test_session.py::test_the_thesis_is_carried_and_never_read` walks
+this file's AST and fails on any attribute access into it. A specialist reading
+must not be one edit away from influencing an execution, and the way to
+guarantee that while still storing it is to make the carrying provably blind.
+
 IT DOES NOT IMPORT `orion.memory` EITHER, FOR A DIFFERENT REASON.
 `orion.memory` already depends on `orion.paper` in three places
 (`journal.py` and `sqlite_journal.py` import `Fill`/`ClosedPosition`,
 `portfolio_store.py` imports `PortfolioStore`). Importing `DecisionJournal` back
 would turn a clean one-way dependency into a cycle. `JournalWriter` below is the
-narrow inversion of that dependency: two methods, structurally satisfied by the
-existing `DecisionJournal` and `SqliteDecisionJournal` with no change to either.
-It restates an interface, never an implementation, and a test asserts both real
+inversion of that dependency, structurally satisfied by the existing
+`DecisionJournal` and `SqliteDecisionJournal` with no change to either. It
+restates an interface, never an implementation, and a test asserts both real
 journals still satisfy it so the two cannot drift apart.
+
+IT WRITES THE CHAIN THAT AUTHORISED THE FILL, NOT ONLY THE FILL.
+Phase 2b journaled a `Fill` and a `ClosedPosition` and nothing else, so the
+records they reference -- the `RiskVerdict` that approved the trade and the
+`ProposedDecision` it reviewed -- existed nowhere durable.
+`orion.reflection.analysis.reflect_on_closed_position` walks exactly
+`ClosedPosition -> RiskVerdict -> ProposedDecision` and fails closed on a missing
+link, so Reflection could not run on a single trade this system had actually
+made: it had only ever been exercised against hand-built test chains. This phase
+writes the four records the chain needs, leaf-first (evidence, reasoning,
+decision, verdict) and *before* the fill, so any prefix of an interrupted write
+is internally consistent and no stored record ever references one that is
+missing. That is why `JournalWriter` is no longer two methods: the narrowness in
+2b was a true statement about what that phase produced, not a safety property,
+and it stopped being true the moment a fill needed its authorisation on record.
+
+A VETOED PROPOSAL IS STILL NOT JOURNALED, DELIBERATELY. The chain is written on
+the executed path only. Journaling every refused proposal is a defensible
+separate decision -- a cron entry running this command hourly would write a
+chain per invocation, almost all of them identical WAITs, with no consumer -- and
+the tests asserting that a veto performs zero saves and zero journal calls are
+left standing rather than narrowed.
 
 THE RISK GUARDIAN HAS ABSOLUTE AUTHORITY, AND IT IS STRUCTURAL.
 `execute()` itself raises `PaperExecutionError` unless `verdict.outcome` is
@@ -79,6 +112,7 @@ from orion.paper.execution import execute, resolve_stop_take_profit
 from orion.paper.policy import PaperExecutionPolicy
 from orion.paper.schemas import ClosedPosition, Fill, PaperExecutionError
 from orion.paper.store import PortfolioStore
+from orion.reasoning.schemas import ReasoningOutput
 from orion.risk.portfolio import (
     PortfolioState,
     compute_position_size,
@@ -86,22 +120,43 @@ from orion.risk.portfolio import (
     portfolio_state_fingerprint,
 )
 from orion.risk.schemas import RiskOutcome, RiskVerdict
+from orion.thesis.schemas import MarketThesis
 
 
 @runtime_checkable
 class JournalWriter(Protocol):
-    """The two journal methods a forward cycle needs, and no others.
+    """The journal's write surface, restated so `orion.paper` need not import
+    `orion.memory` to reach it.
 
-    Deliberately narrower than `orion.memory.journal.DecisionJournal`: this
-    module produces `Fill`s and `ClosedPosition`s and nothing else, so it
-    declares no ability to write evidence, reasoning, decisions or verdicts. A
-    caller may pass a full journal — `SqliteDecisionJournal` satisfies this
-    structurally — but this module cannot use the rest of it even by accident.
+    THIS DECLARES WRITES ONLY — never a read, never an update, never a delete.
+    `orion.memory.journal.DecisionJournal` has no update or delete method to
+    restate, and the reads are `orion.reflection`'s business, not this module's.
+    A forward cycle appends what it did; it never revisits what it did before.
 
-    Both methods are content-addressed and idempotent in the real
-    implementation, which is what makes the crash window in `run_cycle`
-    recoverable by replay. See that function's `PERSISTENCE ORDER` note.
+    Every method is content-addressed and idempotent in the real implementation,
+    which is what makes the crash window in `run_cycle` recoverable by replay.
+    See that function's `PERSISTENCE ORDER` note.
     """
+
+    def record_evidence(self, evidence: Evidence, *, recorded_at: datetime) -> str:
+        """Persist `evidence`, returning its content fingerprint. Idempotent."""
+        ...
+
+    def record_reasoning(self, reasoning: ReasoningOutput, *, recorded_at: datetime) -> str:
+        """Persist `reasoning`, returning its content fingerprint. Idempotent."""
+        ...
+
+    def record_decision(self, decision: ProposedDecision, *, recorded_at: datetime) -> str:
+        """Persist `decision`, returning its content fingerprint. Idempotent."""
+        ...
+
+    def record_verdict(self, verdict: RiskVerdict, *, recorded_at: datetime) -> str:
+        """Persist `verdict`, returning its content fingerprint. Idempotent."""
+        ...
+
+    def record_thesis(self, thesis: MarketThesis, *, recorded_at: datetime) -> str:
+        """Persist `thesis`, returning its content fingerprint. Idempotent."""
+        ...
 
     def record_fill(self, fill: Fill, *, recorded_at: datetime) -> str:
         """Persist `fill`, returning its content fingerprint. Idempotent."""
@@ -110,6 +165,48 @@ class JournalWriter(Protocol):
     def record_closed_position(self, closed: ClosedPosition, *, recorded_at: datetime) -> str:
         """Persist `closed`, returning its content fingerprint. Idempotent."""
         ...
+
+
+class AuditChain:
+    """The records that authorised one fill, in the order they must be written:
+    each one references only records already stored before it.
+
+    `Evidence` and `ReasoningOutput` are not read by
+    `orion.reflection.analysis.reflect_on_closed_position` — `ProposedDecision`
+    already carries the `EvidenceRef`/`ReasoningRef` it needs — but they are the
+    only durable copy of what ORION actually saw and actually said, including
+    the rationale `ReasoningRef` deliberately excludes. Recording the reference
+    without ever recording the referent would leave a chain whose links point at
+    nothing.
+
+    `thesis` is optional and goes in first, because it is the only member that
+    references nothing at all: a `MarketThesis` carries the `analysis_id` the
+    decision and verdict also carry, never a fingerprint of either, so it is a
+    leaf in the strictest sense and writing it first keeps "no stored record
+    ever points at a missing one" true at every prefix. It is `None` for a
+    caller that formed no thesis — a backtest, or an analysis where neither
+    specialist had anything to say — and its absence is not a failure.
+
+    A plain container, like `CycleResult`: it is never journaled or hashed as a
+    unit — its members each are, by their own fingerprint functions.
+    """
+
+    __slots__ = ("evidence", "reasoning", "decision", "verdict", "thesis")
+
+    def __init__(
+        self,
+        *,
+        evidence: Evidence,
+        reasoning: ReasoningOutput,
+        decision: ProposedDecision,
+        verdict: RiskVerdict,
+        thesis: MarketThesis | None = None,
+    ) -> None:
+        self.evidence = evidence
+        self.reasoning = reasoning
+        self.decision = decision
+        self.verdict = verdict
+        self.thesis = thesis
 
 
 class CycleOutcome(StrEnum):
@@ -161,9 +258,24 @@ class CycleResult:
     actually saved, or the unchanged state when nothing was — and `None` only
     when the account could not be read at all, which is the one case where there
     is no state to report and inventing a flat one would be a lie.
+
+    `audit_chain_fingerprints` is the fingerprints of the records this cycle
+    journaled, in write order — the thesis when there was one, then the
+    evidence, reasoning, decision and verdict — empty
+    when there was no chain to write (a hold, a veto, a close) *and* when the
+    write was attempted and failed, which `JOURNAL_UNAVAILABLE` reports
+    separately. It is never partially populated: a chain either went in whole or
+    is reported as absent.
     """
 
-    __slots__ = ("outcome", "portfolio", "fill", "closed_position", "journal_fingerprint")
+    __slots__ = (
+        "outcome",
+        "portfolio",
+        "fill",
+        "closed_position",
+        "journal_fingerprint",
+        "audit_chain_fingerprints",
+    )
 
     def __init__(
         self,
@@ -173,12 +285,14 @@ class CycleResult:
         fill: Fill | None = None,
         closed_position: ClosedPosition | None = None,
         journal_fingerprint: str | None = None,
+        audit_chain_fingerprints: tuple[str, ...] = (),
     ) -> None:
         self.outcome = outcome
         self.portfolio = portfolio
         self.fill = fill
         self.closed_position = closed_position
         self.journal_fingerprint = journal_fingerprint
+        self.audit_chain_fingerprints = audit_chain_fingerprints
 
     @property
     def account_was_written(self) -> bool:
@@ -195,6 +309,8 @@ def run_cycle(
     *,
     decision: ProposedDecision,
     evidence: Evidence,
+    reasoning: ReasoningOutput,
+    thesis: MarketThesis | None = None,
     verdict: RiskVerdict | None,
     store: PortfolioStore,
     journal: JournalWriter,
@@ -208,6 +324,19 @@ def run_cycle(
     unreadable account, a symbol mismatch, no store wired. That is not a veto
     and is not treated as one; it is `NO_VERDICT`, and nothing is executed
     either way.
+
+    `reasoning` is the `ReasoningOutput` `decision` was derived from. It is
+    journaled, never re-read: nothing in this function branches on it, so a
+    caller cannot change what this cycle does by passing a different one. The
+    linkage between the two is `decision.reasoning_ref.content_hash`, checked
+    once by `orion.decision.engine.decide` when the decision was built, and
+    re-checkable by anyone holding the journal afterwards — which is exactly
+    what recording both makes possible.
+
+    `thesis` is the specialist evidence formed for the same analysis, or `None`
+    when none was. It is journaled alongside the chain and **never read**: no
+    branch in this function or in `_persist` looks at a field of it, so it
+    cannot change what a cycle does. See this module's docstring.
 
     THE ORDER OF THE THREE BRANCHES IS THE CONTRACT. An open position is
     resolved before a new one is considered, exactly as `orion.backtest.engine`
@@ -240,6 +369,10 @@ def run_cycle(
             # grow the account with rows that record no decision.
             return CycleResult(outcome=CycleOutcome.HOLDING, portfolio=resolved)
 
+        # No chain: the records that authorised this position were journaled by
+        # the cycle that *opened* it. This cycle's own analysis produced a
+        # different decision and a different verdict, and neither of them
+        # closed anything -- `resolve_stop_take_profit` did, from the price.
         return _persist(
             store=store,
             journal=journal,
@@ -248,6 +381,7 @@ def run_cycle(
             fill=None,
             closed_position=closed,
             outcome=CycleOutcome.CLOSED,
+            chain=None,
             now=now,
         )
 
@@ -321,6 +455,13 @@ def run_cycle(
         fill=result.fill,
         closed_position=None,
         outcome=CycleOutcome.EXECUTED,
+        chain=AuditChain(
+            evidence=evidence,
+            reasoning=reasoning,
+            decision=decision,
+            verdict=verdict,
+            thesis=thesis,
+        ),
         now=now,
     )
 
@@ -334,6 +475,7 @@ def _persist(
     fill: Fill | None,
     closed_position: ClosedPosition | None,
     outcome: CycleOutcome,
+    chain: AuditChain | None,
     now: datetime,
 ) -> CycleResult:
     """Save the account, then journal what happened. Never the other way round.
@@ -346,6 +488,12 @@ def _persist(
     content-addressed and replaying it creates no duplicate. The reverse order
     would leave an audit row for a trade that never happened, which is not
     recoverable by anything.
+
+    `chain` is the four records that authorised `fill`, or `None` when there is
+    nothing to authorise. It is written inside the same `try` as the fill, so a
+    journal that fails anywhere in the sequence reports `JOURNAL_UNAVAILABLE`
+    once, for the whole write, rather than leaving the caller to work out how
+    far it got.
     """
     try:
         store.save(portfolio, expected_revision=expected_revision)
@@ -356,6 +504,24 @@ def _persist(
         return CycleResult(outcome=CycleOutcome.ACCOUNT_UNAVAILABLE, portfolio=portfolio)
 
     try:
+        # LEAF-FIRST, AND THE FILL LAST. Each record is written only after
+        # everything it references is already stored, so an interrupted write
+        # leaves a shorter chain, never a broken one: there is no point at which
+        # a journaled record refers to a fingerprint the journal does not hold.
+        # A `ClosedPosition` needs no chain here -- see `run_cycle`.
+        chain_fingerprints: tuple[str, ...] = ()
+        if chain is not None:
+            thesis = chain.thesis
+            chain_fingerprints = (
+                # The thesis first: it references nothing, so no prefix of an
+                # interrupted write can leave it pointing at a missing record.
+                *((journal.record_thesis(thesis, recorded_at=now),) if thesis is not None else ()),
+                journal.record_evidence(chain.evidence, recorded_at=now),
+                journal.record_reasoning(chain.reasoning, recorded_at=now),
+                journal.record_decision(chain.decision, recorded_at=now),
+                journal.record_verdict(chain.verdict, recorded_at=now),
+            )
+
         if fill is not None:
             fingerprint = journal.record_fill(fill, recorded_at=now)
         else:
@@ -367,6 +533,9 @@ def _persist(
         # inventing one by re-saving the previous state would be a second write
         # that could itself fail. The trade stands; its audit row can be
         # replayed.
+        # `audit_chain_fingerprints` stays empty even when part of the chain
+        # went in: the audit record this cycle owed is incomplete either way,
+        # and reporting a partial one as written would overstate what happened.
         return CycleResult(
             outcome=CycleOutcome.JOURNAL_UNAVAILABLE,
             portfolio=portfolio,
@@ -380,4 +549,5 @@ def _persist(
         fill=fill,
         closed_position=closed_position,
         journal_fingerprint=fingerprint,
+        audit_chain_fingerprints=chain_fingerprints,
     )

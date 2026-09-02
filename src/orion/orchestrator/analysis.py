@@ -53,7 +53,11 @@ from datetime import datetime, timedelta
 
 from orion.analysis.evidence import Evidence, build_evidence
 from orion.analysts.provider_base import MacroAnalystProvider
-from orion.data.models import Timeframe
+from orion.analysts.schemas import MacroAnalystOutput
+from orion.analysts.synthesis import synthesize
+from orion.analysts.technical import TimeframeObservation, analyze_technical
+from orion.analysts.technical_schemas import TechnicalAnalystOutput, TechnicalAvailability
+from orion.data.models import MarketSnapshot, Timeframe
 from orion.data.provider_base import MarketDataProvider
 from orion.data.validation import validate_snapshot
 from orion.decision.engine import decide
@@ -67,6 +71,8 @@ from orion.orchestrator.schemas import (
     NotConnectedPanel,
     RiskAvailability,
     RiskPanel,
+    TechnicalPanel,
+    ThesisPanel,
 )
 from orion.paper.store import PortfolioStore, PortfolioStoreError
 from orion.reasoning.provider_base import ReasoningProvider
@@ -102,6 +108,17 @@ MACRO_UNAVAILABLE = (
     "ORION could not read the economic calendar for this analysis, so there is no macro context."
 )
 MACRO_NO_EVENTS = "The economic calendar returned no events in this window."
+
+# The Technical Analyst and the synthesis seam. Fixed sentences from this
+# module, like every other panel detail here.
+TECHNICAL_AVAILABLE = (
+    "Deterministic technical findings over the same bars this analysis was built from."
+)
+TECHNICAL_INSUFFICIENT = "This window is too thin for ORION to evaluate a technical concept on it."
+THESIS_AVAILABLE = "What the specialists, taken together, say about current conditions."
+THESIS_UNAVAILABLE = (
+    "Neither specialist produced anything to synthesise, so ORION has formed no thesis."
+)
 
 # How far either side of `now` the calendar is read. Two days back catches the
 # prints a market is still digesting; five forward is the horizon a session is
@@ -252,6 +269,73 @@ def _macro_panel(
     )
 
 
+def _technical_panel(
+    *,
+    snapshot: MarketSnapshot,
+    evidence: Evidence,
+    now: datetime,
+) -> TechnicalPanel:
+    """Run the Technical Analyst over the bars this analysis already fetched.
+
+    NO SECOND FETCH AND NO SECOND `build_evidence`. `TimeframeObservation`
+    takes the snapshot and the `Evidence` already built from it, and its own
+    validator refuses a mismatched pair — so every finding carries the
+    fingerprint of the exact evidence the proposal was reasoned from, and the
+    two are verifiably about the same bars.
+
+    ONE TIMEFRAME, BECAUSE ONE IS WHAT WAS FETCHED. `analyze_technical` accepts
+    any number and reports each separately; this call site supplies the single
+    timeframe `intent` asked for rather than fetching more, which would mean
+    extra vendor calls against a rate-limited free tier on the HTTP hot path.
+    Multi-timeframe input is a wiring decision for a caller that wants it, not
+    a capability missing from the analyst.
+
+    Not fail-soft like macro, and not fail-closed like the engines: there is
+    nothing here to fail. No network, no vendor, no credential and no model —
+    only pure functions over bars that have already passed validation.
+    """
+    output = analyze_technical(
+        [TimeframeObservation(snapshot=snapshot, evidence=evidence)], now=now
+    )
+    detail = (
+        TECHNICAL_AVAILABLE
+        if output.availability is TechnicalAvailability.AVAILABLE
+        else TECHNICAL_INSUFFICIENT
+    )
+    return TechnicalPanel(detail=detail, output=output)
+
+
+def _thesis_panel(
+    *,
+    technical: TechnicalAnalystOutput,
+    macro: MacroAnalystOutput | None,
+    analysis_id: str,
+    now: datetime,
+) -> ThesisPanel:
+    """Combine the specialists into one advisory thesis, or say there is none.
+
+    LAST, AND AFTER EVERYTHING IT READS. Like macro, this runs once the
+    decision and the verdict already exist, so the ordering makes the advisory
+    boundary structural rather than a convention: a thesis is attached to a
+    finished analysis and cannot be an input to one.
+
+    THE RISK GUARDIAN IS NOT CONSULTED AND IS NOT AFFECTED. `synthesize` takes
+    two analyst outputs and an identifier, and returns a `MarketThesis`, which
+    has no field capable of expressing an action, a size or a permission.
+    `orion.risk` cannot import `orion.analysts` or `orion.thesis` at all.
+
+    `analysis_id` is this analysis's own, minted above by `build_analysis_id`
+    and already stamped on the decision and the verdict. Passing it here is
+    what lets the thesis be stored and later recovered alongside them.
+    """
+    if technical.availability is not TechnicalAvailability.AVAILABLE and macro is None:
+        return ThesisPanel(detail=THESIS_UNAVAILABLE)
+    return ThesisPanel(
+        detail=THESIS_AVAILABLE,
+        thesis=synthesize(technical=technical, macro=macro, analysis_id=analysis_id, now=now),
+    )
+
+
 def run_analysis(
     *,
     intent: Intent,
@@ -328,6 +412,21 @@ def run_analysis(
     # earlier makes that ordering structural instead of a convention.
     macro = _macro_panel(calendar_provider=calendar_provider, macro_analyst=macro_analyst, now=now)
 
+    # Also last, and also after the decision exists. The Technical Analyst
+    # re-reads bars the pipeline already has and the synthesis seam reads only
+    # what the two analysts returned; neither can reach the proposal, the
+    # policy or the account.
+    technical = _technical_panel(snapshot=snapshot, evidence=evidence, now=now)
+    thesis = _thesis_panel(
+        technical=technical.output,
+        macro=macro.opinion,
+        # The id this analysis already minted, before any decision existed. The
+        # thesis becomes findable from a journaled verdict without referencing
+        # the proposal -- see `orion.thesis.schemas.MarketThesis`.
+        analysis_id=analysis_id,
+        now=now,
+    )
+
     return AnalysisReport(
         analysis_id=analysis_id,
         symbol=symbol,
@@ -340,6 +439,8 @@ def run_analysis(
         risk=risk,
         news=NotConnectedPanel(detail=NEWS_NOT_CONNECTED),
         macro=macro,
+        technical=technical,
+        thesis=thesis,
     )
 
 

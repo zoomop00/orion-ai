@@ -13,7 +13,22 @@ Guardian — through `orion.orchestrator.wiring.build_analysis_service` and
 account open` / `orion account show` manage the simulated account that Mission 4
 built and nothing had ever opened. `orion paper XAUUSD` runs that same analysis
 and then, if and only if the Risk Guardian approved it, opens a simulated
-position through `orion.paper.session.run_cycle`.
+position through `orion.paper.session.run_cycle`. `orion reflect XAUUSD` reads
+back what those cycles actually did.
+
+REFLECTION READS HISTORY AND NOTHING ELSE. `reflect` runs no analysis, contacts
+no vendor and needs no credential: it opens the journal the paper cycle wrote,
+walks each closed trade back to the verdict and decision that authorised it, and
+prints the facts. It records nothing and changes no account. It cannot bring a
+database into existence either — like `account show`, it checks the file exists
+first — though it shares that verb's one honest caveat: `create_memory_engine`
+runs `metadata.create_all`, so opening an *existing* database will add any table
+its schema is missing. That is a schema repair on a file the user already has,
+not a record, and it is the same seam every other verb here opens through.
+`orion.reflection` itself takes a `DecisionJournal` and never a
+`PortfolioStore`, so there is no path through it to current account state at
+all, and it reports what was predicted beside what happened without scoring
+either.
 
 ONE CYCLE PER INVOCATION, AND THEN THE PROCESS EXITS. There is no scheduler, no
 daemon, no retry and no loop: `orion paper` does one thing once. Anything
@@ -129,6 +144,7 @@ from pathlib import Path
 
 from orion.config import get_settings
 from orion.memory.engine import create_memory_engine
+from orion.memory.journal import DecisionJournal
 from orion.memory.portfolio_store import SqlitePortfolioStore
 from orion.memory.sqlite_journal import SqliteDecisionJournal
 from orion.orchestrator.analysis import AnalysisService
@@ -136,8 +152,11 @@ from orion.orchestrator.intent import DEFAULT_TIMEFRAME, known_symbols, parse_in
 from orion.orchestrator.schemas import AnalysisReport, IntentKind, RiskAvailability
 from orion.orchestrator.wiring import build_analysis_service
 from orion.paper.policy import PaperExecutionPolicy
+from orion.paper.schemas import CloseReason
 from orion.paper.session import CycleOutcome, CycleResult, JournalWriter, run_cycle
 from orion.paper.store import PortfolioRecord, PortfolioStore
+from orion.reflection.analysis import reflect_on_recent_closed_positions
+from orion.reflection.schemas import ReflectionBatch
 from orion.risk.policy import RiskPolicy
 from orion.risk.portfolio import initial_portfolio_state
 
@@ -155,6 +174,10 @@ EXIT_ACCOUNT_ERROR = 6
 #: One forward paper cycle ran, and something in it refused. Distinct from a
 #: crash and from a veto, both of which are ordinary outcomes reported on stdout.
 EXIT_CYCLE_FAILED = 7
+
+#: The journal could not be opened or read. A journal holding no closed trade
+#: yet is not this: an empty history is an ordinary answer, printed and exit 0.
+EXIT_REFLECTION_FAILED = 8
 
 #: Fixed sentences. Nothing in this file is ever built from an exception, a
 #: vendor response, or the argument the user supplied.
@@ -177,7 +200,20 @@ ACCOUNT_EXISTS_MESSAGE = (
 ACCOUNT_UNAVAILABLE_MESSAGE = "ORION could not read the paper account."
 ACCOUNT_NOT_WRITTEN_MESSAGE = "ORION could not open the paper account."
 INVALID_BALANCE_MESSAGE = "must be a positive, finite number"
+INVALID_LIMIT_MESSAGE = "must be a whole number of at least 1"
 CYCLE_FAILED_MESSAGE = "ORION could not complete the paper cycle."
+#: The database holds both the account and the journal, so no file means no
+#: trading history to reflect on. Named separately from the account message
+#: because `reflect` does not need an account, only a history.
+NO_HISTORY_MESSAGE = "No paper history exists. Run 'orion paper SYMBOL' first."
+#: `DecisionJournalError` embeds SQLAlchemy text naming the database and its
+#: path, and `DecisionJournalIntegrityError` names a stored fingerprint. Neither
+#: is bound, formatted or re-raised; this fixed sentence is printed instead.
+REFLECTION_FAILED_MESSAGE = "ORION could not read the trading journal."
+
+#: How many closed trades `reflect` reports when no limit is given. A default,
+#: not a cap: the journal keeps every trade and `--limit` reaches further back.
+DEFAULT_REFLECTION_LIMIT = 10
 
 #: How `main` obtains an `AnalysisService`. `None` means "this deployment
 #: cannot analyse", which `build_analysis_service` already returns for a
@@ -260,6 +296,30 @@ def _default_paper_resources(db_path: str) -> Iterator[tuple[PortfolioStore, Jou
         engine.dispose()
 
 
+#: How `reflect` obtains a read-only journal, and gives it back. The same
+#: ownership discipline as `PaperResources` and for the same reason: a leaked
+#: pooled connection keeps SQLite's `-wal`/`-shm` sidecars locked. Typed against
+#: `DecisionJournal` -- the ABC -- so this seam cannot hand reflection a store.
+ReflectionResources = Callable[[str], AbstractContextManager[DecisionJournal]]
+
+
+@contextmanager
+def _default_reflection_resources(db_path: str) -> Iterator[DecisionJournal]:
+    """Open the journal at `db_path` for reading, and always close it.
+
+    No `PortfolioStore` is constructed: reflection reads history and has no
+    business with the current account. `create_memory_engine` would create the
+    database if it were absent, which is why every caller checks the file exists
+    first -- a command that answers "no history" by creating an empty journal
+    has not answered anything.
+    """
+    engine = create_memory_engine(db_path)
+    try:
+        yield SqliteDecisionJournal(engine)
+    finally:
+        engine.dispose()
+
+
 def _account_db_path() -> str:
     """Where the paper account lives. `ORION_DB_PATH`, and nothing else.
 
@@ -298,6 +358,23 @@ def _positive_finite(text: str) -> float:
         raise argparse.ArgumentTypeError(INVALID_BALANCE_MESSAGE) from None
     if not math.isfinite(value) or value <= 0:
         raise argparse.ArgumentTypeError(INVALID_BALANCE_MESSAGE)
+    return value
+
+
+def _positive_int(text: str) -> int:
+    """An `argparse` type for a count: a whole number of at least 1.
+
+    `int(text)` refuses `1.5`, `nan` and `inf` outright, so unlike
+    `_positive_finite` there is no float edge case to screen for -- only the
+    non-positive range. argparse prints its own one-line usage error and exits
+    2, with no traceback and without echoing the value back.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(INVALID_LIMIT_MESSAGE) from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(INVALID_LIMIT_MESSAGE)
     return value
 
 
@@ -372,6 +449,33 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"The market to trade on paper. One of: {_known_symbols_text()}",
     )
 
+    reflect = subcommands.add_parser(
+        "reflect",
+        help="Print what ORION predicted against what actually happened. Reads only.",
+        description=(
+            "Read the trading journal and print, for each of SYMBOL's most recently "
+            "closed paper trades, what was predicted beside what actually happened. "
+            "Runs no analysis, contacts no vendor and needs no credential; it "
+            "records nothing, creates no database and never changes the account. "
+            "ORION reports the facts and scores neither the outcome nor the decision."
+        ),
+    )
+    reflect.add_argument(
+        "symbol",
+        metavar="SYMBOL",
+        help=f"The market to reflect on. One of: {_known_symbols_text()}",
+    )
+    reflect.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=DEFAULT_REFLECTION_LIMIT,
+        metavar="N",
+        help=(
+            f"How many of the most recent closed trades to reflect on. "
+            f"Defaults to {DEFAULT_REFLECTION_LIMIT}."
+        ),
+    )
+
     account = subcommands.add_parser(
         "account",
         help="Open or inspect the local paper account. Simulated only; never a broker.",
@@ -423,6 +527,75 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def render_specialists(report: AnalysisReport) -> list[str]:
+    """The specialist section of a report, as terminal lines.
+
+    WHAT THE TERMINAL GETS THAT THE BROWSER DOES NOT. `orion.interface` drops
+    the 64-character evidence fingerprint and the market-data provider from the
+    wire, on the allowlist discipline `_to_analysis_summary` has always applied.
+    Neither is dropped here: a local operator reading their own machine is the
+    party who needs to check that a finding describes the same bars the
+    proposal was reasoned from, and the fingerprint is the only thing that
+    proves it.
+
+    NOTHING IS RECOMPUTED AND NOTHING IS SUMMARISED. Each finding prints the
+    concept, the bias, and the analyst's own `observation` -- the formatted
+    numbers -- and the interpretation is deliberately left out of this compact
+    view rather than truncated, because a half-sentence of canonical wording
+    would misrepresent it. The full text is on the report for any caller that
+    wants it.
+
+    Concepts ORION could not evaluate are listed with their reason. That is the
+    line that stops this rendering from reading as a claim of completeness.
+    """
+    output = report.technical.output
+    lines: list[str] = []
+
+    for timeframe in output.timeframes:
+        lines.append("")
+        lines.append(
+            f"  {timeframe.timeframe.value} technical  "
+            f"{timeframe.bias.value}, volatility {timeframe.volatility.value}, "
+            f"{timeframe.bar_count} bars to {timeframe.as_of.isoformat()}"
+        )
+        lines.append(f"    evidence   {timeframe.evidence_fingerprint}")
+        lines.append(f"    source     {timeframe.source_provider}")
+        if timeframe.findings:
+            width = max(len(item.concept.value) for item in timeframe.findings)
+            lines.extend(
+                f"    {item.concept.value.ljust(width)}  {item.bias.value:8}  {item.observation}"
+                for item in timeframe.findings
+            )
+        if timeframe.unevaluated:
+            lines.append(
+                "    not evaluated: "
+                + ", ".join(
+                    f"{item.concept.value} ({item.reason.value})" for item in timeframe.unevaluated
+                )
+            )
+
+    thesis = report.thesis.thesis
+    lines.append("")
+    if thesis is None:
+        lines.append(f"  thesis     {report.thesis.detail}")
+        return lines
+
+    lines.append(f"  thesis     {thesis.alignment.value}")
+    lines.append(f"    reading    technical {thesis.technical_condition.value}")
+    if thesis.macro_condition is not None:
+        lines.append(f"    macro      {thesis.macro_condition.value}")
+    for point in thesis.agreements + thesis.conflicts:
+        marker = "agree" if point.agreed else "conflict"
+        macro_reading = "" if point.macro_reading is None else f" vs macro {point.macro_reading}"
+        lines.append(
+            f"    {marker:9}  {point.topic.value}: technical "
+            f"{point.technical_reading}{macro_reading}"
+        )
+    lines.append("")
+    lines.append(f"  {thesis.summary}")
+    return lines
+
+
 def render_report(report: AnalysisReport) -> str:
     """A deterministic, terminal-shaped rendering of `report`.
 
@@ -430,6 +603,11 @@ def render_report(report: AnalysisReport) -> str:
     for *speech* ("by R S I", "percent") and reads wrong on a terminal. Every
     value below is read straight off the report: nothing is recomputed, and an
     absent reading is said out loud rather than substituted with a number.
+
+    The specialist section is appended by `render_specialists`, after the
+    proposal and the Risk Guardian's answer. The order is the point: what the
+    Guardian said is read before what the analysts observed, because only one
+    of the two decides anything.
     """
     rsi = report.evidence.indicators.rsi
     momentum = "not enough history yet" if rsi is None else f"{rsi:.1f}"
@@ -441,6 +619,7 @@ def render_report(report: AnalysisReport) -> str:
     else:
         risk = report.risk.availability.value
 
+    technical = report.technical.output
     rows = (
         ("analysed", report.analyzed_at.isoformat()),
         ("analysis id", report.analysis_id),
@@ -450,12 +629,23 @@ def render_report(report: AnalysisReport) -> str:
         ("proposal", f"{report.decision.action.value} {report.decision.direction.value}"),
         ("confidence", f"{report.reasoning.confidence * 100:.0f}%"),
         ("risk guardian", risk),
+        # The analyst's own aggregate, and the count of what it could and could
+        # not evaluate. Deliberately not the availability enum's own word:
+        # `analyze --account`'s rendering already reserves "available" for the
+        # Risk Guardian panel, and two panels using it for different things
+        # would make the terminal ambiguous about which one is speaking.
+        (
+            "technical",
+            f"{technical.bias.value} from {len(technical.findings)} findings across "
+            f"{len(technical.timeframes)} timeframe(s)",
+        ),
     )
     width = max(len(label) for label, _ in rows)
     lines = [f"{report.symbol} {report.timeframe.value}"]
     lines.extend(f"  {label.ljust(width)}  {value}" for label, value in rows)
     lines.append("")
     lines.append(report.reasoning.rationale)
+    lines.extend(render_specialists(report))
     return "\n".join(lines)
 
 
@@ -490,6 +680,80 @@ def render_account(record: PortfolioRecord) -> str:
     width = max(len(label) for label, _ in rows)
     lines = [f"{state.symbol} paper account"]
     lines.extend(f"  {label.ljust(width)}  {value}" for label, value in rows)
+    return "\n".join(lines)
+
+
+#: What each `exit_matched_*` combination means in words. A closed mapping over
+#: `CloseReason`, so a new close reason fails at import rather than printing an
+#: empty cell -- the same discipline `_CYCLE_SUMMARY` applies to `CycleOutcome`.
+_EXIT_MATCH: dict[CloseReason, str] = {
+    CloseReason.TAKE_PROFIT_HIT: "the predicted take-profit",
+    CloseReason.STOP_LOSS_HIT: "the predicted stop-loss",
+}
+
+
+def render_reflections(batch: ReflectionBatch) -> str:
+    """A deterministic, terminal-shaped rendering of one `ReflectionBatch`.
+
+    Every value is read straight off a `TradeReflection`, which is itself
+    computed from journaled records. NOTHING HERE JUDGES THE TRADE. There is no
+    win rate, no score, no "good"/"bad" and no aggregate P&L: `orion.reflection`
+    deliberately produces facts rather than a verdict, precisely so nothing
+    downstream can turn one closed trade into a strategy change, and a renderer
+    that summed them into a league table would reintroduce exactly that. The
+    approval margin and the matched exit level are printed side by side because
+    that is what tells a bad outcome apart from a bad decision -- the reading is
+    the user's.
+    """
+    header = [
+        ("closed trades", str(batch.total_closed_positions)),
+        ("reflected", str(len(batch.reflections))),
+        ("not reflectable", str(len(batch.unreflectable_fingerprints))),
+        ("reflected at", batch.reflected_at.isoformat()),
+    ]
+    width = max(len(label) for label, _ in header)
+    lines = [f"{batch.symbol} reflection"]
+    lines.extend(f"  {label.ljust(width)}  {value}" for label, value in header)
+
+    for index, item in enumerate(batch.reflections, start=1):
+        margin = f"{item.approval_margin:+.2f}"
+        fees = "unknown" if item.opening_fee is None else f"{item.opening_fee:.2f}"
+        rows = (
+            ("predicted", f"{item.predicted_action.value} {item.predicted_direction.value}"),
+            ("confidence", f"{item.predicted_confidence * 100:.0f}%"),
+            ("risk level", item.predicted_risk_level.value),
+            (
+                "levels",
+                f"stop {item.predicted_stop_loss:.2f}, target {item.predicted_take_profit:.2f}",
+            ),
+            (
+                "risk/reward",
+                f"{item.predicted_risk_reward:.2f} predicted against a "
+                f"{item.policy_min_risk_reward:.2f} minimum ({margin})",
+            ),
+            ("exit matched", _EXIT_MATCH[item.close_reason]),
+            ("entry / exit", f"{item.entry_price:.2f} / {item.exit_price:.2f}"),
+            ("realised", f"{item.realized_pnl:.2f}"),
+            ("fees", f"{fees} opening, {item.closing_fee:.2f} closing"),
+            ("closed position", item.closed_position_fingerprint),
+            ("verdict", item.opened_by_verdict_fingerprint),
+            ("decision", item.decision_fingerprint),
+        )
+        inner = max(len(label) for label, _ in rows)
+        lines.append("")
+        lines.append(f"  {index}. {item.close_reason.value}")
+        lines.extend(f"     {label.ljust(inner)}  {value}" for label, value in rows)
+
+    if batch.unreflectable_fingerprints:
+        lines.append("")
+        # Named, not counted away: a closed trade ORION cannot explain is a fact
+        # about the journal the user is entitled to see and go look at.
+        lines.append(
+            "  These closed trades have no journaled verdict or decision to trace "
+            "back to, so ORION cannot say what it predicted for them:"
+        )
+        lines.extend(f"     {fingerprint}" for fingerprint in batch.unreflectable_fingerprints)
+
     return "\n".join(lines)
 
 
@@ -703,6 +967,10 @@ def _run_paper(
             result = run_cycle(
                 decision=report.decision,
                 evidence=report.evidence,
+                reasoning=report.reasoning,
+                # Advisory evidence, journaled with the chain and never read by
+                # the cycle. `None` when neither specialist had anything to say.
+                thesis=report.thesis.thesis,
                 verdict=report.risk.verdict,
                 store=store,
                 journal=journal,
@@ -720,6 +988,52 @@ def _run_paper(
 
     print(rendering)
     return EXIT_CYCLE_FAILED if result.outcome in _CYCLE_FAILURES else EXIT_OK
+
+
+def _run_reflect(
+    symbol_argument: str,
+    limit: int,
+    *,
+    reflection_resources: ReflectionResources,
+) -> int:
+    """Read the journal and print what happened against what was predicted.
+
+    Never raises, never writes, never creates a database, and never runs an
+    analysis. A journal with nothing closed in it yet is an ordinary answer, not
+    a failure: it prints a batch of zero and exits 0.
+    """
+    intent = parse_intent(f"analyze {symbol_argument}")
+    if intent.kind is not IntentKind.ANALYZE:
+        print(UNKNOWN_SYMBOL_MESSAGE, file=sys.stderr)
+        print(f"ORION can analyse: {_known_symbols_text()}", file=sys.stderr)
+        return EXIT_USAGE
+    symbol = intent.symbol
+    assert symbol is not None  # guaranteed by IntentKind.ANALYZE
+
+    db_path = _account_db_path()
+    if not _account_exists(db_path):
+        # Refused rather than answered with a journal this command created in
+        # order to find it empty -- the same rule `account show` follows.
+        print(NO_HISTORY_MESSAGE, file=sys.stderr)
+        return EXIT_NO_ACCOUNT
+
+    try:
+        with reflection_resources(db_path) as journal:
+            batch = reflect_on_recent_closed_positions(
+                journal, symbol, limit=limit, now=datetime.now(UTC)
+            )
+    except Exception:
+        # Deliberately broad and deliberately message-free, like every other
+        # failure path here. `DecisionJournalError` names the database and its
+        # path, `DecisionJournalIntegrityError` names a stored fingerprint, and
+        # `ReflectionError` names one too. A corrupted record is reported as
+        # "could not read" rather than as an empty history: a journal ORION
+        # cannot verify must never be presented as a journal with nothing in it.
+        print(REFLECTION_FAILED_MESSAGE, file=sys.stderr)
+        return EXIT_REFLECTION_FAILED
+
+    print(render_reflections(batch))
+    return EXIT_OK
 
 
 def _run_analysis(
@@ -786,15 +1100,16 @@ def main(
     account_service_factory: AccountServiceFactory | None = None,
     store_factory: StoreFactory | None = None,
     paper_resources: PaperResources | None = None,
+    reflection_resources: ReflectionResources | None = None,
 ) -> int:
     """The `orion` console entrypoint. Returns a process exit code.
 
-    `argv` defaults to the real command line. The three factories are test seams
-    and nothing else: none is reachable from the command line, so no invocation
-    can swap out how ORION is wired or where its account lives. `store_factory`
-    and `paper_resources` in particular cannot be used to redirect the database —
-    both are handed the path `_account_db_path` resolved from `ORION_DB_PATH`,
-    and never one built from an argument.
+    `argv` defaults to the real command line. The factories are test seams and
+    nothing else: none is reachable from the command line, so no invocation can
+    swap out how ORION is wired or where its account lives. `store_factory`,
+    `paper_resources` and `reflection_resources` in particular cannot be used to
+    redirect the database — each is handed the path `_account_db_path` resolved
+    from `ORION_DB_PATH`, and never one built from an argument.
     """
     parser = build_parser()
     try:
@@ -804,6 +1119,13 @@ def main(
         # Turning that back into a return keeps every path out of this function
         # uniform, and keeps the message argparse already wrote to stderr.
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
+
+    if args.command == "reflect":
+        return _run_reflect(
+            str(args.symbol),
+            int(args.limit),
+            reflection_resources=reflection_resources or _default_reflection_resources,
+        )
 
     if args.command == "paper":
         return _run_paper(

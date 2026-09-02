@@ -117,14 +117,29 @@ _ALLOWED_EXTRA_ORION_IMPORTS_BY_FILE: dict[str, set[str]] = {
     },
     # `analysis.py` calls the two ABCs it is handed and re-uses Mission 7's
     # quality gate -- never a concrete provider, so it cannot construct a
-    # vendor client of its own.
+    # vendor client of its own. Mission 8 v2 adds the Technical Analyst and the
+    # synthesis seam: both are pure functions with no vendor, no credential and
+    # no client to construct, so allowing them here does not give this file any
+    # reach it did not have.
     "analysis.py": {
         "orion.analysts.provider_base",
+        "orion.analysts.schemas",
+        "orion.analysts.synthesis",
+        "orion.analysts.technical",
+        "orion.analysts.technical_schemas",
         "orion.research.provider_base",
         "orion.research.validation",
     },
-    # `schemas.py` holds the analyst's output on `MacroPanel`. Schemas only.
-    "schemas.py": {"orion.analysts.schemas"},
+    # `schemas.py` holds the analysts' outputs on `MacroPanel`/`TechnicalPanel`
+    # and the thesis on `ThesisPanel`. Schemas only -- no provider, no ABC, no
+    # client. Mission 8 v2.2 *narrowed* this: `MarketThesis` now comes from
+    # `orion.thesis.schemas`, which is not on the disallowed list at all, so
+    # `orion.analysts.synthesis` -- the module that builds one -- is no longer
+    # reachable from here.
+    "schemas.py": {
+        "orion.analysts.schemas",
+        "orion.analysts.technical_schemas",
+    },
 }
 
 DANGEROUS_CALL_NAMES = {"exec", "eval", "compile"}

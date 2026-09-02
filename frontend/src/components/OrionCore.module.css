@@ -28,6 +28,17 @@
    */
   --stage: var(--orion-core-stage, clamp(180px, min(48vmin, 38vh), 460px));
   --accent-rgb: 54 182 124;
+  /*
+   * Three hues, not one.
+   *
+   * A single accent used at every opacity is flat: the shadows are just a
+   * dimmer version of the highlights, so nothing has depth, only brightness.
+   * `--deep` is where the light falls off to and `--hot` is where it builds
+   * up to, which is what makes the glow read as dimensional rather than as
+   * the same green turned up. Both shift with the state alongside the accent.
+   */
+  --deep-rgb: 6 54 38;
+  --hot-rgb: 214 255 235;
 
   position: relative;
   width: var(--stage);
@@ -43,87 +54,32 @@
     height 900ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/*
+ * Matched to the ORION V1 reference: a vivid spring green rather than the
+ * muted sea green this started as. Same hue family, roughly half again the
+ * chroma. The state relationships are unchanged -- listening opens brighter,
+ * thinking cools toward teal, speaking is the warmest -- they are simply
+ * carried at the reference's saturation.
+ */
 .stage[data-state="idle"] {
-  --accent-rgb: 46 172 118;
+  --deep-rgb: 5 56 38;
+  --hot-rgb: 214 255 232;
+  --accent-rgb: 38 208 122;
 }
 .stage[data-state="listening"] {
-  --accent-rgb: 78 220 152;
+  --deep-rgb: 8 80 52;
+  --hot-rgb: 228 255 240;
+  --accent-rgb: 72 240 146;
 }
 .stage[data-state="thinking"] {
-  --accent-rgb: 36 198 162;
+  --deep-rgb: 4 72 60;
+  --hot-rgb: 214 255 244;
+  --accent-rgb: 26 218 158;
 }
 .stage[data-state="speaking"] {
-  --accent-rgb: 112 236 172;
-}
-
-/*
- * The bezel: one hairline ring of graduated ticks, just outside the widest
- * orbit.
- *
- * Drawn as a repeating conic gradient masked down to a 2px annulus, so a
- * 120-tick measured scale costs one composited pseudo-element rather than 120
- * DOM nodes. It counter-rotates against the outer ring at a rate you cannot
- * quite catch. This is the layer that makes the core read as instrumentation
- * rather than decoration: something evenly measured, wrapped around something
- * that is not.
- */
-.stage::before {
-  content: "";
-  position: absolute;
-  inset: -2.5%;
-  border-radius: 50%;
-  background: repeating-conic-gradient(
-    from 0deg,
-    rgb(var(--accent-rgb) / 0.55) 0deg 0.3deg,
-    rgb(var(--accent-rgb) / 0) 0.3deg 3deg
-  );
-  -webkit-mask: radial-gradient(
-    closest-side,
-    transparent calc(100% - 4px),
-    #000 calc(100% - 4px) calc(100% - 2px),
-    transparent calc(100% - 2px)
-  );
-  mask: radial-gradient(
-    closest-side,
-    transparent calc(100% - 4px),
-    #000 calc(100% - 4px) calc(100% - 2px),
-    transparent calc(100% - 2px)
-  );
-  opacity: calc(0.14 + 0.4 * var(--glow));
-  animation: spin 300s linear infinite reverse;
-  transition: opacity 1100ms cubic-bezier(0.22, 1, 0.36, 1);
-  pointer-events: none;
-}
-
-/*
- * Four cardinal marks over the bezel. A scale with no origin is a texture;
- * four longer ticks give it one, and they hold still while the scale turns.
- */
-.stage::after {
-  content: "";
-  position: absolute;
-  inset: -3.6%;
-  border-radius: 50%;
-  background: repeating-conic-gradient(
-    from -0.5deg,
-    rgb(var(--accent-rgb) / 0.75) 0deg 1deg,
-    rgb(var(--accent-rgb) / 0) 1deg 90deg
-  );
-  -webkit-mask: radial-gradient(
-    closest-side,
-    transparent calc(100% - 9px),
-    #000 calc(100% - 9px) calc(100% - 2px),
-    transparent calc(100% - 2px)
-  );
-  mask: radial-gradient(
-    closest-side,
-    transparent calc(100% - 9px),
-    #000 calc(100% - 9px) calc(100% - 2px),
-    transparent calc(100% - 2px)
-  );
-  opacity: calc(0.18 + 0.36 * var(--glow));
-  transition: opacity 1100ms cubic-bezier(0.22, 1, 0.36, 1);
-  pointer-events: none;
+  --deep-rgb: 12 96 60;
+  --hot-rgb: 236 255 243;
+  --accent-rgb: 108 252 158;
 }
 
 /* ---------------------------------------------------------------- glow --- */
@@ -143,12 +99,12 @@
   height: 152%;
   background: radial-gradient(
     closest-side,
-    rgb(var(--accent-rgb) / 0.17) 0%,
-    rgb(var(--accent-rgb) / 0.06) 42%,
-    rgb(var(--accent-rgb) / 0) 74%
+    rgb(var(--accent-rgb) / 0.13) 0%,
+    rgb(var(--accent-rgb) / 0.04) 40%,
+    rgb(var(--accent-rgb) / 0) 72%
   );
-  filter: blur(calc(var(--stage) * 0.05));
-  opacity: calc(0.28 + 0.72 * var(--glow));
+  opacity: calc(0.22 + 0.6 * var(--glow));
+  will-change: transform, opacity;
   animation: bloomDrift 19s ease-in-out infinite;
 }
 
@@ -157,12 +113,12 @@
   height: 74%;
   background: radial-gradient(
     closest-side,
-    rgb(var(--accent-rgb) / 0.34) 0%,
-    rgb(var(--accent-rgb) / 0.12) 48%,
+    rgb(var(--accent-rgb) / 0.44) 0%,
+    rgb(var(--accent-rgb) / 0.17) 46%,
     rgb(var(--accent-rgb) / 0) 78%
   );
-  filter: blur(calc(var(--stage) * 0.018));
   opacity: calc(0.34 + 0.66 * var(--glow));
+  will-change: transform, opacity;
   animation: auraBreath 9s ease-in-out infinite;
 }
 
@@ -179,17 +135,332 @@
   background: conic-gradient(
     from 0deg,
     rgb(var(--accent-rgb) / 0) 0deg,
-    rgb(var(--accent-rgb) / 0.1) 54deg,
+    rgb(var(--accent-rgb) / 0.055) 28deg,
+    rgb(var(--accent-rgb) / 0.09) 54deg,
+    rgb(var(--accent-rgb) / 0.05) 88deg,
     rgb(var(--accent-rgb) / 0) 124deg,
     rgb(var(--accent-rgb) / 0) 206deg,
-    rgb(var(--accent-rgb) / 0.06) 262deg,
+    rgb(var(--accent-rgb) / 0.03) 236deg,
+    rgb(var(--accent-rgb) / 0.055) 262deg,
+    rgb(var(--accent-rgb) / 0.03) 292deg,
     rgb(var(--accent-rgb) / 0) 328deg
   );
-  filter: blur(calc(var(--stage) * 0.06));
   opacity: calc(0.24 + 0.5 * var(--glow));
   animation: spin 96s linear infinite;
   transition: opacity 1100ms ease;
   pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- halo --- */
+
+/*
+ * The aperture: twenty concentric rings of graduated radius, weight, break
+ * pattern and rate.
+ *
+ * THIS LAYER IS WHY ORION IS NO LONGER A DOT. Four orbits around a sphere is
+ * a diagram of an atom, and that is exactly what the previous revision looked
+ * like from across a room. Density is what turns a marker into an instrument:
+ * rings that are nearly solid next to rings that are barely dotted, a bright
+ * focal band about two fifths of the way out, a few ellipses tumbling among
+ * the circles, and no two turning at the same rate or in the same direction.
+ *
+ * IT IS DELIBERATELY MUCH BIGGER THAN THE STAGE. 186% of the layout box, so
+ * the ring system spans well over half a desktop while the box the layout
+ * actually reserves stays exactly the modest square every viewport invariant
+ * was measured against. Overflow costs nothing and collides with nothing --
+ * this is the whole reason ORION could be made dominant without the core ever
+ * having to shrink when a reply arrives.
+ *
+ * The lower fade is not decoration either: ORION's reply sits below the core
+ * and inside this field, so the bottom of the aperture steps back to keep a
+ * sentence readable through it.
+ */
+.halo {
+  position: absolute;
+  inset: -43%;
+  overflow: visible;
+  opacity: calc(0.68 + 0.32 * var(--glow));
+  /*
+   * Two masks, multiplied.
+   *
+   * The radial one is what turns a set of concentric circles into a lens: the
+   * rings are at full strength against the sphere and dissolve outward, so the
+   * aperture has no edge and no last ring. Without it the outermost circle
+   * always reads as a boundary, and a boundary is the one thing an energy
+   * field must not have.
+   *
+   * The linear one is legibility: ORION's reply sits below the core and inside
+   * this field, so the lower part of the lens steps back to keep a sentence
+   * readable through it.
+   */
+  -webkit-mask-image:
+    radial-gradient(
+      closest-side,
+      #000 0%,
+      #000 66%,
+      rgba(0, 0, 0, 0.82) 84%,
+      rgba(0, 0, 0, 0.44) 96%,
+      transparent 100%
+    ),
+    linear-gradient(180deg, #000 0%, #000 64%, rgba(0, 0, 0, 0.72) 84%, rgba(0, 0, 0, 0.46) 100%);
+  mask-image:
+    radial-gradient(
+      closest-side,
+      #000 0%,
+      #000 66%,
+      rgba(0, 0, 0, 0.82) 84%,
+      rgba(0, 0, 0, 0.44) 96%,
+      transparent 100%
+    ),
+    linear-gradient(180deg, #000 0%, #000 64%, rgba(0, 0, 0, 0.72) 84%, rgba(0, 0, 0, 0.46) 100%);
+  /*
+   * The list is top layer first, and the BOTTOM layer must be `add`.
+   *
+   * `intersect` on every layer is the trap here: the bottom-most mask
+   * composites against an empty backdrop, so intersecting it with nothing
+   * erases it, and the layer above then intersects with the result. Written
+   * that way the two masks did not multiply, they cancelled -- the aperture
+   * and the waves both went to almost nothing and looked like a brightness
+   * problem rather than a compositing one.
+   */
+  -webkit-mask-composite: source-in, source-over;
+  mask-composite: intersect, add;
+  transition:
+    transform 1200ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 1100ms cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+
+/*
+ * THE STATE IS A GESTURE, NOT A BRIGHTNESS.
+ *
+ * The three bands move against each other rather than together, which is the
+ * whole reason THINKING reads as concentration instead of as the page being
+ * turned up: the lens draws in hard against the sphere while the outer field
+ * opens away from it, so the aperture is visibly *focusing*. LISTENING does
+ * the opposite and opens throughout, which reads as receptivity. SPEAKING
+ * settles just outside rest and lets the waveform carry the state instead.
+ *
+ * None of this touches opacity. Two layers moving in opposite directions is
+ * information; the same layer getting brighter is decoration.
+ */
+.haloBand {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 1500ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*
+ * The mid and outer bands turn as one group each. `--spin: 0s` on the inner
+ * band means no animation is created for it at all, which is what we want --
+ * its rings carry their own.
+ */
+.haloBand[data-band="1"],
+.haloBand[data-band="2"] {
+  animation: spin var(--spin) linear infinite;
+  animation-direction: var(--direction);
+}
+
+/* A ring that rides its band rather than turning on its own clock. */
+.haloStill {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: rotate(var(--tilt));
+}
+
+/*
+ * The gesture is carried by `scale` on the SVG itself per band, using a
+ * custom property the rotation does not touch. Writing both the state scale
+ * and the continuous rotation into `transform` on the same element makes the
+ * two fight; the band scales through `--band-scale` and rotates through
+ * `transform`, so they compose instead.
+ */
+.haloBand[data-band="1"],
+.haloBand[data-band="2"] {
+  scale: var(--band-scale, 1);
+  transition: scale 1500ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.haloBand[data-band="0"] {
+  scale: var(--band-scale, 1);
+  transition: scale 1500ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.stage[data-state="listening"] .haloBand[data-band="0"] {
+  --band-scale: 1.055;
+}
+.stage[data-state="listening"] .haloBand[data-band="1"] {
+  --band-scale: 1.07;
+}
+.stage[data-state="listening"] .haloBand[data-band="2"] {
+  --band-scale: 1.045;
+}
+
+.stage[data-state="thinking"] .haloBand[data-band="0"] {
+  --band-scale: 0.945;
+}
+.stage[data-state="thinking"] .haloBand[data-band="1"] {
+  --band-scale: 0.985;
+}
+.stage[data-state="thinking"] .haloBand[data-band="2"] {
+  --band-scale: 1.11;
+}
+
+.stage[data-state="speaking"] .haloBand[data-band="0"] {
+  --band-scale: 1.02;
+}
+.stage[data-state="speaking"] .haloBand[data-band="1"] {
+  --band-scale: 1.015;
+}
+.stage[data-state="speaking"] .haloBand[data-band="2"] {
+  --band-scale: 1.03;
+}
+
+/*
+ * `fill-box`, for the same reason the lattice uses it: the viewBox origin is
+ * the corner at (-50, -50), so a `view-box` transform origin would swing each
+ * ring about a point far outside itself.
+ */
+.haloSpin {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: haloTurn var(--spin) linear var(--offset) infinite;
+  animation-direction: var(--direction);
+}
+
+/*
+ * The equatorial disc.
+ *
+ * Three of the twenty-six rings are squashed to a few percent and do NOT turn
+ * through a full revolution -- they lean a few degrees either side of their
+ * own plane instead. A near-edge-on ellipse rotated through 360 degrees passes
+ * through vertical, which reads as a coin flipping rather than as a body with
+ * an axis. Holding the plane is what makes the core have an equator.
+ */
+.haloSpin[data-equatorial="true"] {
+  animation-name: equatorLean;
+  animation-duration: 47s;
+  animation-timing-function: ease-in-out;
+  animation-direction: alternate;
+}
+
+.haloArc[data-equatorial="true"] {
+  stroke: rgb(var(--accent-rgb) / 0.9);
+  transition:
+    stroke-opacity 1000ms ease,
+    stroke-width 1000ms ease;
+}
+
+/* Working: the axis draws itself brighter and heavier while the lens closes
+   in around it. Weight rather than a drop-shadow, which would re-rasterise
+   the whole ring on every transition frame. */
+.stage[data-state="thinking"] .haloArc[data-equatorial="true"] {
+  stroke-opacity: 1;
+  stroke-width: calc(var(--weight) * 0.135 * 1.6);
+}
+
+.haloArc {
+  fill: none;
+  stroke: rgb(var(--accent-rgb) / 0.95);
+  /*
+   * User units, deliberately.
+   *
+   * `vector-effect: non-scaling-stroke` makes the stroke geometry a function
+   * of the element's current transform, so every rotating ring re-derived its
+   * outline on every frame -- and there were twenty-seven of them. In user
+   * units the stroke is generated once and the rotation is a pure composite.
+   * The ring is also then genuinely heavier on a large display, which is the
+   * right behaviour for something meant to read as luminous.
+   */
+  /*
+   * WIDTH IS EXPENSIVE HERE; BRIGHTNESS IS NOT.
+   *
+   * These rings sit inside a masked SVG whose groups animate, so the band is
+   * re-rasterised as they turn, and the cost scales with the anti-aliased
+   * area the strokes cover. Widening them from 0.135 to 0.2 to close the gap
+   * on the reference measured as idle p50 6.9ms -> 13.9ms at 1920x1080 --
+   * every other frame missed. A sub-pixel hairline gets brighter just as
+   * readily by raising its opacity, which changes colour rather than
+   * coverage and costs nothing at all, so that is where the aperture's
+   * luminosity comes from (see `HALO_ARCS` in `core-geometry.ts`).
+   */
+  stroke-width: calc(var(--weight) * 0.135);
+  stroke-opacity: calc(var(--alpha) * (1.15 + 0.4 * var(--glow)));
+  stroke-dasharray: var(--dash);
+  stroke-linecap: round;
+  transition: stroke-opacity 1000ms ease;
+}
+
+/* -------------------------------------------------------------- corona --- */
+
+/*
+ * Filaments radiating out of the hot centre, inside the sphere.
+ *
+ * A radial gradient can only ever be smooth, and smooth reads as a lit ball.
+ * The reference's core is visibly *generating* light from a structured
+ * middle, and this is that structure: a fine conic comb masked to an annulus
+ * so it never touches the hot centre or the limb, screen-blended so it only
+ * ever adds light, turning slowly against everything else in the sphere.
+ *
+ * Clipped by `.sphere`'s own `overflow: hidden`, which is why it can be
+ * oversized and never show an edge.
+ */
+.corona {
+  position: absolute;
+  inset: -6%;
+  border-radius: 50%;
+  background: repeating-conic-gradient(
+    from 0deg,
+    rgb(var(--hot-rgb) / 0.38) 0deg 0.32deg,
+    rgb(var(--hot-rgb) / 0) 0.32deg 2.7deg
+  );
+  -webkit-mask: radial-gradient(
+    closest-side,
+    transparent 12%,
+    #000 34%,
+    rgba(0, 0, 0, 0.55) 66%,
+    transparent 88%
+  );
+  mask: radial-gradient(
+    closest-side,
+    transparent 12%,
+    #000 34%,
+    rgba(0, 0, 0, 0.55) 66%,
+    transparent 88%
+  );
+  mix-blend-mode: screen;
+  opacity: calc(0.3 + 0.34 * var(--glow));
+  animation: spin 71s linear infinite;
+  transition: opacity 1100ms ease;
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------- wave rings --- */
+
+/*
+ * Energy leaving the core.
+ *
+ * Four rings on periods that share no factor, each resting for most of its
+ * cycle. Continuous concentric rings are the universal grammar of a loading
+ * spinner; rings that leave occasionally, at four different rates, out of
+ * phase, are something happening.
+ */
+.pulseField {
+  position: absolute;
+  inset: -30%;
+  pointer-events: none;
+}
+
+.pulseRing {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 30%;
+  height: 30%;
+  border: var(--weight) solid rgb(var(--accent-rgb) / 0.85);
+  border-radius: 50%;
+  opacity: 0;
+  animation: pulseOut var(--spin) cubic-bezier(0.16, 0.6, 0.3, 1) var(--offset) infinite;
 }
 
 /* ----------------------------------------------------------- particles --- */
@@ -204,31 +475,26 @@
   position: absolute;
   top: 50%;
   left: 50%;
-  width: calc(var(--dot) * var(--stage));
-  height: calc(var(--dot) * var(--stage));
-  margin: calc(var(--dot) * var(--stage) * -0.5);
+  width: calc(var(--dot) * var(--stage) * 1.9);
+  height: calc(var(--dot) * var(--stage) * 1.9);
+  margin: calc(var(--dot) * var(--stage) * -0.95);
   border-radius: 50%;
-  background: rgb(var(--accent-rgb) / 0.95);
-  box-shadow: 0 0 calc(var(--stage) * 0.014) rgb(var(--accent-rgb) / 0.7);
+  /*
+   * The glow is the background, not a box-shadow and not a second animated
+   * child. Each particle used to carry a `::after` halo of its own that scaled
+   * and faded on its own clock -- twenty-six more animations, each one scaling
+   * a soft gradient, for a twinkle nobody can resolve at two pixels across.
+   */
+  background: radial-gradient(
+    closest-side,
+    rgb(var(--hot-rgb) / 0.95) 0%,
+    rgb(var(--accent-rgb) / 0.9) 34%,
+    rgb(var(--accent-rgb) / 0) 100%
+  );
   opacity: calc(var(--alpha) * var(--particle-energy));
   animation: orbit var(--spin) linear var(--offset) infinite;
   animation-direction: var(--direction);
   transition: opacity 1000ms ease;
-}
-
-/*
- * Each mote gets a soft halo that breathes on the particle's own negative
- * delay, so the field twinkles out of phase with itself instead of pulsing as
- * one. Opacity and transform only -- 26 more composited layers cost nothing.
- */
-.particle::after {
-  content: "";
-  position: absolute;
-  inset: -190%;
-  border-radius: 50%;
-  background: radial-gradient(closest-side, rgb(var(--accent-rgb) / 0.55), transparent 72%);
-  animation: mote 5.6s ease-in-out var(--offset) infinite;
-  pointer-events: none;
 }
 
 /* --------------------------------------------------------------- rings --- */
@@ -318,7 +584,8 @@
   width: 100%;
   height: 100%;
   overflow: visible;
-  opacity: var(--lattice-energy);
+  transform: scale(0.72);
+  opacity: calc(var(--lattice-energy) * 0.8);
   transition: opacity 900ms cubic-bezier(0.22, 1, 0.36, 1);
   pointer-events: none;
 }
@@ -364,9 +631,10 @@
 .latticeEdge {
   fill: none;
   stroke: rgb(var(--accent-rgb) / 0.9);
-  stroke-width: 0.2;
+  stroke-width: 0.16;
   stroke-linecap: round;
-  stroke-opacity: 0.14;
+  stroke-opacity: 0.9;
+  opacity: 0.14;
   animation: edgeSignal 3.9s ease-in-out infinite;
 }
 
@@ -399,6 +667,58 @@
   animation: nodePulse 2.7s cubic-bezier(0.16, 1, 0.3, 1) infinite;
 }
 
+/* ------------------------------------------------------------- scanner --- */
+
+/*
+ * The one layer that does not share an axis with anything else.
+ *
+ * Everything above turns in the screen plane or on an orbit tilted out of it;
+ * this sweeps around a plane laid almost flat, like a dish rather than a
+ * clock. Two different rhythms on it: a continuous slow sweep at 23 seconds,
+ * and a ring scan that fires roughly once every 37 and is absent the rest of
+ * the time. A sweep that never stops is a loading indicator. One that rests
+ * is something looking.
+ */
+.scanner {
+  position: absolute;
+  inset: -18%;
+  transform: rotateX(72deg) rotateZ(-14deg);
+  transform-style: preserve-3d;
+  pointer-events: none;
+}
+
+.scanSweep {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgb(var(--accent-rgb) / 0) 0deg,
+    rgb(var(--accent-rgb) / 0.2) 24deg,
+    rgb(var(--accent-rgb) / 0.05) 58deg,
+    rgb(var(--accent-rgb) / 0) 96deg,
+    rgb(var(--accent-rgb) / 0) 360deg
+  );
+  -webkit-mask: radial-gradient(closest-side, transparent 30%, #000 66%, transparent 100%);
+  mask: radial-gradient(closest-side, transparent 30%, #000 66%, transparent 100%);
+  opacity: calc(0.24 + 0.5 * var(--glow));
+  will-change: transform;
+  animation: spin 23s linear infinite;
+  transition: opacity 1100ms ease;
+}
+
+.scanRing {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 30%;
+  height: 30%;
+  border: 1px solid rgb(var(--accent-rgb) / 0.7);
+  border-radius: 50%;
+  opacity: 0;
+  animation: scanOut 37s cubic-bezier(0.2, 0.7, 0.3, 1) infinite;
+}
+
 /* ------------------------------------------------------------ waveform --- */
 
 /*
@@ -418,8 +738,15 @@
 .wave {
   position: absolute;
   inset: 0;
-  opacity: calc(0.16 + 0.84 * var(--envelope));
+  opacity: calc(0.12 + 0.88 * var(--envelope));
   transition: opacity var(--envelope-ease, 900ms) cubic-bezier(0.22, 1, 0.36, 1);
+  /*
+   * One rotation for the whole ring, replacing forty-four per-bar keyframes.
+   * The bars still move with the voice -- `--envelope` is measured audio and
+   * reaches them through a transition, not an animation -- and the slow turn
+   * is what keeps the corona alive when nothing is being said.
+   */
+  animation: spin 118s linear infinite;
   pointer-events: none;
 }
 
@@ -427,9 +754,9 @@
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 1.6px;
-  height: calc(var(--stage) * 0.082);
-  margin-left: -0.8px;
+  width: 2.2px;
+  height: calc(var(--stage) * 0.105);
+  margin-left: -1.1px;
   transform-origin: 50% 0%;
   transform: rotate(var(--angle)) translateY(calc(var(--stage) * 0.183))
     scaleY(calc(0.08 + var(--envelope) * var(--weight)));
@@ -443,11 +770,11 @@
   border-radius: 1px;
   background: linear-gradient(
     to bottom,
-    rgb(var(--accent-rgb) / 0.95),
-    rgb(var(--accent-rgb) / 0)
+    rgba(232, 255, 243, 0.95) 0%,
+    rgb(var(--accent-rgb) / 0.9) 34%,
+    rgb(var(--accent-rgb) / 0) 100%
   );
   transform-origin: 50% 0%;
-  animation: waveTravel 2.2s ease-in-out infinite;
 }
 
 /* -------------------------------------------------------------- sphere --- */
@@ -461,8 +788,14 @@
   position: absolute;
   inset: 0;
   margin: auto;
-  width: 31%;
-  height: 31%;
+  /*
+   * Raised from 31% now that the aperture reaches 186% of the stage. The
+   * hierarchy is a ratio, not an absolute: with a ring system that much
+   * larger around it, a sphere at the old fraction reads as a bead in a very
+   * big frame rather than as the thing the frame is built around.
+   */
+  width: 36%;
+  height: 36%;
   transform: scale(var(--core-scale));
   transition: transform 1100ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -472,16 +805,19 @@
   inset: 0;
   border-radius: 50%;
   background: radial-gradient(
-    circle at 50% 36%,
+    circle at 50% 45%,
     #ffffff 0%,
-    rgba(226, 255, 240, 0.92) 9%,
-    rgb(var(--accent-rgb)) 33%,
-    rgba(9, 92, 62, 0.94) 68%,
-    rgba(2, 22, 15, 0.96) 100%
+    rgba(232, 255, 244, 0.98) 4.5%,
+    rgb(var(--accent-rgb) / 0.94) 15%,
+    rgba(32, 208, 132, 0.82) 32%,
+    rgba(18, 158, 100, 0.68) 50%,
+    rgba(10, 112, 72, 0.58) 68%,
+    rgba(6, 76, 50, 0.56) 86%,
+    rgba(5, 54, 37, 0.64) 100%
   );
   box-shadow:
-    0 0 calc(var(--stage) * 0.05) rgb(var(--accent-rgb) / calc(0.3 + 0.5 * var(--glow))),
-    0 0 calc(var(--stage) * 0.17) rgb(var(--accent-rgb) / calc(0.08 + 0.3 * var(--glow)));
+    0 0 calc(var(--stage) * 0.07) rgb(var(--accent-rgb) / calc(0.4 + 0.55 * var(--glow))),
+    0 0 calc(var(--stage) * 0.22) rgb(var(--accent-rgb) / calc(0.14 + 0.4 * var(--glow)));
   animation: breathe 7.2s ease-in-out infinite;
   transition: box-shadow 1000ms ease;
   overflow: hidden;
@@ -501,7 +837,7 @@
     rgba(255, 255, 255, 0) 360deg
   );
   mix-blend-mode: screen;
-  opacity: 0.55;
+  opacity: 0.42;
   animation: spin 15s linear infinite;
 }
 
@@ -546,21 +882,21 @@
     radial-gradient(30% 28% at 40% 32%, rgba(255, 255, 255, 0.34), transparent 64%),
     radial-gradient(38% 32% at 68% 60%, rgb(var(--accent-rgb) / 0.7), transparent 68%),
     radial-gradient(26% 30% at 26% 70%, rgb(var(--accent-rgb) / 0.42), transparent 70%);
-  filter: blur(calc(var(--stage) * 0.014));
   mix-blend-mode: screen;
-  opacity: 0.5;
+  opacity: 0.28;
+  will-change: transform;
   animation: plasmaDrift 19s ease-in-out infinite;
   pointer-events: none;
 }
 
 .hotspot {
   position: absolute;
-  top: 15%;
-  left: 26%;
-  width: 34%;
-  height: 24%;
+  top: 11%;
+  left: 19%;
+  width: 22%;
+  height: 14%;
   border-radius: 50%;
-  background: radial-gradient(closest-side, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0));
+  background: radial-gradient(closest-side, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0));
   /* The specular point wanders and swells very slightly, so the sphere never
      sits perfectly still even with everything else at rest. */
   animation: hotspotBreath 8.4s ease-in-out infinite;
@@ -570,9 +906,20 @@
   position: absolute;
   inset: 0;
   border-radius: 50%;
+  /*
+   * The limb, and the specular that sits on it.
+   *
+   * Now that the body is translucent the edge is what says "sphere" -- a
+   * bright hairline all the way round, a soft highlight up on the shoulder,
+   * and the existing dark terminator opposite it. All three are inset
+   * shadows on an element that never animates, so they are rasterised once.
+   */
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
-    inset 0 calc(var(--stage) * -0.014) calc(var(--stage) * 0.036) rgba(4, 34, 24, 0.55);
+    inset 0 0 0 1px rgb(var(--hot-rgb) / 0.56),
+    inset calc(var(--stage) * 0.005) calc(var(--stage) * 0.007) calc(var(--stage) * 0.026)
+      rgb(var(--hot-rgb) / 0.2),
+    inset calc(var(--stage) * -0.006) calc(var(--stage) * -0.01) calc(var(--stage) * 0.055)
+      rgba(0, 12, 8, 0.42);
 }
 
 /*
@@ -580,6 +927,41 @@
  * cells on coprime periods never repeat the same arrangement twice inside a
  * minute, which is the whole difference between "alive" and "looping".
  */
+/*
+ * The rim light: an uneven bright arc bending round the lower-left of the
+ * limb, drawn as a conic gradient masked down to a hairline annulus.
+ *
+ * This is the cue that separates a sphere from a disc. A radial gradient
+ * alone gives a lit circle; light travelling round an edge and coming back
+ * out of it gives a body with a far side. It is uneven on purpose -- an even
+ * one is a stroke, and a stroke reads as an outline.
+ */
+.rim::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 92deg,
+    rgb(var(--accent-rgb) / 0) 0deg,
+    rgb(var(--accent-rgb) / 0.55) 46deg,
+    rgb(var(--hot-rgb) / 0.7) 98deg,
+    rgb(var(--accent-rgb) / 0.45) 150deg,
+    rgb(var(--accent-rgb) / 0) 206deg,
+    rgb(var(--accent-rgb) / 0) 360deg
+  );
+  -webkit-mask: radial-gradient(
+    closest-side,
+    transparent 82%,
+    rgba(0, 0, 0, 0.5) 93%,
+    #000 100%
+  );
+  mask: radial-gradient(closest-side, transparent 82%, rgba(0, 0, 0, 0.5) 93%, #000 100%);
+  opacity: calc(0.2 + 0.3 * var(--glow));
+  transition: opacity 1000ms ease;
+  pointer-events: none;
+}
+
 .rim::before {
   content: "";
   position: absolute;
@@ -588,9 +970,8 @@
   background:
     radial-gradient(34% 30% at 62% 34%, rgb(var(--accent-rgb) / 0.5), transparent 66%),
     radial-gradient(28% 26% at 34% 62%, rgba(255, 255, 255, 0.18), transparent 68%);
-  filter: blur(calc(var(--stage) * 0.02));
-  mix-blend-mode: screen;
-  opacity: 0.42;
+  opacity: 0.22;
+  will-change: transform;
   animation: plasmaCounter 29s ease-in-out infinite;
   pointer-events: none;
 }
@@ -600,6 +981,65 @@
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/*
+ * The ring's static tilt is carried through the whole revolution rather than
+ * being a separate transform, so an elliptical ring tumbles about its own
+ * plane instead of being rotated inside a plane it does not share.
+ */
+/* A few degrees either side of the ring's own plane, over most of a minute. */
+@keyframes equatorLean {
+  from {
+    transform: rotate(calc(var(--tilt) - 5deg));
+  }
+  to {
+    transform: rotate(calc(var(--tilt) + 5deg));
+  }
+}
+
+@keyframes haloTurn {
+  from {
+    transform: rotate(var(--tilt));
+  }
+  to {
+    transform: rotate(calc(var(--tilt) + 360deg));
+  }
+}
+
+/* Fast bloom, long silent expansion, gone well before the ring reaches the
+   edge -- so it reads as energy dissipating rather than as a circle growing. */
+@keyframes pulseOut {
+  0% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  7% {
+    opacity: calc(var(--alpha) * (0.35 + 0.65 * var(--glow)));
+  }
+  58% {
+    opacity: 0;
+  }
+  100% {
+    transform: scale(3.2);
+    opacity: 0;
+  }
+}
+
+/* Absent for nearly three quarters of its cycle. */
+@keyframes scanOut {
+  0%,
+  72% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  76% {
+    opacity: calc(0.3 + 0.4 * var(--glow));
+  }
+  100% {
+    transform: scale(3.4);
+    opacity: 0;
   }
 }
 
@@ -655,18 +1095,6 @@
   }
 }
 
-@keyframes mote {
-  0%,
-  100% {
-    opacity: 0.12;
-    transform: scale(0.66);
-  }
-  50% {
-    opacity: 0.72;
-    transform: scale(1.3);
-  }
-}
-
 @keyframes latticeBreath {
   0%,
   100% {
@@ -677,20 +1105,25 @@
   }
 }
 
+/*
+ * Opacity, not stroke-opacity and stroke-width.
+ *
+ * Animating a stroke's paint or its weight repaints the chord every frame and
+ * re-derives its outline; the same envelope on the element's own opacity
+ * composites. Sharp attack, slow decay either way -- the envelope of something
+ * firing, not the sine wave of something decorating.
+ */
 @keyframes edgeSignal {
   0%,
   64%,
   100% {
-    stroke-opacity: 0.12;
-    stroke-width: 0.18;
+    opacity: 0.13;
   }
   7% {
-    stroke-opacity: 0.92;
-    stroke-width: 0.36;
+    opacity: 1;
   }
   32% {
-    stroke-opacity: 0.3;
-    stroke-width: 0.22;
+    opacity: 0.33;
   }
 }
 
@@ -750,16 +1183,6 @@
   }
 }
 
-@keyframes waveTravel {
-  0%,
-  100% {
-    transform: scaleY(0.42);
-  }
-  50% {
-    transform: scaleY(1);
-  }
-}
-
 /*
  * Reduced motion: hold the composition on a settled frame instead of removing
  * it. State changes still cross-fade colour, glow and scale, so the interface
@@ -772,7 +1195,6 @@
   .ringSpin,
   .latticeSpin,
   .latticeNode,
-  .bar,
   .stage,
   .sphere,
   .shimmer,
@@ -780,12 +1202,46 @@
   .sphere::before,
   .rim::before,
   .hotspot,
-  .particle::after,
   .aura::before,
   .lattice,
   .latticeEdge,
-  .stage::before {
+  .haloBand,
+  .haloSpin,
+  .wave,
+  .pulseRing,
+  .scanSweep,
+  .scanRing,
+  .corona {
     animation: none;
+  }
+
+  /*
+   * Specificity, not just names. `.haloBand[data-band="1"]` and
+   * `.haloSpin[data-equatorial="true"]` both outrank a bare class selector, so
+   * naming the class alone left the band rotations and the equatorial lean
+   * running under reduced motion. Matched here at the same weight.
+   */
+  .haloSpin[data-equatorial="true"],
+  .haloBand[data-band="1"],
+  .haloBand[data-band="2"] {
+    animation: none;
+  }
+
+  /*
+   * A pulse or a scan ring frozen mid-flight is an unexplained circle sitting
+   * in the field, so both go entirely rather than being parked. The aperture
+   * stays: it is structure, not movement, and it is most of what makes ORION
+   * look like ORION when nothing is moving.
+   */
+  .pulseRing,
+  .scanRing {
+    opacity: 0;
+  }
+
+  /* The aperture still opens and closes with the state, because that is
+     information; it simply stops turning. */
+  .halo {
+    transition: transform 400ms ease;
   }
 
   /* Resize instantly rather than gliding. */

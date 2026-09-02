@@ -49,7 +49,7 @@ from tests.orchestrator.conftest import (
     make_bars,
     make_portfolio,
 )
-from tests.orchestrator.test_macro import FakeCalendarProvider, FakeMacroAnalyst
+from tests.orchestrator.test_macro import FakeCalendarProvider, FakeMacroAnalyst, make_calendar
 
 from .conftest import (
     DEEPGRAM_LISTEN_URL,
@@ -268,7 +268,15 @@ class TestAbsenceIsReportedNeverFilledIn:
         already held to.
         """
         service = build_analysis_service(
-            calendar_provider=FakeCalendarProvider(),
+            # RETRIEVED NOW, NOT AT A FIXED DATE. The HTTP path runs
+            # `run_analysis` with the real `datetime.now(UTC)`, and Mission 7's
+            # quality gate blocks a snapshot retrieved more than 24 hours before
+            # `now`. `make_calendar`'s default `retrieved_at` is the orchestrator
+            # suite's fixed `NOW`, which is correct there -- those tests supply
+            # the matching `now` -- but here it silently turned into
+            # `macro_unavailable` once the wall clock moved past it, which is
+            # exactly what happened.
+            calendar_provider=FakeCalendarProvider(make_calendar(retrieved_at=datetime.now(UTC))),
             macro_analyst=FakeMacroAnalyst(),
         )
 
@@ -603,6 +611,10 @@ class TestNothingInternalCrossesTheBoundary:
             "momentum",
             "news",
             "macro",
+            # Mission 8 v2.1 surfaces the two specialist panels. The set is
+            # widened, never opened: a third field appearing here still fails.
+            "technical",
+            "thesis",
             "risk",
             "confidence",
             "risk_level",
@@ -621,6 +633,59 @@ class TestNothingInternalCrossesTheBoundary:
             "rationale",
             "reason_codes",
         }
+        assert set(analysis["technical"]) == {
+            "status",
+            "detail",
+            "bias",
+            "timeframe_agreement",
+            "analyst_version",
+            "knowledge_version",
+            "timeframes",
+        }
+        assert set(analysis["thesis"]) == {
+            "status",
+            "detail",
+            "alignment",
+            "summary",
+            "thesis_version",
+            "technical_bias",
+            "technical_condition",
+            "macro_condition",
+            "agreements",
+            "conflicts",
+        }
+        # The nested shapes are pinned too, because that is where a fingerprint,
+        # a provider name or a supporting-value dump would most plausibly
+        # appear without anyone noticing.
+        for timeframe in analysis["technical"]["timeframes"]:
+            assert set(timeframe) == {
+                "timeframe",
+                "as_of",
+                "bar_count",
+                "bias",
+                "volatility",
+                "findings",
+                "unevaluated",
+            }
+            for finding in timeframe["findings"]:
+                assert set(finding) == {
+                    "concept",
+                    "timeframe",
+                    "bias",
+                    "observation",
+                    "interpretation",
+                    "deterministic",
+                }
+            for item in timeframe["unevaluated"]:
+                assert set(item) == {"concept", "reason"}
+        for point in analysis["thesis"]["agreements"] + analysis["thesis"]["conflicts"]:
+            assert set(point) == {
+                "topic",
+                "agreed",
+                "technical_reading",
+                "macro_reading",
+                "detail",
+            }
 
     def test_a_hostile_transcript_is_echoed_as_data_and_analyses_nothing(self) -> None:
         # Deliberately does NOT take the `deepgram` fixture: this test needs

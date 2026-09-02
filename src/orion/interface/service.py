@@ -89,6 +89,12 @@ from orion.interface.schemas import (
     MomentumSummary,
     RiskSummary,
     StructureSummary,
+    TechnicalFindingSummary,
+    TechnicalSummary,
+    TechnicalTimeframeSummary,
+    ThesisPointSummary,
+    ThesisSummary,
+    UnevaluatedConceptSummary,
     VoiceTurnResponse,
 )
 from orion.orchestrator.analysis import AnalysisService
@@ -458,6 +464,107 @@ def _to_macro_summary(report: AnalysisReport) -> MacroSummary:
     )
 
 
+def _to_technical_summary(report: AnalysisReport) -> TechnicalSummary:
+    """Reduce the technical panel to the client-visible allowlist.
+
+    NAMED FIELD BY FIELD, LIKE EVERYTHING ELSE HERE, AND FOR THE SAME REASON:
+    a field added to `TechnicalTimeframeReport` or `TechnicalFinding` reaches a
+    browser only if someone writes a line here to put it there. Two things are
+    deliberately dropped — the 64-character evidence fingerprint and the
+    market-data provider's name — matching `_to_analysis_summary`'s existing
+    refusal to ship the evidence fingerprint and `_to_macro_summary`'s refusal
+    to ship the model identifier. Both remain on `AnalysisReport`, and
+    `orion.cli`'s terminal rendering prints them.
+
+    THE SUPPORTING VALUES ARE DROPPED TOO, AND THAT IS NOT A LOSS OF PROVENANCE.
+    Every number a finding rests on is already inside its `observation`, which
+    is the formatted rendering of exactly those values. Shipping both would put
+    the same measurement on the wire twice, in two shapes that could drift.
+
+    `orion.interface` may not import `orion.analysts` (its own import-hygiene
+    test), so every enum here is read through the report as `.value` and never
+    by naming the analyst's types.
+    """
+    output = report.technical.output
+    return TechnicalSummary(
+        status=output.availability.value,
+        detail=report.technical.detail,
+        bias=output.bias.value,
+        timeframe_agreement=output.timeframe_agreement,
+        analyst_version=output.analyst_version,
+        knowledge_version=output.knowledge_version,
+        timeframes=tuple(
+            TechnicalTimeframeSummary(
+                timeframe=timeframe.timeframe.value,
+                as_of=timeframe.as_of,
+                bar_count=timeframe.bar_count,
+                bias=timeframe.bias.value,
+                volatility=timeframe.volatility.value,
+                findings=tuple(
+                    TechnicalFindingSummary(
+                        concept=finding.concept.value,
+                        timeframe=finding.timeframe.value,
+                        bias=finding.bias.value,
+                        observation=finding.observation,
+                        interpretation=finding.interpretation,
+                        deterministic=finding.deterministic,
+                    )
+                    for finding in timeframe.findings
+                ),
+                unevaluated=tuple(
+                    UnevaluatedConceptSummary(concept=item.concept.value, reason=item.reason.value)
+                    for item in timeframe.unevaluated
+                ),
+            )
+            for timeframe in output.timeframes
+        ),
+    )
+
+
+def _to_thesis_summary(report: AnalysisReport) -> ThesisSummary:
+    """Reduce the thesis panel to the client-visible allowlist.
+
+    The macro half's provenance — model, prompt version, input fingerprint,
+    source provider, query window — is on `MarketThesis.macro_provenance` and
+    stops here, exactly as the same values already stop in
+    `_to_macro_summary`. What a thesis is *for* crosses: which way the
+    specialists lean, whether they corroborate or conflict, and both readings
+    behind each point.
+
+    NOTHING HERE CAN AUTHORISE ANYTHING. `ThesisSummary` has no action, size,
+    level or approval field; the Risk Guardian's answer reaches a client
+    through `RiskSummary` alone.
+    """
+    thesis = report.thesis.thesis
+    if thesis is None:
+        return ThesisSummary(status="unavailable", detail=report.thesis.detail)
+    return ThesisSummary(
+        status="available",
+        detail=report.thesis.detail,
+        alignment=thesis.alignment.value,
+        summary=thesis.summary,
+        thesis_version=thesis.thesis_version,
+        technical_bias=thesis.technical_bias.value,
+        technical_condition=thesis.technical_condition.value,
+        macro_condition=(
+            thesis.macro_condition.value if thesis.macro_condition is not None else None
+        ),
+        agreements=tuple(_to_thesis_point(point) for point in thesis.agreements),
+        conflicts=tuple(_to_thesis_point(point) for point in thesis.conflicts),
+    )
+
+
+def _to_thesis_point(point: object) -> ThesisPointSummary:
+    """One agreement or conflict, with both specialists' own readings kept."""
+    return ThesisPointSummary(
+        topic=point.topic.value,  # type: ignore[attr-defined]
+        agreed=point.agreed,  # type: ignore[attr-defined]
+        technical_reading=point.technical_reading,  # type: ignore[attr-defined]
+        macro_reading=point.macro_reading,  # type: ignore[attr-defined]
+        detail=point.detail,  # type: ignore[attr-defined]
+    )
+
+
 def _to_analysis_summary(report: AnalysisReport) -> AnalysisSummary:
     """Reduce a full `AnalysisReport` to the client-visible allowlist.
 
@@ -516,6 +623,8 @@ def _to_analysis_summary(report: AnalysisReport) -> AnalysisSummary:
         ),
         news=CapabilitySummary(detail=report.news.detail),
         macro=_to_macro_summary(report),
+        technical=_to_technical_summary(report),
+        thesis=_to_thesis_summary(report),
         risk=RiskSummary(
             availability=report.risk.availability.value,
             outcome=verdict.outcome.value if verdict is not None else None,

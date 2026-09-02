@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { Profiler, type ProfilerOnRenderCallback } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OrionInterface } from "@/components/OrionInterface";
@@ -244,6 +245,79 @@ describe("the core reacts to sound that is actually happening", () => {
     });
     await waitFor(() => expect(stateOf()).toBe("idle"));
     // Back to the idle constant, not frozen at the last measured level.
+    expect(envelopeOf()).toBe(0);
+  });
+
+  it("moves the waveform without rendering React even once", async () => {
+    /*
+     * The performance contract, as an assertion rather than as a comment.
+     *
+     * The analyser reports up to sixty times a second. If that value ever
+     * goes back through a `setState`, this counts sixty commits of the whole
+     * interface -- the hook, the composition, the core and the analysis deck
+     * -- for sixty updates of one custom property. `Profiler` counts commits
+     * to this subtree, and the only acceptable number here is zero.
+     */
+    let commits = 0;
+    const count: ProfilerOnRenderCallback = () => {
+      commits += 1;
+    };
+
+    render(
+      <Profiler id="orion" onRender={count}>
+        <OrionInterface />
+      </Profiler>,
+    );
+    await clickMic();
+
+    // The mic click itself is a real state change and must have committed,
+    // or this test would pass by measuring nothing.
+    expect(commits).toBeGreaterThan(0);
+    const settled = commits;
+
+    media.level = levelAt(-18);
+    await runFrames(60);
+
+    // The waveform genuinely moved...
+    expect(envelopeOf()).toBeGreaterThan(0.5);
+    // ...and React did not run once to make it happen.
+    expect(commits).toBe(settled);
+
+    await clickMic();
+    await act(async () => {
+      audio.endPlayback();
+    });
+  });
+
+  it("cancels the frame loop when the turn ends, leaving no stale callback", async () => {
+    render(<OrionInterface />);
+    await clickMic();
+
+    media.level = levelAt(-18);
+    await runFrames(5);
+    // The microphone's graph is running, so a frame is outstanding.
+    expect(media.pendingFrames()).toBeGreaterThan(0);
+
+    await clickMic();
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+    await act(async () => {
+      audio.startPlayback();
+    });
+    await waitFor(() => expect(stateOf()).toBe("speaking"));
+    await runFrames(5);
+
+    await act(async () => {
+      audio.endPlayback();
+    });
+    await waitFor(() => expect(stateOf()).toBe("idle"));
+
+    // Both graphs are gone, and neither left a frame behind to fire into a
+    // turn that is over.
+    expect(media.pendingFrames()).toBe(0);
+    expect(media.contexts.every((context) => context.closed)).toBe(true);
+    // Ticking anyway reaches nothing: the core sits at the idle constant
+    // rather than at the last level ORION's voice happened to reach.
+    await runFrames(5);
     expect(envelopeOf()).toBe(0);
   });
 

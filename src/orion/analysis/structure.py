@@ -12,6 +12,7 @@ from enum import StrEnum
 from pydantic import BaseModel
 
 from orion.analysis.indicators import IndicatorSnapshot
+from orion.analysis.price_action import SwingKind, find_swings
 from orion.data.models import OHLCVBar
 
 
@@ -81,22 +82,21 @@ def find_swing_points(
     bars: list[OHLCVBar], *, lookback: int = 2
 ) -> tuple[list[float], list[float]]:
     """Simple fractal swing detection: a bar is a swing high/low if it is the
-    max/min of the `2 * lookback + 1` bars centered on it."""
-    highs = [b.high for b in bars]
-    lows = [b.low for b in bars]
-    swing_highs: list[float] = []
-    swing_lows: list[float] = []
+    max/min of the `2 * lookback + 1` bars centered on it.
 
-    n = len(bars)
-    for i in range(lookback, n - lookback):
-        window_highs = highs[i - lookback : i + lookback + 1]
-        if highs[i] == max(window_highs):
-            swing_highs.append(highs[i])
-        window_lows = lows[i - lookback : i + lookback + 1]
-        if lows[i] == min(window_lows):
-            swing_lows.append(lows[i])
-
-    return swing_highs, swing_lows
+    The prices only, in index order — the shape this module and `Evidence`
+    have always used. The detection itself now lives in
+    `orion.analysis.price_action.find_swings`, which returns the same swings
+    with their index, timestamp and confirmation bar attached; structure
+    breaks, sweeps and Fibonacci anchors need those and this does not. One
+    fractal rule, two views of it, rather than a second implementation that
+    could drift from the first.
+    """
+    swings = find_swings(bars, lookback=lookback)
+    return (
+        [swing.price for swing in swings if swing.kind is SwingKind.HIGH],
+        [swing.price for swing in swings if swing.kind is SwingKind.LOW],
+    )
 
 
 def nearest_levels(

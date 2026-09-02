@@ -448,4 +448,55 @@ describe("responsive structure", () => {
       );
     }
   });
+
+  /**
+   * The one interaction that cost the whole frame.
+   *
+   * A `vector-effect: non-scaling-stroke` is derived against the element's
+   * current accumulated transform, so an animated ancestor *inside* the same
+   * SVG re-derives every outline and re-rasterises the band on every frame.
+   * Measured in Chrome at 1920x1080: 20.8ms per frame with the waves animated
+   * inside the SVG against 6.9ms with the identical waves animated from
+   * outside it, and nothing else on screen -- halo, lattice, network, masks,
+   * blend modes, particles -- worth a millisecond next to it.
+   *
+   * The stroke has to stay: the viewBox is stretched non-uniformly to the
+   * width of the screen, so a user-unit stroke is sub-pixel on a phone and
+   * heavy on a desktop. So the motion is what moved out, and these are the
+   * declarations that keep it out. `tests/orion-field.test.tsx` holds the
+   * other half of the same rule in the rendered DOM.
+   */
+  it("moves the waves with a box and never with the stroke", () => {
+    const field = stylesheets.find(({ path }) => path.endsWith("OrionField.module.css"));
+    expect(field, "the chamber stylesheet is missing").toBeDefined();
+    const css = field?.text ?? "";
+
+    const block = (selector: string): string =>
+      css.match(new RegExp(`\\${selector}\\s*\\{[^}]*\\}`))?.[0] ?? "";
+
+    // The stroke that makes the wave work at every viewport is still here.
+    expect(css, "the ribbons must keep a non-scaling stroke").toMatch(
+      /vector-effect:\s*non-scaling-stroke/,
+    );
+
+    // The lane is a box: twice the band's width, sliding through it.
+    const drift = block(".ribbonDrift");
+    expect(drift, ".ribbonDrift must be the lane box").toMatch(/position:\s*absolute/);
+    expect(drift, ".ribbonDrift must be two periods wide").toMatch(/width:\s*200%/);
+
+    // Both bands clip the lane the SVG viewport used to clip for free.
+    for (const selector of [".ribbons", ".ribbonsFront"]) {
+      expect(block(selector), `${selector} must clip its lanes`).toMatch(/overflow:\s*hidden/);
+    }
+
+    // The travel is expressed against the lane, not in the SVG's user units.
+    // `-1000px` here would mean the animation had moved back inside the SVG.
+    const flow = css.match(/@keyframes\s+ribbonFlow\s*\{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(flow, "ribbonFlow must travel -50% of the lane").toMatch(/-50%/);
+    expect(flow, "ribbonFlow must not travel in user units").not.toMatch(/px/);
+
+    // An SVG group's origin is its user-space origin, so the sway has to be
+    // told where to scale from or it moves the wave differently than it did.
+    expect(block(".ribbonSway"), ".ribbonSway must pin its origin").toMatch(/transform-origin/);
+  });
 });

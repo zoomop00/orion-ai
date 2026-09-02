@@ -72,6 +72,7 @@ from orion.memory.schema import (
     closed_position_table,
     evidence_table,
     fill_table,
+    market_thesis_table,
     proposed_decision_table,
     reasoning_output_table,
     risk_verdict_table,
@@ -80,6 +81,7 @@ from orion.paper.schemas import ClosedPosition, Fill
 from orion.provenance import canonical_hash
 from orion.reasoning.schemas import ReasoningOutput
 from orion.risk.schemas import RiskVerdict, risk_verdict_fingerprint
+from orion.thesis.schemas import MarketThesis, market_thesis_fingerprint
 
 
 def _deserialize[ModelT: BaseModel](
@@ -190,6 +192,18 @@ class SqliteDecisionJournal(DecisionJournal):
             recorded_at=recorded_at.isoformat(),
         )
 
+    def record_thesis(self, thesis: MarketThesis, *, recorded_at: datetime) -> str:
+        fingerprint = market_thesis_fingerprint(thesis)
+        return self._write(
+            market_thesis_table,
+            fingerprint,
+            thesis.model_dump_json(),
+            analysis_id=thesis.analysis_id,
+            symbol=thesis.symbol,
+            formed_at=thesis.formed_at.isoformat(),
+            recorded_at=recorded_at.isoformat(),
+        )
+
     def record_fill(self, fill: Fill, *, recorded_at: datetime) -> str:
         fingerprint = canonical_hash(fill)
         return self._write(
@@ -275,6 +289,20 @@ class SqliteDecisionJournal(DecisionJournal):
                 "to that fingerprint; the stored payload may be corrupted"
             )
         return verdict
+
+    def get_thesis(self, fingerprint: str) -> MarketThesis | None:
+        payload = self._read(market_thesis_table, fingerprint)
+        if payload is None:
+            return None
+        thesis = _deserialize(
+            MarketThesis, payload, fingerprint=fingerprint, table_name=market_thesis_table.name
+        )
+        if market_thesis_fingerprint(thesis) != fingerprint:
+            raise DecisionJournalIntegrityError(
+                f"stored MarketThesis under fingerprint {fingerprint!r} no longer hashes "
+                "to that fingerprint; the stored payload may be corrupted"
+            )
+        return thesis
 
     def get_fill(self, fingerprint: str) -> Fill | None:
         payload = self._read(fill_table, fingerprint)
@@ -384,6 +412,19 @@ class SqliteDecisionJournal(DecisionJournal):
             rows,
             fingerprint_fn=risk_verdict_fingerprint,
             table_name=risk_verdict_table.name,
+        )
+
+    def list_theses_by_analysis_id(self, analysis_id: str) -> tuple[MarketThesis, ...]:
+        rows = self._execute_query(
+            select(market_thesis_table.c.payload, market_thesis_table.c.fingerprint)
+            .where(market_thesis_table.c.analysis_id == analysis_id)
+            .order_by(market_thesis_table.c.recorded_at.asc())
+        )
+        return self._rows_to_models(
+            MarketThesis,
+            rows,
+            fingerprint_fn=market_thesis_fingerprint,
+            table_name=market_thesis_table.name,
         )
 
     def list_fills_by_verdict_fingerprint(self, risk_verdict_fingerprint: str) -> tuple[Fill, ...]:

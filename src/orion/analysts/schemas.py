@@ -32,6 +32,14 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# Re-exported, not redefined. Both are fields of `MarketThesis`, so their
+# definitions live in `orion.thesis.schemas` where the packages that store and
+# read a thesis can name them. `MacroAnalystVerdict` below references the same
+# enum objects it always did, so the JSON schema sent to Claude as
+# `output_format` is byte-identical -- only the definition site moved.
+from orion.thesis.schemas import MacroPolicyPressure as MacroPolicyPressure
+from orion.thesis.schemas import MarketRelevance as MarketRelevance
+
 
 class SurpriseDirection(StrEnum):
     """How one event's actual value compared to its estimate — a factual
@@ -41,36 +49,6 @@ class SurpriseDirection(StrEnum):
     BELOW_ESTIMATE = "below_estimate"
     IN_LINE = "in_line"
     NOT_APPLICABLE = "not_applicable"
-
-
-class MarketRelevance(StrEnum):
-    """How much the supplied batch, taken together, matters — independent
-    of which direction any surprise leans."""
-
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
-    NONE = "none"
-
-
-class MacroPolicyPressure(StrEnum):
-    """What the aggregate of releases implies about monetary-policy-relevant
-    conditions — a characterization of the DATA's implied pressure on
-    policy, never a trade direction or recommendation.
-
-    `TIGHTENING_PRESSURE` means the data collectively reads firmer/hotter
-    than expected (conditions that would tend to support tighter monetary
-    policy). `EASING_PRESSURE` means the reverse. Deliberately not phrased
-    as "bullish"/"bearish", "hawkish"/"dovish", or any asset-direction or
-    trading-signal vocabulary — this describes the data, not an instruction
-    about what to do with it.
-    """
-
-    TIGHTENING_PRESSURE = "tightening_pressure"
-    EASING_PRESSURE = "easing_pressure"
-    MIXED = "mixed"
-    IN_LINE = "in_line"
-    INSUFFICIENT_DATA = "insufficient_data"
 
 
 class MacroEventAssessment(BaseModel):

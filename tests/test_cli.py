@@ -351,23 +351,24 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     assert "analyze" in capsys.readouterr().out
 
 
-def test_the_verb_surface_is_exactly_analyze_and_account() -> None:
+def test_the_verb_surface_is_exactly_analyze_account_paper_and_reflect() -> None:
     """No verb may look like it can reach a broker. Read off the parser itself
     rather than out of the help text.
 
     Mission 12.4 asserted `{"analyze"}` here on the grounds that nothing in this
-    codebase can place an order. Phase 2a added `account` and Phase 2b adds
-    `paper`; both are *simulated* and reach no venue, so the guarantee this test
-    protects is unchanged and the assertion is narrowed rather than dropped.
-    `open` and `show` are the account verb's own actions; both are listed, so a
-    third one cannot appear here unnoticed.
+    codebase can place an order. Phase 2a added `account`, 2b added `paper` and
+    2c adds `reflect`; the first three are *simulated* and reach no venue, and
+    `reflect` only reads history back. The guarantee this test protects is
+    unchanged and the assertion is narrowed rather than dropped. `open` and
+    `show` are the account verb's own actions; both are listed, so a third one
+    cannot appear here unnoticed.
     """
     choices = {
         name
         for action in build_parser()._actions
         for name in getattr(action, "choices", None) or ()
     }
-    assert choices == {"analyze", "account", "paper"}
+    assert choices == {"analyze", "account", "paper", "reflect"}
 
 
 def test_no_verb_or_flag_offers_live_execution() -> None:
@@ -379,6 +380,8 @@ def test_no_verb_or_flag_offers_live_execution() -> None:
         ["order", "XAUUSD"],
         ["analyze", "XAUUSD", "--live"],
         ["account", "open", "--balance", "1", "--live"],
+        ["paper", "XAUUSD", "--live"],
+        ["reflect", "XAUUSD", "--live"],
     ):
         with pytest.raises(SystemExit):
             parser.parse_args(argv)
@@ -538,8 +541,16 @@ def test_the_cli_imports_only_what_an_entrypoint_needs() -> None:
         # because `orion.paper` may not import `orion.orchestrator`.
         "orion.memory.sqlite_journal",
         "orion.paper.policy",
+        "orion.paper.schemas",
         "orion.paper.session",
         "orion.risk.policy",
+        # Phase 2c: the journal's abstract interface, which `reflect` opens and
+        # hands to the pure, read-only reflection layer. The ABC, never a
+        # concrete journal type -- `orion.memory.sqlite_journal` above is the
+        # one place a concrete one is constructed, and it is this file.
+        "orion.memory.journal",
+        "orion.reflection.analysis",
+        "orion.reflection.schemas",
         "__future__",
     }
     assert _imported_modules(_cli_source()) <= allowed
@@ -553,7 +564,13 @@ def test_the_cli_imports_no_engine_package_wholesale() -> None:
     `AnalysisService`, never by reaching into an engine itself.
     """
     imported = _imported_modules(_cli_source())
-    for package in ("orion.memory", "orion.paper", "orion.risk", "orion.interface"):
+    for package in (
+        "orion.memory",
+        "orion.paper",
+        "orion.risk",
+        "orion.interface",
+        "orion.reflection",
+    ):
         assert package not in imported
 
 
@@ -620,9 +637,38 @@ def test_the_only_filesystem_question_the_cli_asks_is_whether_the_account_exists
     assert uses == ["is_file"]
 
 
-@pytest.mark.parametrize("forbidden", ["subprocess", "exec", "eval", "compile", "os.environ"])
-def test_the_cli_has_no_dangerous_call(forbidden: str) -> None:
+@pytest.mark.parametrize("forbidden", ["subprocess", "os.environ"])
+def test_the_cli_imports_no_process_or_environment_module(forbidden: str) -> None:
+    """Narrowed from Mission 12.4's `["subprocess", "exec", "eval", "compile",
+    "os.environ"]`. The three call names moved to the AST check below for the
+    same reason Phase 2a moved `open`/`Path` there: a substring scan matches
+    *identifiers*, and `unevaluated` -- the list of technical concepts ORION
+    could not evaluate -- contains "eval". A test that fails on a field name is
+    not testing what it claims to.
+
+    `subprocess` and `os.environ` stay as substring bans: neither is a
+    plausible fragment of an ordinary identifier, and both are import-shaped
+    rather than call-shaped."""
     assert forbidden not in _code_without_comments_or_strings(_cli_source())
+
+
+def test_the_cli_evaluates_no_code_at_runtime() -> None:
+    """The real content of the old `exec`/`eval`/`compile` bans, asserted
+    precisely: no *call* to any of them anywhere in the file, and no import of
+    a module that would provide one. Stricter than the substring scan it
+    replaces, which could be satisfied by spelling the call differently."""
+    tree = ast.parse(_cli_source().read_text(encoding="utf-8"))
+    banned = {"exec", "eval", "compile", "__import__", "globals", "locals", "getattr", "setattr"}
+    called: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                called.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                called.add(func.attr)
+    assert not (called & banned), f"the CLI must evaluate no code: {called & banned}"
+    assert not ({"subprocess", "ctypes", "importlib", "marshal"} & _imported_modules(_cli_source()))
 
 
 def test_the_cli_reads_the_environment_only_through_settings() -> None:
@@ -632,3 +678,92 @@ def test_the_cli_reads_the_environment_only_through_settings() -> None:
     assert "getenv" not in code
     assert "environ" not in code
     assert "get_settings" in code
+
+
+# --------------------------------------------- the specialists on a terminal
+
+
+class TestTheSpecialistsAreRendered:
+    """Mission 8 v2.1: what the analyst found reaches the operator too.
+
+    THE TERMINAL GETS MORE THAN THE BROWSER, DELIBERATELY. `orion.interface`
+    drops the evidence fingerprint and the market-data provider from the wire
+    on an allowlist that predates this milestone. A local operator reading
+    their own machine is exactly the party who needs both -- the fingerprint is
+    the only thing that proves a finding describes the same bars the proposal
+    was reasoned from.
+    """
+
+    def _report(self) -> AnalysisReport:
+        service = build_service()
+        return service.run(
+            Intent.model_validate({"kind": "analyze", "symbol": "XAUUSD", "timeframe": "1h"}),
+            now=datetime.now(UTC),
+        )
+
+    def test_every_real_finding_is_printed_with_its_own_observation(self) -> None:
+        report = self._report()
+
+        rendered = render_report(report)
+
+        findings = report.technical.output.findings
+        assert findings, "the fixture series should produce findings"
+        for finding in findings:
+            assert finding.concept.value in rendered
+            assert finding.observation in rendered
+
+    def test_the_unevaluated_concepts_are_named_with_their_reason(self) -> None:
+        """A rendering that printed only findings would read as a claim of
+        completeness."""
+        report = self._report()
+
+        rendered = render_report(report)
+
+        for timeframe in report.technical.output.timeframes:
+            assert timeframe.unevaluated, "the fixture series leaves concepts unevaluated"
+            for item in timeframe.unevaluated:
+                assert item.concept.value in rendered
+                assert item.reason.value in rendered
+
+    def test_the_provenance_the_wire_drops_is_printed_here(self) -> None:
+        report = self._report()
+
+        rendered = render_report(report)
+
+        timeframe = report.technical.output.timeframes[0]
+        assert timeframe.evidence_fingerprint in rendered
+        assert timeframe.source_provider in rendered
+        assert str(timeframe.bar_count) in rendered
+        # And it is genuinely the evidence the proposal was reasoned from.
+        assert timeframe.evidence_fingerprint == report.decision.evidence_ref.content_hash
+
+    def test_the_thesis_and_its_canonical_summary_are_printed(self) -> None:
+        report = self._report()
+
+        rendered = render_report(report)
+
+        thesis = report.thesis.thesis
+        assert thesis is not None
+        assert thesis.alignment.value in rendered
+        assert thesis.summary in rendered
+        assert thesis.technical_condition.value in rendered
+
+    def test_the_rendering_stays_deterministic_with_the_specialists_in_it(self) -> None:
+        report = self._report()
+
+        assert render_report(report) == render_report(report)
+
+    def test_nothing_printed_is_a_recommendation(self) -> None:
+        """The terminal shows observations and one committed sentence per
+        alignment. It never prints an instruction, and the Risk Guardian's row
+        remains the only authority on the page."""
+        rendered = render_report(self._report()).lower()
+
+        for word in ("recommend", "you should", "entry at", "buy now", "sell now"):
+            assert word not in rendered
+
+    def test_no_unsupported_concept_appears_as_though_detected(self) -> None:
+        rendered = render_report(self._report()).lower()
+
+        for name in ("vwap", "macd", "obv", "order block", "elliott"):
+            assert name not in rendered

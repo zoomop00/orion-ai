@@ -4334,3 +4334,566 @@ WAL sidecars checkpointed away, so no handle was left holding the file. From an
 isolated working directory: `orion paper XAUUSD` without an account exits 5 and
 creates nothing, an HTTP turn still writes zero bytes, a hostile symbol is
 refused by the closed table, and `--live` is rejected by the parser.
+
+## 2026-08-30 — Mission 4 Phase 2c: the chain that authorised the trade, and Reflection's first real trade
+
+**Mission 5 had never run on a trade this system made.** `reflect_on_closed_
+position` walks `ClosedPosition -> RiskVerdict -> ProposedDecision` and fails
+closed on a missing link. Phase 2b's `run_cycle` journaled a `Fill` and a
+`ClosedPosition` and nothing else — so every `ClosedPosition` ORION had ever
+produced referenced a verdict that was in no journal, and Reflection would have
+raised `ReflectionError` on all of them. It had only ever been exercised against
+hand-built chains in `tests/reflection/`, and it had no caller anywhere in
+`src/`. Both halves of that are what this phase fixes: the forward cycle writes
+the four records the chain needs, and `orion reflect` reads them back.
+
+**`JournalWriter` is no longer two methods, and the narrowness it lost was never
+a safety property.** 2b's Protocol declared `record_fill` and
+`record_closed_position` on the stated grounds that "this module produces
+`Fill`s and `ClosedPosition`s and nothing else". That was a true statement about
+what that phase produced, not a boundary protecting anything, and it stopped
+being true the moment a fill needed its authorisation on record. It is now the
+full *write* surface of `orion.memory.journal.DecisionJournal` — six methods,
+still restated rather than imported, because `orion.memory` already depends on
+`orion.paper` and importing back would be a cycle. The property that does
+matter is kept and is now asserted directly: not one read, update or delete. A
+forward cycle appends what it did; reading history back is `orion.reflection`'s
+job and there is no method here through which the session could do it.
+
+**Leaf-first, and the fill last — the order is the contract.** Evidence,
+reasoning, decision, verdict, then fill. Each record is written only after
+everything it references is already stored, so an interrupted write leaves a
+*shorter* chain rather than a broken one: there is no point at which a journaled
+record points at a fingerprint the journal does not hold. Asserted as a recorded
+call sequence — `["load", "load", "save", "record_evidence", "record_reasoning",
+"record_decision", "record_verdict", "record_fill"]` — not inferred from reading
+the code. Finding A's ordering is untouched and still outermost: the account is
+saved before any of it.
+
+**A partially-written chain is never reported as written.** The chain goes in
+inside the same `try` as the fill, so a journal that fails anywhere reports
+`JOURNAL_UNAVAILABLE` once for the whole write. `CycleResult.audit_chain_
+fingerprints` stays empty in that case even when two of the four records
+landed — those are durable and cannot be undone, and re-writing them would be a
+second write that could itself fail, but claiming the audit record exists when
+it does not is the one thing that must not happen. Replay is safe for exactly
+the reason 2b established: every record is content-addressed, so re-running the
+cycle re-writes all six and the ones already stored are no-ops returning the
+same fingerprints. A test proves that by pre-writing the chain and then running
+the cycle.
+
+**`ReasoningOutput` is journaled but never read.** `run_cycle` takes it as a
+parameter and hands it to the journal; nothing branches on it, so a caller
+cannot change what a cycle *does* by passing a different one. Reflection does
+not need it — `ProposedDecision.reasoning_ref` already carries the action,
+direction, confidence, risk level and levels — but `ReasoningRef` deliberately
+excludes `rationale`, so without recording the `ReasoningOutput` itself the only
+durable trace of what ORION actually said would be a hash of prose nobody kept.
+Recording a reference without ever recording its referent leaves a chain whose
+links point at nothing.
+
+**A veto still journals absolutely nothing, and that is a decision rather than
+an omission.** The chain is written on the executed path only. Journaling every
+refused proposal is defensible and may well be a later phase, but a cron entry
+running `orion paper` hourly would then write a chain per invocation, almost all
+of them identical WAITs, with no consumer — and Mission 4 Phase 2a already
+recorded that this database grows without bound and is never pruned. 2b's tests
+asserting that a veto performs zero saves and zero journal calls are left
+standing rather than narrowed, and a new test asserts the four chain writes are
+absent too, so the decision cannot drift silently.
+
+**A closing cycle writes no second chain.** The records that authorised a
+position were journaled when it was opened. The closing cycle runs its own
+analysis and produces its own decision and verdict, and neither of them closed
+anything — `resolve_stop_take_profit` did, from the price — so journaling them
+against the close would attribute it to a proposal that had no part in it.
+
+**`orion reflect SYMBOL [--limit N]` is the read side, and it is read-only in the
+precise sense.** It runs no analysis, contacts no vendor and needs no credential
+(proven by a test that deletes both API keys from the environment and still
+gets an answer). It records nothing and changes no account: a test runs `account
+show` before and after and compares the output byte for byte, and another counts
+journal rows before and after. It cannot bring a database into existence — like
+`account show` it checks the file exists first, and a missing one exits 5 with
+zero files created. The one honest caveat, stated in the module docstring rather
+than glossed: `create_memory_engine` runs `metadata.create_all`, so opening an
+*existing* database adds any table its schema is missing. That is a schema
+repair on a file the user already has, it is the same seam every other verb here
+opens through, and it is not a record.
+
+**`ReflectionBatch` reports what it could not explain, by fingerprint.** A
+`ClosedPosition` whose verdict or decision is missing cannot be reflected on,
+and every position opened before this phase is permanently in that state.
+Raising on the first one would let a single legacy trade hide every later
+reflection; dropping them silently would make a journal with ten closed trades
+and two reflectable ones look like a journal with two trades. So they are listed
+by fingerprint — enough for a reader to fetch the record and see for themselves —
+alongside `total_closed_positions`, so a short answer is distinguishable from an
+exhausted one. A model validator asserts every examined trade lands in exactly
+one of the two tuples.
+
+**Corruption is not incompleteness.** `DecisionJournalIntegrityError` is never
+collected into `unreflectable_fingerprints`; it propagates, and the CLI reports
+`ORION could not read the trading journal` and exits 8. A journal whose contents
+do not verify must never be presented as a journal with a couple of unexplained
+trades in it. Tested by corrupting a stored payload directly through SQLAlchemy
+and asserting the exit code and the empty stdout.
+
+**The tail slice, and why the journal's `limit` was not used.**
+`list_closed_positions_by_symbol` applies `limit` to a `closed_at` *ascending*
+order, so passing it through would return the *oldest* trades under the name
+"most recent". Rather than change a contract other callers depend on,
+`reflect_on_recent_closed_positions` reads the symbol's closed positions and
+takes the last `limit` — which is also where the honest total comes from. A test
+seeds five trades, asks for two and asserts it got the last two. For a local
+paper journal this is a bounded read; if it ever stops being one the fix belongs
+in the journal's query surface, not in a narrower answer here.
+
+**Nothing scores anything, at either layer.** Mission 5's load-bearing
+constraint was that `TradeReflection` exposes facts and no quality verdict, so
+nothing downstream can turn one closed trade into a strategy change. A batch is
+where an aggregate would be most tempting and most damaging — a win rate or a
+total P&L over several trades reads as evidence for changing strategy — so
+`ReflectionBatch` carries counts and facts only, and `render_reflections` prints
+no score, grade, win rate, average or recommendation. Both are asserted against
+a blocklist rather than left to review. What is printed is the approval margin
+beside the matched exit level, which is exactly what distinguishes a bad outcome
+from a bad decision, with the reading left to the user.
+
+**`orion.reflection` gained the import-hygiene test it never had.** Its module
+docstring has claimed since Mission 5 that it is pure, takes a `DecisionJournal`
+and "never a `PortfolioStore` in any form". Every comparable package —
+`risk`, `paper`, `memory`, `research`, `backtest`, `analysts`, `orchestrator` —
+already had an AST test proving its equivalent claim; this one did not, which
+mattered little while nothing called it and matters now that something does. It
+bans network, database, filesystem, clock and randomness imports, bans reaching
+`orion.paper.store`/`session`/`execution`, `orion.memory.portfolio_store`/
+`sqlite_journal`/`engine`, `orion.risk.guardian`, `orion.decision.engine`, the
+AI providers, the orchestrator and the interface; asserts no `record_*` call
+exists anywhere in the package; and asserts the dependency stays one-way, with
+`orion.cli` as the single permitted consumer. The clock check walks the AST
+rather than scanning substrings, because these modules' own docstrings say
+"datetime.now()" while explaining why they never call it — the same correction
+Phase 2a applied to the CLI's `open`/`Path` scans.
+
+**No import-hygiene boundary was weakened.** The orchestrator, paper, interface,
+memory and backtest hygiene suites are byte-identical and pass unchanged.
+`orion.paper.session` still imports neither `orion.orchestrator` nor
+`orion.memory`. The CLI's own allowlist gained three exact modules —
+`orion.memory.journal` (the ABC), `orion.reflection.analysis`,
+`orion.reflection.schemas` — plus `orion.paper.schemas` for the `CloseReason`
+the renderer maps, named module by module in the established style, and
+`orion.reflection` was added to the list of packages the CLI may not import
+wholesale.
+
+**Two pre-existing test defects were found and fixed; neither was caused by this
+phase, and both were verified against `HEAD` before being touched.**
+`tests/interface/test_analysis_turn.py::test_a_macro_read_crosses_the_wire_
+without_its_provenance` was a time bomb: it builds a calendar snapshot with the
+orchestrator suite's fixed `NOW` (2026-08-28) but the HTTP path runs
+`run_analysis` with the real `datetime.now(UTC)`, and Mission 7's quality gate
+blocks a snapshot retrieved more than 24 hours before `now` — so the macro panel
+silently became `macro_unavailable` once the wall clock moved on, and the test
+failed for every run after 2026-08-29. Fixed by retrieving the fixture snapshot
+at the real `now`, which is what that path actually requires; the orchestrator
+suite, which supplies its own matching `now`, is untouched.
+`tests/test_cli_account.py::test_a_hostile_symbol_cannot_escape_the_closed_alias
+_table` compared raw file listings across a command, but `-wal`/`-shm` are
+created when a connection opens and removed when the last one closes, and the
+account verbs leave their engine to process exit (the limitation 2a recorded) —
+so the test was asserting garbage-collection timing and flaked on a different
+parameter each run. Fixed with a `databases_in` helper that folds the sidecars
+into their database, which asserts the property that actually matters: no new
+database appeared.
+
+**Deliberately not in this phase:** journaling refused proposals, persisting a
+`TradeReflection` (it remains a pure function of durable journal data, so
+storing it would be an optimisation and never a necessity — the Mission 5
+position, unchanged), any aggregate or quality score, an HTTP or frontend
+surface for reflection, an account `delete`/`reset` verb, telemetry, logging,
+scheduling, and anything resembling live or broker execution. `README.md` is
+unchanged and no frontend file was touched.
+
+**Files added:** `tests/test_cli_reflect.py` (32 tests),
+`tests/reflection/test_batch.py` (24 tests),
+`tests/reflection/test_import_hygiene.py` (6 tests),
+`tests/reflection/__init__.py` (a package, so its `test_import_hygiene`
+basename no longer collides with `tests/memory`'s under pytest's rootdir
+import mode). **Files modified:** `src/orion/paper/session.py`,
+`src/orion/reflection/{analysis,schemas}.py`, `src/orion/cli.py`,
+`tests/paper/test_session.py`, `tests/test_cli.py`,
+`tests/test_cli_account.py`, `tests/interface/test_analysis_turn.py`. No
+frontend file, no `orion.interface` file, no `orion.orchestrator` file and no
+dependency manifest was touched, and no dependency was added.
+
+**Verification:** `pytest` 1804 passed (1740 before), `ruff check .`, `ruff
+format --check .` (187 files) and `mypy src --strict` (82 files) all clean.
+Proven on disk rather than claimed: a real `run_cycle` against a real
+`SqlitePortfolioStore` and a real `SqliteDecisionJournal` wrote the four chain
+records and the fill, a later cycle closed the position at its take-profit, and
+the real `reflect_on_closed_position` walked the result back to a
+`TradeReflection` carrying `take_profit_hit`, `rr=2.51` against a `1.00`
+minimum, a `+1.51` approval margin, `2613.98` realised and the opening fill's
+own `7.98` fee. That is the first time Reflection has run on a trade ORION
+actually made.
+
+## 2026-08-30 — Mission 8 v2: the Technical Analyst, a knowledge registry, and the synthesis seam
+
+**The Technical Analyst is deterministic, and that is the central decision.**
+The obvious symmetry with Mission 8 v1 would have been a second Claude provider.
+It was rejected: the Macro Analyst calls a model because economic releases are
+prose someone has to read, whereas technical analysis over OHLCV is arithmetic —
+an EMA crossing, a close beyond a swing, a three-bar imbalance. Asking a model to
+*report* those replaces a reproducible measurement with a plausible one, and buys
+a token cost, a latency, a failure mode and a second prompt-injection surface on
+the analysis path in exchange for nothing. `analyze_technical` is a pure function:
+same bars in, byte-identical findings out, asserted by a test. It needs no
+credential, contacts nobody, and a test proves it by running with every API key
+deleted from the environment.
+
+**Knowledge is a registry, not a prompt.** `orion.analysts.knowledge` maps a
+closed `TechnicalConcept` enum to a `ConceptDefinition` carrying the concept's
+meaning, the exact deterministic rule ORION applies, the inputs that rule needs,
+what the concept explicitly does *not* claim, and one canonical sentence per
+`StructureBias`. A finding's `interpretation` is looked up from that table; its
+`observation` is a fixed template filled with real numbers. The split is
+enforced from both ends: a model validator on `TechnicalFinding` rejects any
+interpretation that is not the registry's own text for that concept and bias — so
+even a hand-assembled finding cannot carry invented commentary — and a test
+asserts no interpretation contains a digit while every observation does. Every
+`rule` string names the `orion.analysis` function that implements it, checked by
+a test, so a definition cannot drift into describing an intention.
+
+**Nothing was scraped and nothing is claimed that cannot be computed.** Every
+definition is written from scratch and covers concepts that are public, decades
+old and in universal use in charting software. `UNSUPPORTED_CONCEPTS` is the
+other half of that honesty and is tested as carefully as the supported list:
+VWAP, volume profile/OBV, MACD, order blocks, chart patterns, Elliott wave,
+intermarket correlation and order flow, each with a concrete reason rooted in
+this build rather than "not implemented yet". **VWAP and every volume-derived
+construction are refused outright**: `OHLCVBar.volume` is optional and routinely
+absent for spot metals, and `bars_to_dataframe` substitutes `0.0` when it is, so
+a VWAP would be arithmetic on a placeholder presented as a measurement. No
+function in `orion.analysis.price_action` reads `volume` at all, proven by a test
+that runs every detector with volume absent, zero and large and asserts identical
+results. **MACD was also refused, for a different reason**: adding it would change
+`IndicatorSnapshot`, which sits inside the content-fingerprinted `Evidence` that
+every journaled `ProposedDecision` and `RiskVerdict` references, so it belongs to
+a deliberate change of that record and not to this layer.
+
+**The new primitives live in `orion.analysis`, not in the analyst, and not on
+`Evidence`.** `price_action.py` adds indexed swings, fair value gaps, breaks of
+structure, changes of character, liquidity sweeps and Fibonacci anchors as pure
+functions over bars — beside `indicators.py` and `structure.py`, where every
+other deterministic primitive already lives. Deliberately *not* fields on
+`Evidence`: that object is fingerprinted and journaled, so adding to it would move
+the hash of every future decision and verdict for reasons unrelated to any of
+them. **No calculation was duplicated.** `structure.find_swing_points` now
+delegates to `price_action.find_swings` and keeps its exact "two lists of prices"
+contract; a test asserts the two views agree, and the existing structure suite
+passes unchanged.
+
+**Look-ahead bias is prevented by construction.** A fractal swing at bar `i` is
+not knowable until bar `i + lookback`, so `SwingPoint` carries
+`confirmed_at_index` and the break/sweep detectors compare a bar only against
+swings confirmed strictly before it. A dedicated test builds a series where a bar
+both confirms a swing and closes beyond it, and asserts no break is reported —
+Mission 6 lists look-ahead checks as required validation, and this is that check
+for this module.
+
+**Absence is reported, never filled in.** Every concept ends up in exactly one of
+two lists per timeframe: a `TechnicalFinding`, or an `UnevaluatedConcept` with a
+closed reason (`INSUFFICIENT_BARS`, `INDICATOR_UNAVAILABLE`, `NO_CONFIRMED_SWINGS`,
+`NO_VALID_ANCHOR`). `TechnicalTimeframeReport`'s own validator enforces that, so a
+concept cannot silently vanish. The distinction that matters is preserved:
+"ORION looked and found no gaps" is a NEUTRAL finding with a count of zero;
+"this window is too short to hold three bars" is unevaluated. Fibonacci reports
+nothing without two distinct, ordered, opposing confirmed swings, and reports no
+retracement *depth* when price has left the anchor range — a move already exceeded
+is not being retraced.
+
+**MULTI-TIMEFRAME IS A LIST, NOT A HIERARCHY.** `analyze_technical` takes one
+observation per timeframe, reports each separately and states whether the
+directional ones agree. It deliberately does *not* weight higher timeframes more
+heavily: that convention is real and widely held, but this build has run no study
+that would justify a specific weighting, and inventing one would repeat exactly
+the uncalibrated-threshold problem `classify_volatility`'s own docstring already
+warns about. A one-all disagreement is reported as `timeframe_agreement=False`
+with a NEUTRAL aggregate, never averaged into a direction.
+
+**THE SYNTHESIS SEAM COMPARES SIGNIFICANCE, NOT DIRECTION — and this is the
+subtlest decision in the milestone.** The tempting move is to fuse the technical
+bias with `MacroPolicyPressure` into one directional call. ORION does not, because
+`MacroPolicyPressure` is deliberately *not* asset-direction vocabulary (Mission 8
+v1 recorded that choice explicitly): turning "tightening pressure" into "bearish
+for gold" requires an asset-specific economic assumption this build has never
+established, tested or calibrated. So the axis is one both specialists genuinely
+measure — how *eventful* their own domain is. Technical is ACTIVE on a HIGH
+volatility regime or any detected break/sweep, QUIET on LOW volatility with no
+events, UNDETERMINED otherwise; macro reads ACTIVE/QUIET/UNDETERMINED off
+`MarketRelevance`. Those corroborate ("the calendar is heavy and price is already
+moving") or conflict ("a major release is landing and price has done nothing
+yet"), which is a real, checkable comparison and the only one ORION can make
+honestly today. A test asserts the technical bias is identical across all five
+`MacroPolicyPressure` values.
+
+**Neither side is discarded, and provenance survives.** A conflict carries both
+specialists' own readings, and `MarketThesis` keeps the technical bias, every
+timeframe's bias/volatility/finding counts/evidence fingerprint/provider/retrieval
+time/bar count, plus the macro pressure, relevance, confidence, model, prompt
+version, input fingerprint, source provider, window and the Macro Analyst's
+`rationale` verbatim. The macro half is all-or-nothing under a validator, so a
+partial read cannot be presented as a complete one, and `summary` must equal the
+canonical sentence for its alignment — invented prose is rejected by the model.
+
+**THE RISK GUARDIAN IS UNTOUCHED, AND IT IS STRUCTURAL RATHER THAN ASSERTED.**
+Neither `TechnicalAnalystOutput` nor `MarketThesis` has a field capable of
+expressing an action, direction-to-trade, quantity, entry, stop, target, risk
+parameter or approval — checked against a blocklist across every model in both
+modules, the same technique Mission 8 v1 applied to the Macro Analyst's schema.
+`orion.decision`, `orion.risk`, `orion.paper`, `orion.memory`, `orion.reflection`
+and `orion.backtest` still cannot import `orion.analysts` at all. Both panels are
+computed *after* the decision and the verdict already exist, and a test serialises
+the whole evidence/reasoning/decision/risk chain and compares it byte for byte
+across every technical and macro state. Paper execution is unchanged and still
+runs only behind an APPROVED verdict.
+
+**ONE IMPORT WALL MOVED, DELIBERATELY, AND IT GOT NARROWER FOR EVERY FILE THAT
+DID NOT NEED IT.** `tests/analysts/test_import_hygiene.py` banned `orion.analysis`
+from `orion.analysts` under the heading "downstream layers". That was a
+misclassification: `orion.analysis` is *upstream* of everything — pure computation
+over bars, importing only `orion.data` — and the Macro Analyst simply had no
+reason to read it. A specialist over deterministic market computation must read
+that computation; the alternative was reimplementing every indicator inside this
+package. The blanket ban became a per-file allowlist naming three read-only
+modules (`evidence`, `structure`, `price_action`) for `technical.py`,
+`technical_schemas.py` and `synthesis.py` — the same idiom the orchestrator's own
+hygiene test uses for `wiring.py`. The macro files still cannot reach
+`orion.analysis` at all, no file may import it wholesale, and three new tests were
+added: one asserting the decision/execution chain is banned from *every* file with
+no carve-out, one checking the allowlist is used in both directions (an unused
+permission must be deleted), and one banning a wholesale import. `orion.interface`
+and `orion.orchestrator` were added to the ban list. `orion.config` was
+deliberately *not* added — `claude_macro_provider.py` has read `Settings` since
+Mission 8 v1 and banning it here would be an unrelated tightening. **Every ban
+that protects the Risk Guardian's authority is untouched, and the direction stays
+acyclic and one-way**: the inbound rule still forbids `orion.analysis` from
+importing back.
+
+**Wired into the orchestrator, and stopping there.** Mission 7/8 v1 shipped the
+Macro Analyst with zero integration and the repository later recorded the cost:
+"two missions had been built and left unconnected". So `run_analysis` produces
+both panels on every analysis, and `AnalysisReport` gained `technical:
+TechnicalPanel` and `thesis: ThesisPanel`. `TechnicalPanel` has no NOT_CONNECTED
+state, because a deterministic specialist cannot be missing a credential. **No
+second market-data fetch**: `TimeframeObservation` pairs the snapshot the analysis
+already has with the `Evidence` already built from it, and its validator refuses a
+mismatched pair — so every finding carries the same fingerprint
+`decision.evidence_ref.content_hash` does, verified end to end by a test. The
+orchestrator's per-file allowlist gained four exact modules, all of them pure and
+none constructing a client. **`orion.interface` is byte-identical and no field
+crosses the HTTP boundary**, so the wire contract and the frontend are unchanged;
+surfacing any of this to a client is a separate decision.
+
+**Two pre-existing quirks encountered, neither changed.** The shared test series
+rises monotonically and therefore contains no fractal swing at all, which is why
+the analyst honestly reports five concepts as `NO_CONFIRMED_SWINGS` on it — the
+"do not pretend" behaviour working, not a defect. And `classify_volatility`'s
+thresholds remain the uncalibrated placeholders its own docstring describes; the
+knowledge registry's volatility entry inherits that caveat in writing rather than
+hiding it.
+
+**Deliberately not in this milestone:** any LLM call in the technical path, MACD
+or any new indicator on `Evidence`, VWAP or any volume-derived concept, News
+Analyst (still blocked on a missing data source, unchanged from v1), the six other
+Mission 8 roles, persistence of findings or theses, an HTTP/frontend surface for
+either panel, multi-timeframe fetching in the orchestrator, telemetry, logging,
+and anything resembling live or broker execution. `README.md` is unchanged.
+
+**Files added:** `src/orion/analysis/price_action.py`,
+`src/orion/analysts/{knowledge,technical,technical_schemas,synthesis}.py`,
+`tests/analysis/test_price_action.py` (37 tests),
+`tests/analysts/{test_knowledge,test_technical,test_technical_schemas,
+test_synthesis}.py` (136 tests), `tests/orchestrator/test_technical.py`
+(22 tests). **Files modified:** `src/orion/analysis/structure.py` (delegates its
+fractal detection), `src/orion/orchestrator/{analysis,schemas}.py`,
+`tests/analysts/test_import_hygiene.py`,
+`tests/orchestrator/test_import_hygiene.py`. No frontend file, no
+`orion.interface` file, no `orion.decision`/`orion.risk`/`orion.paper`/
+`orion.memory` file and no dependency manifest was touched, and **no dependency
+was added**.
+
+**Verification:** `pytest` 2031 passed (1806 before), `ruff check .`, `ruff
+format --check .` (198 files) and `mypy src --strict` (87 files) all clean. Every
+import-hygiene suite in the repository passes (74 tests), as do the paper, memory,
+backtest, risk, reflection and interface-security suites. Proven rather than
+claimed: a real `run_analysis` over the shared series produced five technical
+findings whose `evidence_fingerprint` equals both the report's evidence
+fingerprint and `decision.evidence_ref.content_hash`, a thesis was formed, and the
+serialised decision and risk objects were byte-identical with and without the
+Macro Analyst connected.
+
+## 2026-08-31 — Mission 8 v2.1: the specialists reach a reader, and thesis persistence is refused
+
+**Phase A surfaced what v2 had computed and left unreachable.** The Technical
+Analyst and the `MarketThesis` existed only inside `AnalysisReport`, which is
+returned to a caller and dropped. `AnalysisSummary` gained exactly two fields —
+`technical` and `thesis` — and `orion.cli.render_report` gained a specialist
+section. Everything else on the wire is byte-identical, and the shape test that
+pins the payload was *widened by two keys and then made stricter*: it now also
+pins the nested shape of every new object, because a fingerprint or a vendor
+name would most plausibly appear there without anyone noticing.
+
+**THE WIRE CARRIES LESS THAN THE TERMINAL, DELIBERATELY.** Two values are
+dropped at `orion.interface.service` and only there: the 64-character evidence
+fingerprint and the market-data provider's name. Both were already governed —
+`_to_analysis_summary` has always dropped the evidence fingerprint and
+`_to_macro_summary` the model identifier, on the stated principle that a browser
+learns what ORION concluded and never from exactly which bytes or which vendor.
+Shipping `source_provider` would additionally have broken an existing security
+assertion (`"twelvedata" not in blob`), which is the same rule arriving from a
+second direction. A test asserts no 64-hex string and no vendor name appears
+anywhere in an analysis payload. `orion.cli` prints both, because a local
+operator reading their own machine is exactly the party who needs the
+fingerprint — it is the only thing proving a finding describes the same bars the
+proposal was reasoned from, and a CLI test asserts it equals
+`decision.evidence_ref.content_hash`.
+
+**Two version strings *do* cross, and that is a deliberate divergence from
+`MacroSummary`.** `analyst_version` and `knowledge_version` reach a client while
+macro's `prompt_version` does not. The distinction is real rather than an
+oversight: a prompt version is only meaningful beside the model identifier this
+boundary hides, whereas these two identify ORION's own committed detectors and
+wording. They are what lets a reader confirm an interpretation was *looked up*
+rather than generated, and they name nothing external.
+
+**The observation/interpretation split survives serialisation, and is tested at
+the boundary.** A test asserts every wire `observation` contains a digit, every
+wire `interpretation` contains none, and every interpretation string is a member
+of the knowledge registry's own committed set — so a client cannot receive
+market commentary ORION did not author. The per-finding supporting `values` are
+deliberately *not* shipped: every number is already inside the formatted
+`observation`, and sending both would put one measurement on the wire twice in
+two shapes that could drift.
+
+**Absence still reads as absence at the boundary.** `unevaluated` crosses with
+its reason per concept, and a test re-checks the engine's completeness invariant
+*after* serialisation: every concept appears exactly once per timeframe as
+either a finding or an unevaluated entry. A separate test asserts no unsupported
+concept — VWAP, MACD, OBV, volume profile, order blocks, Elliott wave — appears
+anywhere in a payload or in the terminal rendering, in any casing, as though it
+had been detected.
+
+**The Risk Guardian boundary is unchanged and re-asserted at the new surface.**
+`TechnicalSummary`/`ThesisSummary` and their four nested shapes carry no action,
+direction-to-trade, quantity, entry, stop, target or approval field, checked
+against the same blocklist the analyst schemas already use. `RiskSummary`'s
+shape is pinned unchanged, and a test asserts no verdict vocabulary
+(`approved`/`vetoed`/`no_trade_proposed`) appears inside either specialist
+panel. `orion.interface` still cannot import `orion.analysts` — every enum is
+read through the report as `.value` — so no import wall moved in Phase A.
+
+**The interface still writes nothing.** A dedicated test runs a full analysing
+turn against an isolated working directory and asserts `rglob("*") == []`, and
+the pre-existing structural test proving `orion.interface` opens no file and
+imports no database library is unchanged.
+
+**One substring ban became an AST check, for the reason Phase 2a already
+recorded.** `test_the_cli_has_no_dangerous_call` matched the *substring* `eval`,
+which the identifier `unevaluated` contains. That is the same false positive
+Mission 4 Phase 2a fixed when `open` flagged `account_open`, and the same fix
+applies: `subprocess`/`os.environ` stay substring bans, and `exec`/`eval`/
+`compile` moved to an AST call scan that is strictly stricter — it also bans
+`__import__`, `globals`, `locals`, `getattr`, `setattr` and the modules that
+would provide an evaluator. A test that fails on a field name is not testing
+what it claims to.
+
+---
+
+**PHASE B: `MarketThesis` IS NOT PERSISTED, AND THIS IS THE REFUSAL.** The
+instruction was to persist only if it is safe, and to stop and document
+otherwise. Three of the six stated criteria pass cleanly and were verified
+rather than assumed: a new table is additive so no historical journal semantics
+change; `orion.analysts` imports neither `orion.memory` nor `orion.paper`, so
+there is **no import cycle**; and `MarketThesis` is frozen, so `canonical_hash`
+would give it a content-addressed primary key exactly like the six existing
+records, with the interface untouched and the existing retention policy
+inherited. Persistence is refused for two other reasons.
+
+**Blocker 1 — THE LINK DOES NOT EXIST, AND WAS DEMONSTRATED, NOT ARGUED.**
+`MarketThesis` carries no `analysis_id`, no `decision_fingerprint` and no
+`risk_verdict_fingerprint`; its only fingerprint is
+`ThesisTimeframe.evidence_fingerprint`. The mission's own requirement — that
+reflection be able to recover the thesis for a closed trade — therefore has only
+one available key, and that key is not unique. Two analyses inside the same bar
+(a cron at :05 and again at :35 is the ordinary case) produce two theses with
+**identical `evidence_fingerprint` and different content hashes**: two
+permanent, non-duplicate rows answering the same reverse-index lookup, with
+nothing on either saying which trade it authorised. That was run and confirmed
+before this entry was written. Reflection would have to guess, and this codebase
+raises on that ambiguity rather than guessing (`_find_opening_fee` already
+does). The obvious fix — putting a decision reference on the thesis — inverts
+the ordering that keeps the thesis advisory: Mission 8 v2 computes it *after*
+the decision and the verdict precisely so it cannot be an input to either, and a
+thesis that referenced a decision would couple the advisory record to the
+authority chain in the one direction that must stay closed.
+
+**Blocker 2 — THE ONLY CORRECT WRITER IS THE ONE THAT MAY NOT SEE AN ANALYST.**
+Preserving the mandated account-save-before-journal ordering means the thesis
+write belongs inside `orion.paper.session._persist`, alongside the chain
+Phase 2c already writes there — which requires `orion.paper` to import
+`orion.analysts`. That is forbidden by the analysts inbound wall, and it is the
+one wall that should not move: `orion.paper.execution` is the last step of the
+decision chain, and an import in that direction puts specialist output one
+attribute access away from the thing that acts on an APPROVED verdict. The
+existing escape hatch does not transfer. `JournalWriter` inverts
+`orion.paper` → `orion.memory` with a `Protocol`, but a `Protocol` restates
+*behaviour*; a `record_thesis` method still has to name its payload type, and
+`SqliteDecisionJournal` has to hash and serialise a real `MarketThesis`. The
+alternative — writing the thesis from `orion.cli` after `run_cycle` returns —
+was considered and rejected: it creates a second production journal writer,
+breaking Mission 5's Finding B "one production writer" guarantee, and opens a
+partial-write state `CycleResult` cannot express.
+
+**A standalone analysis must not start filling the journal, and does not.**
+Nothing in Phase A constructs a store, a journal or an engine. `orion analyze`
+without `--account` still creates no file, the HTTP path still writes zero
+bytes, and both are asserted against isolated working directories.
+
+**What would unblock it, concretely.** (1) A stable identity for a thesis within
+the decision chain that does not point *at* the decision — the natural candidate
+is the `analysis_id` the orchestrator already mints and stamps on
+`ProposedDecision` and `RiskVerdict`, which would let a thesis be found by the
+same key without referencing the proposal. That is a change to `synthesize`'s
+inputs and belongs to its own milestone. (2) A home for the `MarketThesis`
+*schema* that both `orion.paper` and `orion.memory` may already see, so the
+writer can stay where the ordering guarantee lives without moving the analysts
+wall — a schema-relocation decision, not a side effect of a persistence one.
+Until both exist, a thesis remains a pure function of two analyst outputs,
+recomputable only while the bars are still in hand, and recorded here as
+deliberately transient — the same position Mission 5 took on `TradeReflection`
+and for the same reason: no consumer yet needs it durable, and building the
+schema ahead of that need is what this project has declined at every prior
+mission boundary.
+
+**Deliberately not in this milestone:** any journal table, record method or
+schema for `MarketThesis`; any change to `orion.reflection`; any frontend change
+(the wire is additive and every existing key is unchanged, so no client is
+obliged to move); multi-timeframe fetching; news; telemetry; and anything
+resembling live or broker execution.
+
+**Files added:** `tests/interface/test_specialist_surface.py` (18 tests).
+**Files modified:** `src/orion/interface/{schemas,service}.py`,
+`src/orion/cli.py`, `tests/interface/test_analysis_turn.py`,
+`tests/test_cli.py`. No frontend file, no `orion.analysts` file, no
+`orion.orchestrator` file, no `orion.memory`/`orion.paper`/`orion.risk` file and
+no dependency manifest was touched, and no dependency was added.
+
+**Verification:** `pytest` 2054 passed (2031 before), `ruff check .`, `ruff
+format --check .` (199 files) and `mypy src --strict` (87 files) all clean. The
+interface security and every import-hygiene suite pass unchanged. Proven rather
+than claimed: a real HTTP turn returns five technical findings with their
+computed observations and registry-authored interpretations, six unevaluated
+concepts with reasons, and a thesis with its canonical summary — while the same
+payload contains no 64-character fingerprint and no vendor name, and the turn
+writes zero bytes to an isolated working directory.

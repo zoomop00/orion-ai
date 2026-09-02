@@ -2,6 +2,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { OrionCore } from "@/components/OrionCore";
+import { createAmplitudeSignal } from "@/lib/amplitude-signal";
 import { LATTICE_EDGES, LATTICE_NODES, PARTICLES, WAVE_BARS } from "@/lib/core-geometry";
 import { ORION_VISUAL_STATES, profileFor } from "@/state/orion-visual-state";
 
@@ -105,6 +106,98 @@ describe("OrionCore", () => {
   it("exposes the state to assistive technology instead of hiding it in pixels", () => {
     render(<OrionCore state="speaking" />);
     expect(screen.getByRole("img", { name: /speaking/i })).toBeTruthy();
+  });
+});
+
+describe("a live amplitude signal, which is not a render", () => {
+  /**
+   * The other way into the same seam. A number prop is React's; a signal is
+   * the analyser's, and the difference is the whole performance contract:
+   * nothing below calls `rerender`, because a live envelope must not be a
+   * render at all. See `lib/amplitude-signal.ts`.
+   */
+  const listening = profileFor("listening").amplitude;
+
+  it("writes each value straight onto the stage element", () => {
+    const signal = createAmplitudeSignal();
+    render(<OrionCore state="listening" amplitude={signal} />);
+    const core = screen.getByTestId("orion-core");
+
+    // Nothing measured yet, so the state's own constant stands and moves at
+    // the slow, state-change pace.
+    expect(core.style.getPropertyValue("--envelope")).toBe(String(listening));
+    expect(core.style.getPropertyValue("--envelope-ease")).toBe("900ms");
+
+    signal.set(0.42);
+    expect(core.style.getPropertyValue("--envelope")).toBe("0.42");
+    expect(core.getAttribute("data-envelope")).toBe("0.42");
+    expect(core.style.getPropertyValue("--envelope-ease")).toBe("90ms");
+
+    // Measured silence is a measurement: still live, still quick.
+    signal.set(0);
+    expect(core.style.getPropertyValue("--envelope")).toBe("0");
+    expect(core.style.getPropertyValue("--envelope-ease")).toBe("90ms");
+
+    // null is not 0 -- the analyser has stopped, so the constant returns.
+    signal.set(null);
+    expect(core.style.getPropertyValue("--envelope")).toBe(String(listening));
+    expect(core.style.getPropertyValue("--envelope-ease")).toBe("900ms");
+  });
+
+  it("clamps whatever the signal reports", () => {
+    const signal = createAmplitudeSignal();
+    render(<OrionCore state="idle" amplitude={signal} />);
+    const core = screen.getByTestId("orion-core");
+
+    signal.set(4);
+    expect(core.style.getPropertyValue("--envelope")).toBe("1");
+    signal.set(-2);
+    expect(core.style.getPropertyValue("--envelope")).toBe("0");
+  });
+
+  it("keeps a live level across a state change, and the fallback in step", () => {
+    const signal = createAmplitudeSignal();
+    const { rerender } = render(<OrionCore state="listening" amplitude={signal} />);
+    const core = screen.getByTestId("orion-core");
+
+    signal.set(0.8);
+    rerender(<OrionCore state="speaking" amplitude={signal} />);
+    // A state change must not stamp the state's constant over a level that
+    // is being measured right now.
+    expect(core.style.getPropertyValue("--envelope")).toBe("0.8");
+
+    signal.set(null);
+    expect(core.style.getPropertyValue("--envelope")).toBe(
+      String(profileFor("speaking").amplitude),
+    );
+  });
+
+  it("leaves the layers below it entirely alone", () => {
+    const signal = createAmplitudeSignal();
+    render(<OrionCore state="listening" amplitude={signal} />);
+    const particles = screen.getByTestId("orion-particles");
+    const bars = screen.getByTestId("orion-wave");
+    const firstBar = bars.firstElementChild;
+
+    for (const value of [0.2, 0.45, 0.9, 0.3, 0]) signal.set(value);
+
+    expect(screen.getByTestId("orion-particles")).toBe(particles);
+    expect(screen.getByTestId("orion-wave")).toBe(bars);
+    expect(bars.firstElementChild).toBe(firstBar);
+    expect(particles.children).toHaveLength(PARTICLES.length);
+  });
+
+  it("stops listening when it unmounts, so a late frame writes nothing", () => {
+    const signal = createAmplitudeSignal();
+    const { unmount } = render(<OrionCore state="listening" amplitude={signal} />);
+    const core = screen.getByTestId("orion-core");
+
+    signal.set(0.5);
+    expect(core.style.getPropertyValue("--envelope")).toBe("0.5");
+
+    unmount();
+    signal.set(0.9);
+    expect(core.style.getPropertyValue("--envelope")).toBe("0.5");
   });
 });
 

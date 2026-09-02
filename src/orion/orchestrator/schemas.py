@@ -51,10 +51,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from orion.analysis.evidence import Evidence
 from orion.analysts.schemas import MacroAnalystOutput
+from orion.analysts.technical_schemas import TechnicalAnalystOutput
 from orion.data.models import Timeframe
 from orion.decision.schemas import ProposedDecision
 from orion.reasoning.schemas import ReasoningOutput
 from orion.risk.schemas import RiskVerdict
+from orion.thesis.schemas import MarketThesis
 
 
 class IntentKind(StrEnum):
@@ -196,6 +198,46 @@ class MacroPanel(BaseModel):
         return self
 
 
+class TechnicalPanel(BaseModel):
+    """The Technical Analyst's findings, always present and always real.
+
+    UNLIKE `MacroPanel`, THERE IS NO "NOT CONNECTED" STATE. Macro needs a
+    calendar vendor and a credential, so a deployment can genuinely be unable
+    to look. The Technical Analyst needs neither: it is deterministic
+    computation over the same bars the analysis already fetched, so it runs on
+    every analysis, in every deployment, at no cost. The only reasons it can
+    hold no findings are on `TechnicalAvailability` — no input, or a window too
+    thin to evaluate a single concept — and both are real states of the data
+    rather than of the build.
+
+    ADVISORY ONLY, AND STRUCTURALLY SO. `orion.decision` never sees this, the
+    Risk Guardian never sees it, and it cannot reach `ProposedDecision`.
+    `tests/orchestrator/test_technical.py` compares the whole serialised
+    decision, reasoning, evidence and risk objects across every technical state
+    to prove none of them moves.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    detail: str = Field(min_length=1, max_length=200)
+    output: TechnicalAnalystOutput
+
+
+class ThesisPanel(BaseModel):
+    """What the specialists, taken together, say — or why there is no thesis.
+
+    A thesis needs at least one specialist with something to say. When the
+    technical pass produced no findings and no macro opinion was available,
+    `thesis` is `None` and `detail` says so, rather than a thesis being formed
+    over nothing.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    detail: str = Field(min_length=1, max_length=200)
+    thesis: MarketThesis | None = None
+
+
 class RiskAvailability(StrEnum):
     """Why a `RiskPanel` does or does not carry a verdict.
 
@@ -271,6 +313,8 @@ class AnalysisReport(BaseModel):
     risk: RiskPanel
     news: NotConnectedPanel
     macro: MacroPanel
+    technical: TechnicalPanel
+    thesis: ThesisPanel
 
     @model_validator(mode="after")
     def _check_report_invariants(self) -> AnalysisReport:

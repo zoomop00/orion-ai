@@ -122,10 +122,16 @@ describe("OrionInterface", () => {
 
     // No prices, percentages or ticker symbols anywhere in the rendered text.
     //
-    // The build chip is excluded rather than the rule being loosened: it
-    // names the phase ("Phase 5.4"), and a version number is not market data.
-    // Everything else on screen is still held to the original assertion.
-    const build = screen.getByText(/^Mission 10/).textContent ?? "";
+    // The build chip is excluded rather than the rule being loosened, and the
+    // exclusion is kept even though the chip no longer needs one. It used to
+    // name the phase ("Mission 10 - Phase 6"), and a version number is not
+    // market data; it now reads "ORION // INTELLIGENCE CORE" and contains no
+    // digit at all. The carve-out stays for two reasons: it asserts the chip
+    // is actually on screen, which is the only thing holding the wordmark's
+    // counterpart in place, and it means a chip that grows a number again
+    // fails on the number rather than on this lookup. Everything else on
+    // screen is still held to the original assertion.
+    const build = screen.getByText(/^ORION \/\//).textContent ?? "";
     expect(build).toBeTruthy();
     const text = (container.textContent ?? "").replace(build, "");
     expect(text).not.toMatch(/\d+\.\d+/);

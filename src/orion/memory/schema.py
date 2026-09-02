@@ -4,7 +4,7 @@ durable `PortfolioStore` backing.
 Core, not the ORM: every row's `payload` column is the exact canonical JSON
 of an existing Pydantic domain model (`Evidence`, `ReasoningOutput`,
 `ProposedDecision`, `RiskVerdict`, `Fill`, `ClosedPosition`,
-`PortfolioState`) — the domain model is already the single source of truth
+`MarketThesis`, `PortfolioState`) — the domain model is already the single source of truth
 for that shape, so mapping it a second time onto an ORM class would create
 two parallel schemas that can silently drift apart. A handful of columns
 are denormalized out of the payload purely for indexing/filtering (fingerprint,
@@ -110,6 +110,24 @@ closed_position_table = Table(
     Column("opened_by_verdict_fingerprint", String(64), nullable=False, index=True),
     Column("symbol", String, nullable=False, index=True),
     Column("closed_at", String, nullable=False, index=True),
+    Column("recorded_at", String, nullable=False),
+    Column("payload", String, nullable=False),
+)
+
+market_thesis_table = Table(
+    "market_thesis",
+    metadata,
+    Column("fingerprint", String(64), primary_key=True),
+    # The sibling key, not a foreign key. `analysis_id` is minted once per
+    # analysis and stamped identically on the decision, the verdict and the
+    # thesis, so this column is what lets a journaled verdict find the thesis
+    # formed for the same analysis -- without the thesis ever referencing the
+    # proposal. Indexed and deliberately NOT unique: `list_verdicts_by_analysis_
+    # id` already returns a tuple for exactly the same reason, because one
+    # analysis id can legitimately cover more than one record.
+    Column("analysis_id", String, nullable=False, index=True),
+    Column("symbol", String, nullable=False, index=True),
+    Column("formed_at", String, nullable=False, index=True),
     Column("recorded_at", String, nullable=False),
     Column("payload", String, nullable=False),
 )

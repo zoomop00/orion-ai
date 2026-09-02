@@ -80,6 +80,31 @@ def files_in(root: Path) -> list[str]:
     return sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
 
 
+def databases_in(root: Path) -> set[str]:
+    """The distinct SQLite databases under `root`, sidecars folded into their
+    database.
+
+    `files_in` is the right assertion when the answer must be "nothing at all",
+    and every refusal test above uses it. It is the wrong one for comparing a
+    directory to itself across a command, because `-wal` and `-shm` are not
+    durable state: SQLite creates them when a connection opens and removes them
+    when the last one closes, and the two account verbs leave their engine to
+    process exit (the known limitation Phase 2a recorded), so whether the
+    sidecars exist at any given moment depends on when Python collects it. A
+    test asserting they are still there is asserting garbage-collection timing,
+    not behaviour -- and it flaked for exactly that reason. What must hold is
+    that no *new database* appeared, which is what this measures.
+    """
+    names = set()
+    for name in files_in(root):
+        for suffix in ("-wal", "-shm"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        names.add(name)
+    return names
+
+
 class RecordingAccountService(AnalysisService):
     """Captures the store the CLI handed the wiring, and runs nothing."""
 
@@ -561,7 +586,7 @@ class TestTheCommandSurfaceStaysHonest:
             for action in parser._subparsers._group_actions  # type: ignore[union-attr]
             if hasattr(action, "choices") and action.choices
         ]
-        assert set(actions[0].choices) == {"analyze", "account", "paper"}
+        assert set(actions[0].choices) == {"analyze", "account", "paper", "reflect"}
 
     def test_the_paper_verb_exists_and_requires_a_symbol(self) -> None:
         """Phase 2a asserted `paper` was *not* reachable, anticipating this
@@ -623,11 +648,12 @@ class TestThePaperVerb:
         self, account_home: Path, argument: str
     ) -> None:
         assert main(["account", "open", "--balance", "100000"]) == EXIT_OK
-        before = set(files_in(account_home))
+        before = databases_in(account_home)
 
         assert main(["paper", argument]) == EXIT_USAGE
-        # No file created anywhere, inside the account directory or beside it.
-        assert set(files_in(account_home)) == before
+        # No database created anywhere, inside the account directory or beside
+        # it: the argument reached no filesystem path, which is the guarantee.
+        assert databases_in(account_home) == before
         assert not (account_home.parent / "orion.db").exists()
 
     def test_it_uses_the_real_sqlite_store_and_a_real_journal(self, account_home: Path) -> None:

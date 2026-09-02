@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
+import {
+  createAmplitudeSignal,
+  type AmplitudeSignal,
+  type AmplitudeSource,
+} from "@/lib/amplitude-signal";
 import { monitorAmplitude, type AmplitudeMonitor } from "@/lib/orion-analyser";
 import {
   OrionApiError,
@@ -39,13 +44,19 @@ import type { OrionVisualState } from "@/state/orion-visual-state";
  * the development controls. The reducer below sequences that vocabulary; the
  * backend's `VoiceStateMachine` remains the authority on the protocol.
  *
- * WHY AMPLITUDE IS NOT IN THE REDUCER. The envelope changes up to sixty
- * times a second. Threading that through the same reducer that owns the
- * lifecycle would mean every frame constructing a new snapshot of fields
- * that did not change, and would blur the line between "what ORION is doing"
- * and "how loud it is right now". It lives in its own `useState`, quantised
- * to two decimals so an unchanged value re-renders nothing, and `OrionCore`
- * memoises the layers that do not depend on it.
+ * WHY AMPLITUDE IS NOT IN THE REDUCER, AND NO LONGER IN REACT AT ALL. The
+ * envelope changes up to sixty times a second. Threading that through the
+ * same reducer that owns the lifecycle would mean every frame constructing a
+ * new snapshot of fields that did not change, and would blur the line between
+ * "what ORION is doing" and "how loud it is right now". Keeping it in a
+ * `useState` of its own fixed the blurred line but not the cost: a render of
+ * this hook, of `OrionInterface` and of `OrionCore` was still scheduled every
+ * frame so that one custom property could change at the end of it. It now
+ * lives in an `AmplitudeSignal` (see `lib/amplitude-signal.ts`) that the
+ * analyser writes and `OrionCore` subscribes to, and the frame loop causes no
+ * React render whatsoever. The reducer still owns the lifecycle; React still
+ * owns which of the four states ORION is in, and so still owns the fallback
+ * envelope for when nothing is being measured.
  *
  * WHY A REDUCER. The invalid states are the interesting ones: "busy but
  * idle", "speaking with no audio", "listening with no microphone", "error
@@ -200,8 +211,12 @@ export interface OrionTurnController extends OrionTurnSnapshot {
    * user's voice while listening, ORION's own speech while speaking — or
    * `null` when nothing is being analysed, in which case the core falls back
    * to its fixed per-state constant. Never a simulated value.
+   *
+   * A signal rather than a number, and that is the whole point: reading it
+   * per frame must not be a render. The object identity is stable for the
+   * life of the hook, so a component subscribes to it once.
    */
-  readonly amplitude: number | null;
+  readonly amplitude: AmplitudeSignal;
   /** True only while a microphone is genuinely open. */
   readonly capturing: boolean;
   /** Runs a typed turn. No-ops on blank input or while a turn is running. */
@@ -216,7 +231,9 @@ export interface OrionTurnController extends OrionTurnSnapshot {
 
 export function useOrionTurn(): OrionTurnController {
   const [snapshot, dispatch] = useReducer(reduce, INITIAL);
-  const [amplitude, setAmplitude] = useState<number | null>(null);
+  // Created once and never replaced: it is the identity `OrionCore`
+  // subscribes to, not a value, so it must not change between renders.
+  const [amplitude] = useState<AmplitudeSource>(createAmplitudeSignal);
   const [capturing, setCapturing] = useState(false);
 
   // `busy` is mirrored in a ref because the callbacks below are stable and
@@ -235,24 +252,46 @@ export function useOrionTurn(): OrionTurnController {
   // timer inside `orion-microphone`, always reaches the current handler.
   const onLimitRef = useRef<(() => void) | null>(null);
 
-  const pushAmplitude = useCallback((value: number) => {
-    // Two decimals: a change smaller than 1% of the core's waveform is not
-    // visible, and quantising here means React bails out of the re-render
-    // entirely on the frames where nothing perceptible happened.
-    const next = Math.round(clamp01(value) * 100) / 100;
-    setAmplitude((previous) => (previous === next ? previous : next));
-  }, []);
+  const pushAmplitude = useCallback(
+    (value: number) => {
+      /*
+       * Fifty steps, not a hundred.
+       *
+       * This is the one place in the interface where something arrives sixty
+       * times a second, so it is the one place where the quantisation is a
+       * performance decision rather than a rounding convenience. The waveform
+       * is forty-four bars a few pixels tall: a two-percent change in the
+       * envelope moves no bar by a visible amount, and stepping there rather
+       * than at one percent roughly halves how often anything downstream is
+       * touched at all -- the signal drops every frame that lands in the same
+       * step, which during ordinary speech is most of them, so most frames
+       * write no custom property and invalidate no style.
+       *
+       * The envelope itself is not coarsened by this. `audio-envelope.ts`
+       * still smooths the real signal at full precision and the transition in
+       * the stylesheet still eases between steps, so what reaches the eye is a
+       * continuous curve; the step only decides how often the curve is
+       * resampled.
+       */
+      amplitude.set(Math.round(clamp01(value) * 50) / 50);
+    },
+    [amplitude],
+  );
 
   const stopMonitor = useCallback(() => {
     monitorRef.current?.stop();
     monitorRef.current = null;
-    setAmplitude(null);
-  }, []);
+    // `null`, not `0`: nothing is being analysed any more, so the core goes
+    // back to its per-state constant rather than sitting at measured silence.
+    amplitude.set(null);
+  }, [amplitude]);
 
   useEffect(
     () => () => {
       // Unmount: stop the request, the analysis and the microphone. This is
-      // cleanup, not user-facing interruption.
+      // cleanup, not user-facing interruption. `stop()` cancels the pending
+      // animation frame inside the monitor, so no callback survives this --
+      // including one already scheduled for the frame after unmount.
       abortRef.current?.abort();
       monitorRef.current?.stop();
       monitorRef.current = null;

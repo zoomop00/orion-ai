@@ -85,6 +85,16 @@ MAX_CODE_CHARS = 64
 MAX_SYMBOL_CHARS = 16
 MAX_ID_CHARS = 128
 MAX_CODE_LIST = 32
+# A technical finding's computed observation and its looked-up interpretation.
+# Both match the caps `orion.analysts.technical_schemas.TechnicalFinding` already
+# declares, for the same reason every other ceiling here is restated: this
+# boundary must never be the looser of the two.
+MAX_OBSERVATION_CHARS = 240
+MAX_INTERPRETATION_CHARS = 400
+# One finding per supported concept per timeframe, with headroom. The registry
+# holds eleven concepts; a payload larger than this could not have come from the
+# analyst and must not be serialisable here.
+MAX_FINDINGS = 64
 
 
 class TextTurnRequest(BaseModel):
@@ -193,6 +203,182 @@ class MacroSummary(BaseModel):
         return self
 
 
+class TechnicalFindingSummary(BaseModel):
+    """One technical concept, evaluated on one timeframe.
+
+    THE TWO TEXT FIELDS ARE DIFFERENT KINDS OF THING, AND STAY SO ON THE WIRE.
+    `observation` is formatted from real values by a fixed template in
+    `orion.analysts.technical`; `interpretation` is copied verbatim from the
+    closed knowledge registry. Neither is ever authored at runtime, and
+    `deterministic` says out loud that this finding came from computation over
+    bars rather than from a model — the field exists so a future finding that
+    did not could not enter the same list silently.
+
+    `concept` and `bias` are the analyst's own closed-enum values as strings;
+    this layer re-checks their bounds but does not restate the vocabularies,
+    matching how `RiskSummary` carries reason codes.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    concept: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    timeframe: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    bias: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    observation: str = Field(min_length=1, max_length=MAX_OBSERVATION_CHARS)
+    interpretation: str = Field(min_length=1, max_length=MAX_INTERPRETATION_CHARS)
+    deterministic: bool
+
+
+class UnevaluatedConceptSummary(BaseModel):
+    """A concept ORION could not evaluate, and the reason.
+
+    CARRIED, NOT DROPPED. A client that only received findings could not tell
+    "ORION looked and found nothing" from "ORION could not look" — the exact
+    distinction `MacroSummary`'s four-state `status` exists to preserve one
+    panel over. Listing the reason per concept keeps it at the concept level
+    too.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    concept: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    reason: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+
+
+class TechnicalTimeframeSummary(BaseModel):
+    """One timeframe's technical reading, with the provenance that crosses.
+
+    WHAT CROSSES, AND WHAT DOES NOT. The timeframe, when the last bar closed,
+    how many bars were read, the timeframe's own lean and its volatility
+    regime. The 64-character evidence fingerprint and the market-data
+    provider's name both exist on `TechnicalTimeframeReport` and both stop at
+    `orion.interface.service` — the same allowlist `_to_analysis_summary`
+    already applies to the evidence fingerprint and `_to_macro_summary` to the
+    model identifier. A browser learns what ORION read and when, never from
+    exactly which bytes or which vendor. The full provenance stays on
+    `AnalysisReport` and is what `orion.cli`'s terminal rendering prints.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    timeframe: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    as_of: datetime
+    bar_count: int = Field(ge=0)
+    bias: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    volatility: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    findings: tuple[TechnicalFindingSummary, ...] = Field(default=(), max_length=MAX_FINDINGS)
+    unevaluated: tuple[UnevaluatedConceptSummary, ...] = Field(default=(), max_length=MAX_FINDINGS)
+
+
+class TechnicalSummary(BaseModel):
+    """The Technical Analyst's findings, or an explicit reason there are none.
+
+    NO `not_connected` STATE, DELIBERATELY. `MacroSummary` has one because
+    macro needs a vendor and a credential. The Technical Analyst is
+    deterministic computation over bars the analysis already fetched, so it
+    runs in every deployment: the only reasons it can hold no findings are
+    properties of the data, and both are named here.
+
+    `analyst_version`/`knowledge_version` DO cross, unlike macro's
+    `prompt_version`. That is not an inconsistency: a prompt version is only
+    meaningful beside the model identifier this boundary hides, whereas these
+    two identify ORION's own committed detectors and wording — they are what
+    lets a reader confirm an interpretation was looked up rather than
+    generated, and they name nothing external.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["available", "no_input", "insufficient_data"]
+    detail: str = Field(min_length=1, max_length=MAX_DETAIL_CHARS)
+    bias: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    timeframe_agreement: bool
+    analyst_version: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    knowledge_version: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    timeframes: tuple[TechnicalTimeframeSummary, ...] = Field(default=(), max_length=MAX_CODE_LIST)
+
+    @model_validator(mode="after")
+    def _check_technical_summary_invariants(self) -> TechnicalSummary:
+        has_findings = any(timeframe.findings for timeframe in self.timeframes)
+        available = self.status == "available"
+        if available and not has_findings:
+            raise ValueError("status is 'available' but no timeframe carries a finding")
+        if not available and has_findings:
+            raise ValueError(f"status is {self.status!r} but findings are present")
+        if self.status == "no_input" and self.timeframes:
+            raise ValueError("status is 'no_input' but timeframe readings are present")
+        return self
+
+
+class ThesisPointSummary(BaseModel):
+    """One thing the specialists agreed or disagreed about.
+
+    Both readings travel together. A conflict in which one side's reading was
+    dropped is a conflict a reader cannot evaluate, which is the whole reason
+    `orion.analysts.synthesis` keeps both — and the reason this layer does not
+    reduce a point to a single sentence.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    topic: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    agreed: bool
+    technical_reading: str = Field(min_length=1, max_length=MAX_CODE_CHARS)
+    macro_reading: str | None = Field(default=None, max_length=MAX_CODE_CHARS)
+    detail: str = Field(min_length=1, max_length=MAX_DETAIL_CHARS)
+
+
+class ThesisSummary(BaseModel):
+    """What the specialists, taken together, say — or why there is no thesis.
+
+    ADVISORY, AND THE SHAPE SAYS SO. There is no action, direction-to-trade,
+    quantity, entry, stop, target or approval field here, and a test checks
+    every field name in this module against that vocabulary. The Risk
+    Guardian's answer reaches a client through `RiskSummary` and nowhere else.
+
+    `summary` is the canonical sentence `orion.analysts.synthesis` looked up
+    for this alignment, copied verbatim — never composed here and never
+    composed there.
+
+    NOTHING IS EVER PARTIALLY POPULATED, matching `MacroSummary`: the reading
+    fields are present together when `status` is `"available"` and absent
+    together otherwise. The macro half within a thesis is separately
+    all-or-nothing, because a thesis over technical evidence alone is an
+    ordinary, complete answer.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["available", "unavailable"]
+    detail: str = Field(min_length=1, max_length=MAX_DETAIL_CHARS)
+    alignment: str | None = Field(default=None, max_length=MAX_CODE_CHARS)
+    summary: str | None = Field(default=None, max_length=MAX_RATIONALE_CHARS)
+    thesis_version: str | None = Field(default=None, max_length=MAX_CODE_CHARS)
+    technical_bias: str | None = Field(default=None, max_length=MAX_CODE_CHARS)
+    technical_condition: str | None = Field(default=None, max_length=MAX_CODE_CHARS)
+    macro_condition: str | None = Field(default=None, max_length=MAX_CODE_CHARS)
+    agreements: tuple[ThesisPointSummary, ...] = Field(default=(), max_length=MAX_CODE_LIST)
+    conflicts: tuple[ThesisPointSummary, ...] = Field(default=(), max_length=MAX_CODE_LIST)
+
+    @model_validator(mode="after")
+    def _check_thesis_summary_invariants(self) -> ThesisSummary:
+        payload = (
+            self.alignment,
+            self.summary,
+            self.thesis_version,
+            self.technical_bias,
+            self.technical_condition,
+        )
+        available = self.status == "available"
+        if available and any(value is None for value in payload):
+            raise ValueError("status is 'available' but the thesis is incomplete")
+        if not available and any(value is not None for value in payload):
+            raise ValueError(f"status is {self.status!r} but a thesis is present")
+        if not available and (self.agreements or self.conflicts):
+            raise ValueError(f"status is {self.status!r} but thesis points are present")
+        return self
+
+
 class StructureSummary(BaseModel):
     """Market structure, as `orion.analysis.structure` computed it."""
 
@@ -297,6 +483,8 @@ class AnalysisSummary(BaseModel):
     momentum: MomentumSummary
     news: CapabilitySummary
     macro: MacroSummary
+    technical: TechnicalSummary
+    thesis: ThesisSummary
     risk: RiskSummary
     confidence: float = Field(ge=0.0, le=1.0)
     risk_level: str = Field(min_length=1, max_length=MAX_CODE_CHARS)

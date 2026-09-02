@@ -1,0 +1,1199 @@
+/*
+ * The chamber ORION occupies.
+ *
+ * Nine layers between the void and the vignette, ordered back to front:
+ * ground gradient, light shafts, dust, counter-light, ORION's own light on
+ * the room, the floor, the waves, the intelligence field, the horizon, the
+ * falloff. Each one is absolutely positioned inside a layer that is itself
+ * absolutely positioned behind the composition, so the entire room takes part
+ * in no layout calculation anywhere and cannot move a pixel of it.
+ *
+ * ONE AXIS FOR THE WHOLE ROOM. `--axis-y` is where the core's centre sits in
+ * the viewport, and every layer that has a centre uses it: the light, the
+ * waves, the floor and the beam all agree about where ORION actually is. Get
+ * this wrong by a few percent and the room reads as a backdrop the core was
+ * placed on top of, which is the exact failure this file exists to fix.
+ *
+ * EVERYTHING COMPOSITES. Transform, opacity and filter only -- no keyframe
+ * here touches a geometric property, so a room this busy costs the main
+ * thread nothing while the core is already repainting from live audio.
+ *
+ * PERIODS SHARE NO COMMON FACTOR. Ribbon drift is 71/89/113/137/167/191/211s,
+ * sway is 29/37/43/53/61/71/83s, floor rings are 23s upward in steps of 7.4,
+ * shafts are 38s upward in steps of 11.7, and every mote and node carries its
+ * own hashed offset. Nothing in this room lines up with anything else, so it
+ * never presents the same frame twice in any span a person will watch it for.
+ */
+
+.chamber {
+  /*
+   * Where the core's centre is.
+   *
+   * The composition puts a short lead above ORION and the speaking band
+   * below, which lands the core a little above the middle of the screen --
+   * measured at 39 to 43 percent across the whole viewport matrix. Every
+   * layer here that has a centre is placed against this rather than against
+   * 50%, and the two overrides at the bottom of this file cover the two
+   * shapes where the composition sits appreciably higher.
+   */
+  --axis-y: 40%;
+  --accent: var(--orion-accent-rgb, 46 172 118);
+
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- void --- */
+
+/*
+ * The room's own darkness, and the only layer that is not transparent.
+ *
+ * A flat fill would make the environment a rectangle; the vertical ramp gives
+ * it a floor and a ceiling, and the faint bloom on the axis means the black
+ * is already brighter where ORION is before a single luminous layer is added.
+ */
+.deepVoid {
+  position: absolute;
+  inset: 0;
+  background:
+    /*
+     * Tighter than it was, and brighter in the middle of that.
+     *
+     * A wide, gentle bloom across three quarters of the frame lifts the whole
+     * black evenly, which is the same as not lifting it at all -- the eye
+     * calibrates to the average and the room flattens. Pulling it in and
+     * pushing the centre up means the darkness genuinely deepens toward the
+     * edges, and ORION is the reason the middle is not black.
+     */
+    radial-gradient(
+      58% 48% at 50% var(--axis-y),
+      rgb(var(--accent) / 0.085),
+      rgb(var(--accent) / 0.022) 42%,
+      rgb(var(--accent) / 0.006) 66%,
+      transparent 84%
+    ),
+    linear-gradient(180deg, #000402 0%, #010a07 42%, #010704 72%, #000201 100%);
+  transition: background 1600ms ease;
+}
+
+/* -------------------------------------------------------------- shafts --- */
+
+/*
+ * Columns of light falling through the room.
+ *
+ * This is the layer that says the space is large. They are behind everything
+ * except the void, blurred well past legibility, and they lean rather than
+ * fall straight -- a perfectly vertical streak reads as a UI divider.
+ */
+.shafts {
+  position: absolute;
+  inset: 0;
+}
+
+.shaft {
+  position: absolute;
+  top: -8%;
+  left: var(--x);
+  /*
+   * NINE TIMES THE WIDTH AND NO BLUR. A 22px blur on a moving element is
+   * re-rasterised every frame; a radial gradient is soft for free and is
+   * rasterised once. The width makes up for the spread the blur used to give.
+   * This is the single pattern applied to every light in the chamber, and
+   * together they were 17.5 megapixels of per-frame blur.
+   */
+  width: calc(var(--w) * 9);
+  height: var(--h);
+  background: radial-gradient(
+    46% 44% at 50% 32%,
+    rgb(var(--accent) / 0.34),
+    rgb(var(--accent) / 0.1) 46%,
+    rgb(var(--accent) / 0) 78%
+  );
+  /* Far structure, and it reads as far by being faint. */
+  opacity: calc(var(--alpha) * 0.74);
+  transform-origin: 50% 0%;
+  will-change: transform, opacity;
+  animation: shaftLean var(--spin) ease-in-out var(--offset) infinite alternate;
+  transition: opacity 1400ms ease;
+}
+
+/* ---------------------------------------------------------------- dust --- */
+
+/*
+ * Far-field motes at three depths.
+ *
+ * Not a starfield: forty-four points across an entire screen is roughly one
+ * every four hundred square pixels, which the eye reads as air rather than as
+ * sky. The three tiers drift at unrelated rates, which is the whole reason
+ * the field reads as having depth instead of being a texture.
+ */
+.dust {
+  position: absolute;
+  inset: 0;
+}
+
+/* The plane moves; the motes on it do not. */
+.dustPlane {
+  position: absolute;
+  inset: 0;
+  will-change: transform;
+  animation: planeDrift var(--spin) ease-in-out var(--offset) infinite alternate;
+}
+
+.mote {
+  position: absolute;
+  top: var(--y);
+  left: var(--x);
+  border-radius: 50%;
+  /*
+   * A gradient rather than a background plus a box-shadow. A box-shadow on a
+   * moving element is painted every time the element's layer is re-rastered,
+   * and there were a hundred and eight of them on screen.
+   */
+  background: radial-gradient(
+    closest-side,
+    rgb(var(--accent) / 0.95) 0%,
+    rgb(var(--accent) / 0.5) 38%,
+    rgb(var(--accent) / 0) 100%
+  );
+  transition: opacity 1400ms ease;
+}
+
+/*
+ * Three planes, and the gap between them is what the eye reads as distance.
+ * At 0.26 / 0.42 / 0.55 the tiers were close enough to average out into one
+ * speckled sheet; spread, the same motes describe a volume.
+ */
+.mote[data-depth="0"] {
+  width: 2.5px;
+  height: 2.5px;
+  opacity: calc(var(--alpha) * 0.16);
+}
+
+.mote[data-depth="1"] {
+  width: 5px;
+  height: 5px;
+  opacity: calc(var(--alpha) * 0.34);
+}
+
+.mote[data-depth="2"] {
+  width: 8.5px;
+  height: 8.5px;
+  opacity: calc(var(--alpha) * 0.72);
+}
+
+/* --------------------------------------------------------------- light --- */
+
+/*
+ * A second, far cooler source off-axis. Without it there is one lamp in the
+ * middle of nothing, and a room with one light in it is a spotlight, not a
+ * space.
+ */
+.counterLight {
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(34% 30% at 86% 10%, rgba(9, 72, 64, 0.17), transparent 74%),
+    radial-gradient(30% 26% at 10% 88%, rgba(10, 84, 60, 0.12), transparent 76%);
+  /* A second source, and a second source must never rival the first. */
+  opacity: 0.46;
+  will-change: transform;
+  animation: fieldDrift 137s ease-in-out infinite alternate-reverse;
+}
+
+/*
+ * The light ORION casts into the room, tinted by the current state's accent.
+ * This is why the whole environment changes temperature when ORION does, and
+ * it is deliberately uneven -- an even one is a halo, an uneven one is a
+ * field with weather in it.
+ */
+.ambient {
+  position: absolute;
+  inset: -25%;
+  background:
+    /*
+     * THE CORE IS THE LAMP, SO ITS LIGHT HAS TO FALL OFF LIKE ONE.
+     *
+     * One lobe cannot describe a light source in a large room: made small it
+     * lights nothing, made large it lights everything evenly. It takes two --
+     * a tight, hot pool that says where the source is, and a wide, very faint
+     * spill that says the room is big enough for the light to run out in.
+     *
+     * ONLY THE POOL IS HERE. This element is half again the size of the
+     * viewport and it drifts, so every gradient on it is raster work that
+     * comes back as its tiles move; the wide spill is identical light and
+     * costs nothing on `.deepVoid`, which is exactly the same size as the
+     * screen and never moves at all. Measured at 1920x1080 the difference was
+     * idle long frames of 1.5% against 0.5%, for two declarations that look
+     * the same on screen. Put static light on static layers.
+     */
+    radial-gradient(
+      16% 18% at 50% var(--axis-y),
+      rgb(var(--accent) / 0.36),
+      rgb(var(--accent) / 0.085) 46%,
+      transparent 78%
+    ),
+    conic-gradient(
+      from 20deg at 50% var(--axis-y),
+      rgb(var(--accent) / 0) 0deg,
+      rgb(var(--accent) / 0.032) 72deg,
+      rgb(var(--accent) / 0) 156deg,
+      rgb(var(--accent) / 0) 232deg,
+      rgb(var(--accent) / 0.022) 292deg,
+      rgb(var(--accent) / 0) 352deg
+    );
+  opacity: 0.82;
+  will-change: transform, opacity;
+  transition:
+    opacity 1400ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 1600ms cubic-bezier(0.22, 1, 0.36, 1),
+    background 1500ms ease;
+  animation: fieldDrift 97s ease-in-out infinite alternate;
+}
+
+/* --------------------------------------------------------------- floor --- */
+
+/*
+ * The ground ORION's light lands on.
+ *
+ * The brief's warning here is specific -- "avoid an obvious ellipse/glow
+ * pasted underneath it" -- so this is not one shape. It is a beam coming down
+ * off the core, an uneven pool where the beam lands, and a set of concentric
+ * rings expanding outward across the plane, each on its own period. Together
+ * they read as light interacting with a surface rather than as a shadow.
+ */
+.floor {
+  position: absolute;
+  top: calc(var(--axis-y) + 4%);
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+/* The beam. Narrow, tall, and brightest where it meets the plane. */
+.column {
+  position: absolute;
+  top: -14%;
+  left: 50%;
+  width: min(9vw, 130px);
+  height: 46%;
+  background: radial-gradient(
+    26% 52% at 50% 78%,
+    rgba(190, 255, 224, 0.42),
+    rgb(var(--accent) / 0.26) 38%,
+    rgb(var(--accent) / 0.06) 62%,
+    rgb(var(--accent) / 0) 84%
+  );
+  opacity: 0.88;
+  will-change: transform, opacity;
+  transform: translateX(-50%);
+  animation: columnBreath 13.7s ease-in-out infinite;
+  transition: opacity 1400ms ease;
+}
+
+/* Where it lands. Two offset lobes, so the pool is not a circle. */
+.pool {
+  position: absolute;
+  top: 12%;
+  left: 50%;
+  width: min(120vw, 1500px);
+  height: 46%;
+  background:
+    radial-gradient(closest-side, rgb(var(--accent) / 0.14), transparent 76%),
+    radial-gradient(38% 60% at 41% 44%, rgb(var(--accent) / 0.07), transparent 74%);
+  opacity: 0.6;
+  will-change: transform;
+  transform: translateX(-50%);
+  animation: poolDrift 41s ease-in-out infinite alternate;
+  transition: opacity 1400ms ease;
+}
+
+.floorRings {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: min(170vw, 2200px);
+  height: 78%;
+  transform: translateX(-50%);
+  overflow: visible;
+  -webkit-mask: linear-gradient(
+    180deg,
+    #000 0%,
+    rgba(0, 0, 0, 0.4) 24%,
+    rgba(0, 0, 0, 0.1) 50%,
+    transparent 76%
+  );
+  mask: linear-gradient(
+    180deg,
+    #000 0%,
+    rgba(0, 0, 0, 0.4) 24%,
+    rgba(0, 0, 0, 0.1) 50%,
+    transparent 76%
+  );
+}
+
+.floorRing {
+  fill: none;
+  stroke: rgb(var(--accent) / 0.9);
+  stroke-width: calc(var(--weight) * 0.42);
+  stroke-opacity: calc(var(--alpha) * 0.72);
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: floorSwell var(--spin) ease-in-out var(--offset) infinite;
+}
+
+/*
+ * A very low band of emerald along the plane, painted after the rings so the
+ * far edge of the floor dissolves into light rather than stopping.
+ */
+.horizonGlow {
+  position: absolute;
+  right: -10%;
+  bottom: -12%;
+  left: -10%;
+  height: 34%;
+  background: radial-gradient(58% 100% at 50% 100%, rgb(var(--accent) / 0.085), transparent 76%);
+  /* The far edge of the floor. It is the furthest thing here and reads it. */
+  opacity: 0.4;
+  transition: opacity 1400ms ease;
+}
+
+/* -------------------------------------------------------------- waves --- */
+
+/*
+ * The waves crossing the room.
+ *
+ * These pass *through* the composition rather than orbiting it, which is what
+ * makes the core read as sitting inside a moving field instead of on top of a
+ * backdrop. They are the single strongest element here and the one that most
+ * separates a chamber from a dark page.
+ *
+ * `preserveAspectRatio: none` with `vector-effect: non-scaling-stroke` is the
+ * pairing that makes this work at every viewport: the wave stretches to
+ * whatever width the screen is, and the stroke stays a hairline instead of
+ * being stretched into a smear.
+ *
+ * THE PAIRING IS ALSO WHY NOTHING IN HERE MAY ANIMATE. A non-scaling stroke
+ * is derived against the element's current transform, so an animated group
+ * around one re-derives every outline and re-rasterises this whole band every
+ * frame. It measured 20.8ms a frame at 1920x1080, against 7.0ms for the same
+ * waves with the same motion once the stroke stopped being invalidated. The
+ * lanes below are therefore plain boxes and the `<svg>` inside each one never
+ * moves: see `Ribbon` in `OrionField.tsx`.
+ *
+ * The horizontal mask is not decoration. Unfaded, seven full-width ribbons
+ * running behind a paragraph is the busiest thing on screen and the reply
+ * becomes unreadable; faded, the waves are brightest exactly where ORION is
+ * and quietest exactly where the words are.
+ */
+.ribbons {
+  position: absolute;
+  top: calc(var(--axis-y) - 31%);
+  left: -6%;
+  width: 112%;
+  height: 62%;
+  opacity: 1;
+  /*
+   * The lanes are twice this wide and slide through it. The SVG viewport used
+   * to do this clipping for free; now the box does, which is the only thing
+   * the change of element type costs.
+   */
+  overflow: hidden;
+  /*
+   * Two masks, multiplied. The linear one ends the ribbons before the frame
+   * edge does; the radial one, centred on ORION, is what makes them belong to
+   * the core rather than merely pass behind it -- they gather brightness as
+   * they reach ORION and give it back on the way out. It is the same falloff
+   * the aperture uses, on the same axis, which is most of why the two layers
+   * read as one field.
+   */
+  -webkit-mask-image:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(0, 0, 0, 0.6) 6%,
+      #000 22%,
+      #000 78%,
+      rgba(0, 0, 0, 0.6) 94%,
+      transparent 100%
+    ),
+    radial-gradient(
+      30% 145% at 50% 50%,
+      #000 0%,
+      #000 20%,
+      rgba(0, 0, 0, 0.6) 56%,
+      rgba(0, 0, 0, 0.26) 100%
+    );
+  mask-image:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(0, 0, 0, 0.6) 6%,
+      #000 22%,
+      #000 78%,
+      rgba(0, 0, 0, 0.6) 94%,
+      transparent 100%
+    ),
+    radial-gradient(
+      30% 145% at 50% 50%,
+      #000 0%,
+      #000 20%,
+      rgba(0, 0, 0, 0.6) 56%,
+      rgba(0, 0, 0, 0.26) 100%
+    );
+  /*
+   * The list is top layer first, and the BOTTOM layer must be `add`.
+   *
+   * `intersect` on every layer is the trap here: the bottom-most mask
+   * composites against an empty backdrop, so intersecting it with nothing
+   * erases it, and the layer above then intersects with the result. Written
+   * that way the two masks did not multiply, they cancelled -- the aperture
+   * and the waves both went to almost nothing and looked like a brightness
+   * problem rather than a compositing one.
+   */
+  -webkit-mask-composite: source-in, source-over;
+  mask-composite: intersect, add;
+  transition: opacity 1400ms ease;
+}
+
+/*
+ * One period of travel, and the path is two periods long -- so the frame
+ * after the loop restarts is identical to the frame before it and there is no
+ * seam anywhere on screen.
+ *
+ * The lane is 200% wide and carries a 2000-unit viewBox, so -50% of itself is
+ * exactly the 1000 user units the group used to translate. Expressed as a
+ * percentage rather than in pixels it is also the same distance at every
+ * viewport, which the old `translateX(-1000px)` only was because it happened
+ * to be measured inside the SVG's own user space.
+ */
+.ribbonDrift {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 200%;
+  height: 100%;
+  will-change: transform;
+  animation: ribbonFlow var(--spin) linear var(--offset) infinite;
+  animation-direction: var(--direction);
+}
+
+/*
+ * The sway scales, and scaling is precisely what made this expensive while it
+ * lived on a `<g>` around a non-scaling stroke. Out here it scales a finished
+ * texture instead: six percent on the compositor, no outline re-derived.
+ *
+ * `transform-origin` is the top edge because an SVG group's default origin is
+ * its user-space origin, and this has to move the wave the same way the group
+ * did rather than merely a similar way.
+ */
+.ribbonSway {
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 0;
+  will-change: transform;
+  animation: ribbonSway var(--sway) ease-in-out infinite alternate;
+}
+
+/* Static, and that is its entire job. */
+.ribbonArt {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.ribbon,
+.ribbonGlow {
+  fill: none;
+  stroke-linecap: round;
+  /*
+   * Kept here, and only here. The ribbon viewBox is stretched non-uniformly to
+   * whatever width the screen is, so a user-unit stroke would be sub-pixel on
+   * a phone and heavy on a desktop. These groups only ever translate, and a
+   * translation does not change the scale a stroke is derived against, so the
+   * cost the rotating rings were paying does not apply.
+   */
+  vector-effect: non-scaling-stroke;
+}
+
+/*
+ * EMERALD BY DEFAULT. NEAR-WHITE ONLY IN FRONT.
+ *
+ * The reference's waves are green: it is the current of the room, and the
+ * room is emerald. Only the two ribbons that pass in FRONT of ORION -- the
+ * nearest thing to the viewer, and the only ones lit from the core rather
+ * than by it -- come up toward white, and `.ribbonsFront .ribbon` below is
+ * where that happens.
+ *
+ * This was previously keyed on the depth tier, which looked equivalent and
+ * was not: two of the five back-field ribbons are themselves `depth: 2`, so
+ * the two widest, brightest waves in the room -- the ones that sweep the
+ * whole frame -- kept the near-white stroke and read as grey against the
+ * green. Depth describes how far away a ribbon is; it does not describe
+ * which side of ORION it passes. Only the container knows that.
+ */
+.ribbon {
+  stroke: rgb(var(--accent) / 0.98);
+  stroke-width: var(--weight);
+  stroke-opacity: var(--alpha);
+}
+
+/* The bloom: wide, very faint, on the identical path, under the bright core. */
+.ribbonGlow {
+  stroke: rgb(var(--accent) / 1);
+  stroke-width: var(--weight);
+  stroke-opacity: calc(var(--alpha) * 0.18);
+}
+
+
+/*
+ * Depth, as weight -- not as blur.
+ *
+ * These groups carry 4300-unit paths and translate every single frame, so a
+ * filter on them is a full re-rasterisation of a very large area sixty times a
+ * second. It was the most expensive thing in the chamber by a distance.
+ *
+ * A hairline reads as out of focus when it is wider and fainter, which is what
+ * the far tiers now get, and the near tier gets its bloom from a second wide
+ * low-opacity stroke drawn under the bright one (see `.ribbonGlow`) rather
+ * than from a drop-shadow. Same three-plane depth, no per-frame paint.
+ */
+/*
+ * Depth, as light. The near tier leads and the far tiers are genuinely
+ * distant rather than slightly dimmer -- at 0.5/0.78/1 the three read as one
+ * bundle of lines at one distance, which is what made the waves feel like
+ * wallpaper behind the core instead of a current running through the room.
+ */
+.ribbonDrift[data-depth="0"] {
+  opacity: 0.44;
+}
+
+.ribbonDrift[data-depth="1"] {
+  opacity: 0.74;
+}
+
+/* ---------------------------------------------------------- foreground --- */
+
+/*
+ * The one layer in front of ORION.
+ *
+ * `.chamber` is behind the composition, which is right for a room and wrong
+ * for a body: with nothing ever crossing it, the core reads as the front layer
+ * of a flat stack. Two of the back field's own ribbons drawn OVER the sphere
+ * gives the eye an occlusion to read, and the core stops sitting on the field
+ * and starts sitting in it.
+ *
+ * IT CANNOT REACH THE TEXT AND IT CANNOT BE CLICKED. The band is placed
+ * against the core's own axis and its mask is gone by the time it gets
+ * anywhere near where ORION speaks, so a reply is never crossed by a moving
+ * line; `pointer-events: none` on both elements keeps the command channel
+ * underneath fully operable.
+ */
+.foreground {
+  --axis-y: 40%;
+  --accent: var(--orion-accent-rgb, 46 172 118);
+
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  /*
+   * NO OPACITY ON THIS ELEMENT. It is a full-viewport box wrapping a layer
+   * whose children animate, and any opacity below 1 here forces the whole
+   * front field into its own render surface for the compositor to blend every
+   * frame. It measured: idle p95 7.1ms -> 13.8ms and listening long frames
+   * 5.8% -> 9.2% for one property. The energy lives on `.ribbonsFront`
+   * instead, which already had an opacity and so already had the surface.
+   */
+  pointer-events: none;
+}
+
+/*
+ * The nearest thing to the viewer answers loudest.
+ *
+ * This is the only layer in front of ORION, so it is the one that says how
+ * much energy is actually in the room. It steps back while ORION is thinking
+ * -- concentration is inward -- and comes up while ORION speaks, which is the
+ * whole outward gesture of the composition in one property.
+ */
+.foreground[data-state="listening"] {
+  --front-energy: 0.95;
+}
+
+.foreground[data-state="thinking"] {
+  --front-energy: 0.6;
+}
+
+.foreground[data-state="speaking"] {
+  --front-energy: 1;
+}
+
+.ribbonsFront {
+  position: absolute;
+  top: calc(var(--axis-y) - 15%);
+  left: -6%;
+  width: 112%;
+  height: 30%;
+  /*
+   * The nearest thing to the viewer answers loudest: this is the only layer
+   * in front of ORION, so it is the one that says how much energy is actually
+   * in the room. It steps back while ORION is thinking -- concentration is
+   * inward -- and comes up while ORION speaks.
+   */
+  opacity: var(--front-energy, 0.88);
+  transition: opacity 1400ms cubic-bezier(0.22, 1, 0.36, 1);
+  overflow: hidden;
+  /*
+   * Three constraints in one pair of masks: end before the frame edge, gather
+   * on the core, and be completely gone above the speaking band. The vertical
+   * fade is the one that matters -- it is what makes a bright moving line in
+   * front of the composition safe to have at all.
+   */
+  -webkit-mask-image:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(0, 0, 0, 0.4) 10%,
+      #000 30%,
+      #000 70%,
+      rgba(0, 0, 0, 0.4) 90%,
+      transparent 100%
+    ),
+    linear-gradient(180deg, transparent 0%, #000 26%, #000 62%, transparent 96%);
+  mask-image:
+    linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(0, 0, 0, 0.4) 10%,
+      #000 30%,
+      #000 70%,
+      rgba(0, 0, 0, 0.4) 90%,
+      transparent 100%
+    ),
+    linear-gradient(180deg, transparent 0%, #000 26%, #000 62%, transparent 96%);
+  -webkit-mask-composite: source-in, source-over;
+  mask-composite: intersect, add;
+  pointer-events: none;
+}
+
+/* In front, so it carries the bloom that says it is the nearest thing here. */
+/*
+ * The front pass carried a pair of drop-shadows, which is a re-rasterisation of
+ * a four-thousand-unit path on every frame it moves. It was the last animated
+ * filter in the chamber and the reason SPEAKING still dropped frames after the
+ * blurs were gone. It gets its bloom the way the back field does now.
+ */
+.ribbonsFront .ribbon {
+  stroke: rgb(var(--orion-hot-rgb, 214 255 235) / 0.85);
+  stroke-opacity: calc(var(--alpha) * 0.9);
+  stroke-width: calc(var(--weight) * 0.8);
+}
+
+.ribbonsFront .ribbonGlow {
+  stroke: rgb(var(--accent) / 1);
+  stroke-opacity: calc(var(--alpha) * 0.22);
+  stroke-width: calc(var(--weight) * 1.35);
+}
+
+/* ------------------------------------------------- intelligence field --- */
+
+/*
+ * Nodes standing off in the room, and the signals that travel between them.
+ *
+ * BLOCKCHAIN-INSPIRED, NOT CRYPTO-BRANDED. Hexagon outlines at a few percent
+ * opacity with a point at the centre. No chain, no cube, no coin, no gold, no
+ * label, no count. The geometry is a hint that ORION's thinking has structure;
+ * the restraint is what keeps it from looking like a token launch.
+ *
+ * A signal is a point running the length of an edge, animated with
+ * `transform` between the two endpoints -- exact for a straight line, and it
+ * stays on the compositor where a `stroke-dashoffset` sweep would not.
+ */
+.network {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.42;
+  /*
+   * The graph leans in when ORION is working -- but only then.
+   *
+   * A `transform` declared here would apply in every state including idle,
+   * and a transform on a full-viewport element whose children animate gives
+   * the compositor a second full-viewport surface to blend on every frame for
+   * a gesture that is not happening. Idle is the state the interface sits in,
+   * so idle pays nothing: the scale is written by the three state rules
+   * below, and the transition still carries it in and out.
+   */
+  transition:
+    opacity 1400ms ease,
+    transform 1600ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.link {
+  animation: linkLife var(--life) ease-in-out var(--life-offset) infinite;
+}
+
+.linkLine {
+  stroke: rgb(var(--accent) / 0.9);
+  stroke-width: 0.9;
+  stroke-opacity: calc(var(--alpha) * 1.2);
+  /* Dotted, like the reference: a run of packets, not a drawn line. */
+  stroke-dasharray: 2.5 4;
+  stroke-linecap: round;
+}
+
+.signal {
+  fill: #dcffee;
+  opacity: 0;
+  animation: signalRun var(--spin) cubic-bezier(0.42, 0, 0.58, 1) var(--offset) infinite;
+}
+
+/*
+ * The FIELD breathes, not the node.
+ *
+ * Every node used to scale on its own clock, and because the shells carried
+ * `non-scaling-stroke` that scale re-derived the hexagon outline on every
+ * frame -- fifty-two elements doing geometry work sixty times a second, for
+ * the largest single block of animations on screen. Three group opacity
+ * pulses read the same and cost nothing.
+ */
+.nodeField {
+  animation: fieldBreathe var(--breathe) ease-in-out var(--offset) infinite;
+}
+
+.nodeField[data-depth="0"] {
+  --breathe: 23s;
+  --offset: -3s;
+}
+
+.nodeField[data-depth="1"] {
+  --breathe: 31s;
+  --offset: -17s;
+}
+
+.nodeField[data-depth="2"] {
+  --breathe: 19s;
+  --offset: -9s;
+}
+
+.nodeShell {
+  fill: none;
+  stroke: rgb(var(--accent) / 0.9);
+  stroke-width: 1.25;
+  stroke-opacity: calc(var(--alpha) * 1.3);
+}
+
+.nodeCube {
+  fill: none;
+  stroke: rgb(var(--accent) / 1);
+  stroke-width: 1;
+  stroke-opacity: calc(var(--alpha) * 1.1);
+  stroke-linecap: round;
+}
+
+.node[data-depth="0"] {
+  opacity: 0.3;
+}
+
+.node[data-depth="1"] {
+  opacity: 0.62;
+}
+
+.node[data-depth="2"] {
+  opacity: 1;
+}
+
+.networkEdges {
+  /* Grouping only: the edges paint under every node rather than over the one
+     they happen to follow in document order. */
+  isolation: isolate;
+}
+
+/* ------------------------------------------------------------- falloff --- */
+
+/* The room ends softly rather than at the window edge. */
+.falloff {
+  position: absolute;
+  inset: 0;
+  /*
+   * Four stops rather than three, and the last two do the work.
+   *
+   * The room used to end in a gentle grey ramp, which is a vignette; this
+   * closes to near-black well before the frame, which is a room that
+   * genuinely runs out of light. It is also what finally makes the corners
+   * stop competing with the middle -- the single cheapest way to buy focus on
+   * a composition this wide.
+   */
+  background: radial-gradient(
+    118% 100% at 50% var(--axis-y),
+    transparent 24%,
+    rgba(0, 3, 2, 0.3) 56%,
+    rgba(0, 2, 1, 0.78) 82%,
+    rgba(0, 1, 1, 0.97) 100%
+  );
+  transition: opacity 1400ms ease;
+}
+
+/* --------------------------------------------------------------- state --- */
+
+/*
+ * The room responds, and it does so differently from the core rather than
+ * doing the same thing louder. Listening opens it out; thinking closes it in
+ * and brings the network and the waves up, because that is when ORION's
+ * structure is actually doing something; speaking is the warmest and the
+ * smoothest it gets.
+ *
+ * Opacity and transform only -- nothing here can move an element of layout.
+ */
+.chamber[data-state="listening"] .ambient {
+  opacity: 0.98;
+  transform: scale(1.05);
+}
+
+.chamber[data-state="listening"] .ribbons {
+  opacity: 1;
+}
+
+.chamber[data-state="listening"] .mote {
+  opacity: calc(var(--alpha) * 0.95);
+}
+
+/* Receptive: the room opens a little and the graph stands back. */
+.chamber[data-state="listening"] .network {
+  transform: scale(1.02);
+  opacity: 0.4;
+}
+
+.chamber[data-state="listening"] .horizonGlow {
+  opacity: 0.52;
+}
+
+.chamber[data-state="thinking"] .ambient {
+  opacity: 0.88;
+  transform: scale(0.96);
+}
+
+/*
+ * Computing: the field draws in.
+ *
+ * The ambient lobe contracts, the graph leans toward the core and comes up
+ * out of the dark, the far structure steps back, and the room closes. Every
+ * one of those is the same gesture read at a different distance, which is
+ * what makes THINKING feel like concentration rather than like a brightness
+ * change.
+ */
+.chamber[data-state="thinking"] .network {
+  transform: scale(0.975);
+  opacity: 0.92;
+}
+
+.chamber[data-state="thinking"] .ribbons {
+  opacity: 1;
+}
+
+.chamber[data-state="thinking"] .falloff {
+  opacity: 1.15;
+}
+
+.chamber[data-state="thinking"] .shaft {
+  /* The distance recedes while the near field concentrates. */
+  opacity: calc(var(--alpha) * 0.75);
+}
+
+.chamber[data-state="thinking"] .mote {
+  opacity: calc(var(--alpha) * 0.7);
+}
+
+.chamber[data-state="thinking"] .horizonGlow {
+  opacity: 0.26;
+}
+
+.chamber[data-state="speaking"] .ambient {
+  opacity: 1;
+  transform: scale(1.03);
+}
+
+.chamber[data-state="speaking"] .column {
+  opacity: 0.78;
+}
+
+.chamber[data-state="speaking"] .pool {
+  opacity: 0.9;
+}
+
+.chamber[data-state="speaking"] .horizonGlow {
+  opacity: 0.72;
+}
+
+/* Expressive: the waves carry it out and the graph settles. */
+.chamber[data-state="speaking"] .ribbons {
+  opacity: 1;
+}
+
+.chamber[data-state="speaking"] .network {
+  transform: scale(1.01);
+  opacity: 0.46;
+}
+
+/* ----------------------------------------------------------- keyframes --- */
+
+@keyframes fieldDrift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(1.6%, -1.4%, 0) scale(1.06);
+  }
+}
+
+@keyframes shaftLean {
+  from {
+    transform: translate3d(0, 0, 0) rotate(-1.2deg) scaleY(0.92);
+    opacity: var(--alpha);
+  }
+  to {
+    transform: translate3d(2.5%, 0, 0) rotate(1.6deg) scaleY(1.08);
+    opacity: calc(var(--alpha) * 1.7);
+  }
+}
+
+/* One transform per plane. Near planes travel further, which is parallax. */
+@keyframes planeDrift {
+  from {
+    transform: translate3d(calc(var(--drift) * -1), calc(var(--drift) * 0.6), 0);
+  }
+  to {
+    transform: translate3d(var(--drift), calc(var(--drift) * -0.6), 0);
+  }
+}
+
+@keyframes columnBreath {
+  0%,
+  100% {
+    transform: translateX(-50%) scaleY(0.94) scaleX(0.9);
+    opacity: 0.42;
+  }
+  50% {
+    transform: translateX(-50%) scaleY(1.06) scaleX(1.1);
+    opacity: 0.62;
+  }
+}
+
+@keyframes poolDrift {
+  from {
+    transform: translateX(-50%) scale(0.96);
+  }
+  to {
+    transform: translateX(-52%) scale(1.07);
+  }
+}
+
+/* Slow outward swell. The floor responds to the light rather than sitting
+   under it. */
+/*
+ * Opacity, not stroke-opacity.
+ *
+ * A stroke paint property changing every frame repaints the ring; the same
+ * value on the element composites. Identical on screen, free instead of not.
+ */
+@keyframes floorSwell {
+  0%,
+  100% {
+    transform: scale(0.94);
+    opacity: 0.62;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+}
+
+/* -50% of a 200%-wide lane is the 1000 user units the group used to travel. */
+@keyframes ribbonFlow {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+/* 2.25% of a 400-unit box is the same 9 user units, at every viewport. */
+@keyframes ribbonSway {
+  from {
+    transform: translate3d(0, -2.25%, 0) scaleY(0.94);
+  }
+  to {
+    transform: translate3d(0, 2.25%, 0) scaleY(1.06);
+  }
+}
+
+/* A connection that comes and goes. The graph is never quite the graph it
+   was a moment ago, which is what stops it reading as a diagram. */
+@keyframes linkLife {
+  0%,
+  100% {
+    opacity: 0.14;
+  }
+  22% {
+    opacity: 1;
+  }
+  63% {
+    opacity: 0.5;
+  }
+}
+
+/*
+ * Parked for most of the cycle, then a fast run. A signal on every edge all
+ * the time is a loading animation; a signal that is mostly not there and then
+ * suddenly is reads as traffic.
+ */
+@keyframes signalRun {
+  0%,
+  52% {
+    transform: translate(calc(var(--x1) * 1px), calc(var(--y1) * 1px));
+    opacity: 0;
+  }
+  58% {
+    opacity: 0.95;
+  }
+  94% {
+    opacity: 0.8;
+  }
+  100% {
+    transform: translate(calc(var(--x2) * 1px), calc(var(--y2) * 1px));
+    opacity: 0;
+  }
+}
+
+/* Opacity only, on a whole plane, over a third of a minute. */
+@keyframes fieldBreathe {
+  0%,
+  100% {
+    opacity: 0.62;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ------------------------------------------------------------ responsive - */
+
+/*
+ * The room is one composition at every size, so there are no placement
+ * breakpoints -- only adjustments to how much of it is in frame.
+ *
+ * The network is the one layer that genuinely needs help on a narrow screen.
+ * Its viewBox is landscape and it is fitted rather than cropped, so on a
+ * phone in portrait the whole graph would be squeezed into a band across the
+ * middle, right on top of the core. Scaling it up pushes the nodes back out
+ * to the edges where they belong, and dropping the opacity keeps them reading
+ * as distant structure rather than as clutter around ORION's head.
+ */
+@media (max-width: 720px) {
+  .chamber,
+  .foreground {
+    /* The narrow composition sits a little higher again than the desktop's. */
+    --axis-y: 42%;
+  }
+
+  /* A phone has no room for a band in front of the core as well as behind it. */
+  .ribbonsFront {
+    opacity: 0.5;
+  }
+
+  .network {
+    opacity: 0.42;
+    transform: scale(2.1);
+  }
+
+  .chamber[data-state="thinking"] .network {
+    opacity: 0.62;
+  }
+
+  .ribbons {
+    top: calc(var(--axis-y) - 20%);
+    height: 40%;
+  }
+}
+
+/* A short viewport has no room for a floor: the composition already reaches
+   the bottom edge, so the plane is pulled in rather than cropped. */
+@media (max-height: 620px) {
+  .chamber,
+  .foreground {
+    --axis-y: 37%;
+  }
+
+  .floor {
+    top: calc(var(--axis-y) + 14%);
+  }
+
+  .ribbons {
+    top: calc(var(--axis-y) - 22%);
+    height: 44%;
+  }
+
+  .shaft {
+    opacity: calc(var(--alpha) * 0.7);
+  }
+}
+
+/* -------------------------------------------------------- reduced motion - */
+
+/*
+ * The room holds on a settled frame rather than disappearing. Every state
+ * cross-fade below stays, because those carry information -- what ORION is
+ * doing -- and removing them would take away meaning rather than motion.
+ * Everything that only moves, stops.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .shaft,
+  .dustPlane,
+  .nodeField,
+  .counterLight,
+  .ambient,
+  .column,
+  .pool,
+  .floorRing,
+  .ribbonDrift,
+  .ribbonSway,
+  .ribbonsFront .ribbonDrift,
+  .link,
+  .signal {
+    animation: none;
+  }
+
+  /* A parked signal is an unexplained dot on a line, so it goes entirely. */
+  .signal {
+    opacity: 0;
+  }
+
+  /* The graph stops appearing and disappearing, and simply is. */
+  .link {
+    opacity: 0.75;
+  }
+
+  .ambient,
+  .chamber[data-state="listening"] .ambient,
+  .chamber[data-state="thinking"] .ambient,
+  .chamber[data-state="speaking"] .ambient {
+    transform: none;
+  }
+
+  /*
+   * The graph's lean is the same kind of thing as the ambient scale: a
+   * gesture rather than a fact, so it goes with it. The brightness change
+   * stays, because that is what says ORION is working.
+   */
+  .chamber[data-state="listening"] .network,
+  .chamber[data-state="thinking"] .network,
+  .chamber[data-state="speaking"] .network {
+    transform: none;
+  }
+}

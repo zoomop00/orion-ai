@@ -20,9 +20,9 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from orion.analysis.evidence import Evidence, build_evidence
+from orion.analysis.evidence import Evidence, build_evidence, evidence_fingerprint
 from orion.decision.engine import decide
-from orion.decision.schemas import ProposedDecision
+from orion.decision.schemas import ProposedDecision, decision_fingerprint
 from orion.memory.engine import create_memory_engine
 from orion.memory.journal import DecisionJournal
 from orion.memory.portfolio_store import SqlitePortfolioStore
@@ -40,6 +40,7 @@ from orion.paper.store import (
     PortfolioStore,
     PortfolioStoreError,
 )
+from orion.provenance import canonical_hash
 from orion.reasoning.schemas import ReasoningOutput
 from orion.risk.guardian import review
 from orion.risk.policy import KillSwitchState, RiskPolicy
@@ -55,6 +56,14 @@ from ..orchestrator.conftest import (
 )
 
 SYMBOL = "XAUUSD"
+#: The four chain writes `_persist` makes before a fill, in the order it makes
+#: them: each record is written only after everything it references is stored.
+_CHAIN_CALLS = [
+    "record_evidence",
+    "record_reasoning",
+    "record_decision",
+    "record_verdict",
+]
 START = LAST_BAR_TIME
 POLICY = PaperExecutionPolicy()
 RISK_FRACTION = 0.01
@@ -125,25 +134,60 @@ def fresh_account(balance: float = 100_000.0) -> PortfolioState:
 
 
 class RecordingJournal:
-    """A `JournalWriter` that records the order of what it was asked to do."""
+    """A `JournalWriter` that records the order of what it was asked to do.
 
-    def __init__(self, *, calls: list[str], fail: bool = False) -> None:
+    `fail_on` names the one method that raises, so a test can fail the journal
+    part-way through the chain rather than only at the first call -- which is
+    how the "a partial chain is never reported as written" guarantee is
+    actually exercised. `fail=True` keeps its old meaning of "every write
+    fails".
+    """
+
+    def __init__(self, *, calls: list[str], fail: bool = False, fail_on: str | None = None) -> None:
         self.calls = calls
         self.fail = fail
+        self.fail_on = fail_on
+        self.evidence: list[Evidence] = []
+        self.reasoning: list[ReasoningOutput] = []
+        self.decisions: list[ProposedDecision] = []
+        self.verdicts: list[RiskVerdict] = []
         self.fills: list[Fill] = []
         self.closed: list[ClosedPosition] = []
+        self.recorded_at: list[datetime] = []
+
+    def _enter(self, method: str, recorded_at: datetime) -> None:
+        self.calls.append(method)
+        self.recorded_at.append(recorded_at)
+        if self.fail or self.fail_on == method:
+            raise RuntimeError("journal is down")
+
+    def record_evidence(self, evidence: Evidence, *, recorded_at: datetime) -> str:
+        self._enter("record_evidence", recorded_at)
+        self.evidence.append(evidence)
+        return "evidence-fingerprint"
+
+    def record_reasoning(self, reasoning: ReasoningOutput, *, recorded_at: datetime) -> str:
+        self._enter("record_reasoning", recorded_at)
+        self.reasoning.append(reasoning)
+        return "reasoning-fingerprint"
+
+    def record_decision(self, decision: ProposedDecision, *, recorded_at: datetime) -> str:
+        self._enter("record_decision", recorded_at)
+        self.decisions.append(decision)
+        return "decision-fingerprint"
+
+    def record_verdict(self, verdict: RiskVerdict, *, recorded_at: datetime) -> str:
+        self._enter("record_verdict", recorded_at)
+        self.verdicts.append(verdict)
+        return "verdict-fingerprint"
 
     def record_fill(self, fill: Fill, *, recorded_at: datetime) -> str:
-        self.calls.append("record_fill")
-        if self.fail:
-            raise RuntimeError("journal is down")
+        self._enter("record_fill", recorded_at)
         self.fills.append(fill)
         return "fill-fingerprint"
 
     def record_closed_position(self, closed: ClosedPosition, *, recorded_at: datetime) -> str:
-        self.calls.append("record_closed_position")
-        if self.fail:
-            raise RuntimeError("journal is down")
+        self._enter("record_closed_position", recorded_at)
         self.closed.append(closed)
         return "closed-fingerprint"
 
@@ -189,6 +233,7 @@ def cycle(
     return run_cycle(
         decision=decision,
         evidence=evidence,
+        reasoning=reasoning,
         verdict=verdict if use_verdict else None,
         store=store,
         journal=journal,
@@ -259,6 +304,7 @@ class TestTheRiskGuardianHasAuthority:
         result = run_cycle(
             decision=decision,
             evidence=evidence,
+            reasoning=reasoning,
             verdict=tampered,
             store=store,
             journal=journal,
@@ -285,7 +331,7 @@ class TestPersistenceOrdering:
         result = cycle(store=store, journal=journal)
 
         assert result.outcome is CycleOutcome.EXECUTED
-        assert calls == ["load", "load", "save", "record_fill"]
+        assert calls == ["load", "load", "save", *_CHAIN_CALLS, "record_fill"]
         assert calls.index("save") < calls.index("record_fill")
 
     def test_a_failed_save_never_reaches_the_journal(self) -> None:
@@ -316,7 +362,43 @@ class TestPersistenceOrdering:
         assert result.fill is not None  # the trade genuinely happened
         assert result.journal_fingerprint is None
         assert result.account_was_written
-        assert calls == ["load", "load", "save", "record_fill"]
+        # A journal that fails on every write now fails on the *first* chain
+        # record, so the fill is never even attempted. The guarantee under test
+        # is unchanged: the account was saved before any of this, and a failed
+        # journal is reported rather than rolled back.
+        assert calls == ["load", "load", "save", "record_evidence"]
+        assert result.audit_chain_fingerprints == ()
+
+    def test_a_chain_that_fails_part_way_is_never_reported_as_written(self) -> None:
+        """The honest half of `JOURNAL_UNAVAILABLE`: some of the chain went in.
+
+        `record_evidence` and `record_reasoning` succeeded and are durable --
+        that cannot be undone, and re-writing them would be a second write that
+        could itself fail. What must not happen is claiming the audit record
+        exists, so `audit_chain_fingerprints` stays empty rather than reporting
+        the two that landed. Replaying the cycle re-writes all six
+        content-addressed records and the two already stored are no-ops.
+        """
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls, fail_on="record_decision")
+
+        result = cycle(store=store, journal=journal)
+
+        assert result.outcome is CycleOutcome.JOURNAL_UNAVAILABLE
+        assert result.account_was_written
+        assert result.audit_chain_fingerprints == ()
+        assert result.journal_fingerprint is None
+        assert calls == [
+            "load",
+            "load",
+            "save",
+            "record_evidence",
+            "record_reasoning",
+            "record_decision",
+        ]
+        assert "record_fill" not in calls
+        assert journal.fills == []
 
     def test_an_unreadable_account_does_nothing_at_all(self) -> None:
         class UnreadableStore(RecordingStore):
@@ -335,6 +417,7 @@ class TestPersistenceOrdering:
         result = run_cycle(
             decision=decision,
             evidence=evidence,
+            reasoning=reasoning,
             verdict=None,
             store=store,
             journal=journal,
@@ -370,6 +453,7 @@ class TestTheReviewedAccountIsTheExecutedAccount:
         result = run_cycle(
             decision=decision,
             evidence=evidence,
+            reasoning=reasoning,
             verdict=verdict,
             store=store,
             journal=journal,
@@ -520,6 +604,250 @@ class TestJournalReplayIsIdempotent:
             engine.dispose()
 
 
+# ------------------------------------------------ the chain that authorised it
+
+
+class TestTheAuditChainIsJournaled:
+    """Phase 2b journaled a `Fill` and nothing that explained it.
+
+    `orion.reflection.analysis.reflect_on_closed_position` walks `ClosedPosition
+    -> RiskVerdict -> ProposedDecision` and fails closed on a missing link, so
+    until this chain was written Reflection could not run on a single trade this
+    system had actually made. These are the tests that keep it written.
+    """
+
+    def test_an_executed_cycle_journals_the_four_records_that_authorised_it(self) -> None:
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        result = cycle(store=store, journal=journal)
+
+        assert result.outcome is CycleOutcome.EXECUTED
+        assert len(journal.evidence) == 1
+        assert len(journal.reasoning) == 1
+        assert len(journal.decisions) == 1
+        assert len(journal.verdicts) == 1
+        assert len(result.audit_chain_fingerprints) == 4
+
+    def test_the_chain_is_written_leaf_first_and_before_the_fill(self) -> None:
+        """THE ORDER IS THE CONTRACT, not an implementation detail.
+
+        Each record references only records already stored, so an interrupted
+        write leaves a shorter chain rather than a broken one: at no point does
+        a journaled record point at a fingerprint the journal does not hold.
+        Asserted as a recorded call sequence, not inferred from reading the code.
+        """
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        cycle(store=store, journal=journal)
+
+        assert calls == ["load", "load", "save", *_CHAIN_CALLS, "record_fill"]
+
+    def test_the_journaled_objects_are_the_ones_the_engines_produced(self) -> None:
+        """By identity, not equality: nothing is rebuilt, copied or re-derived
+        on its way to the journal."""
+        calls: list[str] = []
+        state = fresh_account()
+        store = RecordingStore(state, calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        evidence = make_evidence()
+        reasoning = make_reasoning(evidence)
+        decision = make_decision(evidence, reasoning)
+        verdict = make_verdict(decision, evidence, state)
+
+        result = run_cycle(
+            decision=decision,
+            evidence=evidence,
+            reasoning=reasoning,
+            verdict=verdict,
+            store=store,
+            journal=journal,
+            policy=POLICY,
+            risk_per_trade_fraction=RISK_FRACTION,
+            now=NOW,
+        )
+
+        assert journal.evidence[0] is evidence
+        assert journal.reasoning[0] is reasoning
+        assert journal.decisions[0] is decision
+        assert journal.verdicts[0] is verdict
+        assert result.fill is not None
+        assert journal.fills[0] is result.fill
+
+    def test_the_chain_links_up_by_fingerprint(self) -> None:
+        """The reason the chain is worth writing: the four records reference
+        each other, and `orion.reflection` walks exactly those references."""
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        result = cycle(store=store, journal=journal)
+
+        decision = journal.decisions[0]
+        verdict = journal.verdicts[0]
+        assert verdict.decision_ref.content_hash == decision_fingerprint(decision)
+        assert decision.evidence_ref.content_hash == evidence_fingerprint(journal.evidence[0])
+        assert decision.reasoning_ref.content_hash == canonical_hash(journal.reasoning[0])
+        assert result.fill is not None
+        assert result.fill.risk_verdict_fingerprint == risk_verdict_fingerprint(verdict)
+
+    def test_every_record_carries_the_same_recorded_at(self) -> None:
+        """One cycle is one instant. `recorded_at` is the caller's `now`,
+        never `datetime.now()` taken afresh per write."""
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        cycle(store=store, journal=journal)
+
+        assert journal.recorded_at == [NOW] * 5
+
+    def test_a_veto_still_journals_absolutely_nothing(self) -> None:
+        """Deliberate scope: the chain is written on the executed path only.
+
+        A refused proposal is not journaled, so a scheduled `orion paper` does
+        not accumulate a chain per invocation for trades that never happened.
+        This is the assertion that stops that decision drifting silently.
+        """
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+
+        result = cycle(
+            store=store,
+            journal=journal,
+            policy=RiskPolicy(kill_switch=KillSwitchState.ENGAGED),
+        )
+
+        assert result.outcome is CycleOutcome.VETOED
+
+        # Two loads: the harness reads the account to build a real verdict
+        # against it, then `run_cycle` reads it again. No write of any kind.
+        assert calls == ["load", "load"]
+        assert result.audit_chain_fingerprints == ()
+        assert journal.evidence == []
+        assert journal.reasoning == []
+        assert journal.decisions == []
+        assert journal.verdicts == []
+
+    def test_closing_a_position_writes_no_second_chain(self) -> None:
+        """The records that authorised a position were journaled when it was
+        opened. The closing cycle's own decision and verdict did not close
+        anything -- `resolve_stop_take_profit` did, from the price -- so
+        journaling them here would attribute the close to a proposal that had
+        no part in it."""
+        calls: list[str] = []
+        store = RecordingStore(fresh_account(), calls=calls)
+        journal = RecordingJournal(calls=calls)
+        opened = cycle(store=store, journal=journal)
+        assert opened.outcome is CycleOutcome.EXECUTED
+        assert opened.portfolio is not None
+        held = opened.portfolio.open_position
+        assert held is not None
+        calls.clear()
+
+        result = cycle(
+            store=store,
+            journal=journal,
+            evidence=make_evidence(last_close=held.take_profit + 1.0),
+            use_verdict=False,
+        )
+
+        assert result.outcome is CycleOutcome.CLOSED
+        assert calls == ["load", "save", "record_closed_position"]
+        assert result.audit_chain_fingerprints == ()
+        assert len(journal.verdicts) == 1  # still just the opening one
+
+    def test_a_real_journal_stores_the_chain_and_reflection_can_walk_it(self, tmp_path) -> None:
+        """END TO END, ON DISK. Not a recorder: a real `SqliteDecisionJournal`,
+        a real open-then-close, and the real `orion.reflection` reading it back.
+
+        This is the whole milestone in one test. Before this phase the same
+        sequence produced a `ClosedPosition` whose verdict was in no journal, so
+        `reflect_on_closed_position` raised on an incomplete chain.
+        """
+        from orion.reflection.analysis import reflect_on_closed_position
+
+        engine = create_memory_engine(str(tmp_path / "acct.db"))
+        try:
+            store = SqlitePortfolioStore(engine)
+            journal = SqliteDecisionJournal(engine)
+            store.initialize(fresh_account())
+
+            opened = cycle(store=store, journal=journal)
+            assert opened.outcome is CycleOutcome.EXECUTED
+            assert opened.portfolio is not None
+            held = opened.portfolio.open_position
+            assert held is not None
+
+            closed = cycle(
+                store=store,
+                journal=journal,
+                evidence=make_evidence(last_close=held.take_profit + 1.0),
+                use_verdict=False,
+            )
+            assert closed.outcome is CycleOutcome.CLOSED
+            assert closed.closed_position is not None
+
+            reflection = reflect_on_closed_position(
+                journal, canonical_hash(closed.closed_position), now=NOW
+            )
+            assert reflection.close_reason is closed.closed_position.close_reason
+            assert reflection.realized_pnl == closed.closed_position.realized_pnl
+            # The opening Fill was matched, which only works because the fill
+            # and the verdict it references are both really in the journal.
+            assert opened.fill is not None
+            assert reflection.opening_fee == opened.fill.fee
+            assert reflection.predicted_stop_loss == held.stop_loss
+        finally:
+            engine.dispose()
+
+    def test_replaying_the_same_chain_adds_no_duplicate_rows(self, tmp_path) -> None:
+        """The crash window in `_persist` is recoverable only if replay is a
+        no-op. Every chain record is content-addressed, so re-writing an
+        identical one returns the same fingerprint and stores one row."""
+        engine = create_memory_engine(str(tmp_path / "acct.db"))
+        try:
+            journal = SqliteDecisionJournal(engine)
+            state = fresh_account()
+            store = SqlitePortfolioStore(engine)
+            store.initialize(state)
+
+            evidence = make_evidence()
+            reasoning = make_reasoning(evidence)
+            decision = make_decision(evidence, reasoning)
+            verdict = make_verdict(decision, evidence, state)
+
+            first = [
+                journal.record_evidence(evidence, recorded_at=NOW),
+                journal.record_reasoning(reasoning, recorded_at=NOW),
+                journal.record_decision(decision, recorded_at=NOW),
+                journal.record_verdict(verdict, recorded_at=NOW),
+            ]
+            result = run_cycle(
+                decision=decision,
+                evidence=evidence,
+                reasoning=reasoning,
+                verdict=verdict,
+                store=store,
+                journal=journal,
+                policy=POLICY,
+                risk_per_trade_fraction=RISK_FRACTION,
+                now=NOW,
+            )
+
+            assert result.outcome is CycleOutcome.EXECUTED
+            assert list(result.audit_chain_fingerprints) == first
+            assert journal.get_verdict(first[3]) == verdict
+            assert journal.get_decision(first[2]) == decision
+        finally:
+            engine.dispose()
+
+
 # ------------------------------------------------- the protocol is satisfied
 
 
@@ -542,11 +870,28 @@ class TestTheJournalProtocol:
         happens to be constructed here."""
         assert issubclass(DecisionJournal, JournalWriter)
 
-    def test_the_protocol_declares_only_what_the_session_needs(self) -> None:
-        """Narrower than `DecisionJournal` on purpose: this module writes fills
-        and closed positions, so it must not be able to write anything else."""
+    def test_the_protocol_declares_writes_and_only_writes(self) -> None:
+        """Phase 2b declared two methods, because a fill and a closed position
+        were all that phase produced. 2c journals the chain that authorised the
+        fill as well, so the restatement is now `DecisionJournal`'s full *write*
+        surface — and still not one read, update or delete. A forward cycle
+        appends what it did; reading history back is `orion.reflection`'s job,
+        and there is no method here through which this module could do it."""
         declared = {name for name in vars(JournalWriter) if not name.startswith("_")}
-        assert declared == {"record_fill", "record_closed_position"}
+        assert declared == {
+            "record_evidence",
+            "record_reasoning",
+            "record_decision",
+            "record_verdict",
+            # Mission 8 v2.2: the seventh record. Advisory evidence this module
+            # carries to the journal and never reads.
+            "record_thesis",
+            "record_fill",
+            "record_closed_position",
+        }
+        assert not any(
+            name.startswith(("get_", "list_", "update_", "delete_")) for name in declared
+        )
 
 
 # ------------------------------------------------------ nothing is invented
@@ -567,6 +912,7 @@ class TestNothingIsFabricated:
         result = run_cycle(
             decision=decision,
             evidence=evidence,
+            reasoning=reasoning,
             verdict=verdict,
             store=store,
             journal=journal,
@@ -604,6 +950,7 @@ class TestNothingIsFabricated:
         result = run_cycle(
             decision=decision,
             evidence=evidence,
+            reasoning=reasoning,
             verdict=verdict,
             store=store,
             journal=journal,

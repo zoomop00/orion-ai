@@ -53,6 +53,7 @@ from orion.decision.schemas import ProposedDecision
 from orion.paper.schemas import ClosedPosition, Fill
 from orion.reasoning.schemas import ReasoningOutput
 from orion.risk.schemas import RiskVerdict
+from orion.thesis.schemas import MarketThesis
 
 
 class DecisionJournalError(RuntimeError):
@@ -82,8 +83,8 @@ class DecisionJournalIntegrityError(DecisionJournalError):
 
 class DecisionJournal(ABC):
     """The append-only, content-addressed record of every Evidence /
-    ReasoningOutput / ProposedDecision / RiskVerdict / Fill / ClosedPosition
-    ORION has ever produced.
+    ReasoningOutput / ProposedDecision / RiskVerdict / MarketThesis / Fill /
+    ClosedPosition ORION has ever produced.
 
     Deliberately does not attempt to record `PortfolioState` — that is
     `orion.paper.store.PortfolioStore`'s job (see `orion.memory.
@@ -109,6 +110,22 @@ class DecisionJournal(ABC):
     @abstractmethod
     def record_verdict(self, verdict: RiskVerdict, *, recorded_at: datetime) -> str:
         """Persist `verdict`, returning its content fingerprint. Idempotent."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_thesis(self, thesis: MarketThesis, *, recorded_at: datetime) -> str:
+        """Persist `thesis`, returning its content fingerprint. Idempotent.
+
+        The seventh record, and the only one that references nothing else in
+        the journal. A `MarketThesis` is advisory evidence: it carries the
+        `analysis_id` the decision and the verdict also carry, which is what
+        makes it findable from them, but it holds no fingerprint of either and
+        so can be written before any of them exist.
+
+        `orion.thesis.schemas` is a deliberately separate package from
+        `orion.analysts`, which this one may not import — see that module's
+        docstring for why the schema moved rather than the wall.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -139,6 +156,11 @@ class DecisionJournal(ABC):
     @abstractmethod
     def get_verdict(self, fingerprint: str) -> RiskVerdict | None:
         """Return the RiskVerdict stored under `fingerprint`, or None if absent."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_thesis(self, fingerprint: str) -> MarketThesis | None:
+        """Return the MarketThesis stored under `fingerprint`, or None if absent."""
         raise NotImplementedError
 
     @abstractmethod
@@ -174,6 +196,21 @@ class DecisionJournal(ABC):
         (either bound optional), ordered by `reviewed_at` ascending, capped
         at `limit` if given. The mechanical "historical search" capability —
         no semantic/similarity search; see `docs/DECISIONS.md`."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_theses_by_analysis_id(self, analysis_id: str) -> tuple[MarketThesis, ...]:
+        """All MarketTheses recorded under `analysis_id`, oldest-recorded first.
+
+        A tuple, not `MarketThesis | None`, and for the established reason:
+        `analysis_id` is minted from the symbol, the timeframe and the last
+        bar's timestamp, so two analyses inside the same bar share one — and
+        each can legitimately form its own thesis at a different `formed_at`.
+        `list_verdicts_by_analysis_id` and `list_decisions_by_analysis_id`
+        return tuples for exactly this reason; nothing in this interface
+        assumes one record per analysis, and a caller that needs exactly one
+        must say what it does about more.
+        """
         raise NotImplementedError
 
     @abstractmethod

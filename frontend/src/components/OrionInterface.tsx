@@ -7,6 +7,7 @@ import { ORION_VISUAL_STATES, nextInSequence, profileFor } from "@/state/orion-v
 
 import { OrionAnalysisDeck } from "./OrionAnalysisDeck";
 import { OrionCore } from "./OrionCore";
+import { OrionField } from "./OrionField";
 import styles from "./OrionInterface.module.css";
 
 /**
@@ -121,26 +122,24 @@ export function OrionInterface() {
       data-testid="orion-interface"
     >
       {/*
-        The environment, in four layers and no more, all centred on the same
-        axis as the core: the light ORION casts into the room, a far
-        counter-light so the space has more than one source, a very sparse
-        depth field, and the falloff at the edges. There is no horizon rule,
-        no corner bracket and no measurement chrome -- those read as HUD
-        decoration, which is the opposite of atmosphere.
+        The chamber ORION occupies. Nine environmental layers, all centred on
+        the same axis as the core, all absolutely positioned behind the
+        composition and all `aria-hidden` -- it takes part in no layout
+        calculation and cannot move a pixel of one. See `OrionField`.
+
+        It replaced four flat gradients that had the same job and could not
+        do it: a light, a counter-light, a dot grid and a vignette make a dark
+        rectangle, and a dark rectangle is a page, not a place. The core was
+        never the problem; there was nothing for it to be inside.
       */}
-      <div className={styles.atmosphere} aria-hidden="true">
-        <div className={styles.depth} />
-        <div className={styles.ambient} />
-        <div className={styles.counterLight} />
-        <div className={styles.falloff} />
-      </div>
+      <OrionField state={visualState} />
 
       <header className={styles.header}>
         <div className={styles.identity}>
           <span className={styles.wordmark}>ORION</span>
           <span className={styles.tagline}>Autonomous Market Intelligence</span>
         </div>
-        <span className={styles.build}>Mission 10 &middot; Phase 6 &middot; spatial composition</span>
+        <span className={styles.build}>ORION // INTELLIGENCE CORE</span>
       </header>
 
       {/*
@@ -150,7 +149,12 @@ export function OrionInterface() {
       */}
       <div className={styles.field}>
         <div className={styles.coreZone}>
-          <OrionCore state={visualState} amplitude={amplitude ?? undefined} />
+          {/*
+            `amplitude` is a signal, not a number: the analyser writes the
+            live envelope straight onto the core's own element and this
+            component does not re-render for it. See `lib/amplitude-signal.ts`.
+          */}
+          <OrionCore state={visualState} amplitude={amplitude} />
         </div>
 
         {/*
