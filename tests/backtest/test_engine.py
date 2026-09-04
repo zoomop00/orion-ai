@@ -14,7 +14,7 @@ recorded `BacktestCycle`.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -23,6 +23,7 @@ from orion.backtest.data import InMemoryHistoricalBarSource
 from orion.backtest.engine import BacktestError, run_backtest
 from orion.backtest.schemas import BacktestResult
 from orion.data.models import OHLCVBar, Timeframe
+from orion.data.sessions import XAUUSD_WEEKLY, TradingSession
 from orion.decision.schemas import decision_fingerprint
 from orion.paper.policy import PaperExecutionPolicy
 from orion.paper.schemas import CloseReason
@@ -392,3 +393,99 @@ def test_no_reasoning_call_ever_sees_a_future_bar_index_via_bar_count() -> None:
             continue
         assert cycle.evidence.bar_count <= WINDOW_BARS
         assert cycle.evidence.bar_count <= i + 1
+
+
+# --- sessions: the engine forwards, and forwards only ---
+
+
+def _weekend_spanning_bars() -> list[OHLCVBar]:
+    """A real-shaped H1 XAUUSD week: bars up to the Friday 22:00 UTC close,
+    then the weekend hole, then bars from the Sunday 22:00 UTC open. Built
+    from `make_uptrend_bars` so every bar is a genuine, indicator-computable
+    bar -- the only irregularity is the closure itself."""
+    friday_close = datetime(2026, 1, 9, 22, 0, tzinfo=UTC)
+    before = make_uptrend_bars(60, start=friday_close - H1 * 60)
+    after = make_uptrend_bars(20, start=friday_close + H1 * 48, start_price=before[-1].close + 2.0)
+    return before + after
+
+
+def test_weekend_spanning_dataset_fails_closed_without_a_session() -> None:
+    # Unchanged default behavior, and the reason this phase exists: no real
+    # multi-week XAUUSD dataset could be backtested at all.
+    provider = AlwaysWaitReasoningProvider()
+    with pytest.raises(BacktestError, match="gap"):
+        _run(_weekend_spanning_bars(), reasoning_provider=provider, window_bars=50)
+    assert provider.calls == []
+
+
+def test_weekend_spanning_dataset_runs_when_the_session_is_declared() -> None:
+    bars = _weekend_spanning_bars()
+    provider = AlwaysWaitReasoningProvider()
+    source = InMemoryHistoricalBarSource(symbol=SYMBOL, timeframe=Timeframe.H1, bars=bars)
+    result = run_backtest(
+        data_source=source,
+        symbol=SYMBOL,
+        timeframe=Timeframe.H1,
+        start=bars[0].timestamp,
+        end=bars[-1].timestamp,
+        reasoning_provider=provider,
+        risk_policy=build_policy(),
+        paper_policy=ZERO_COST_POLICY,
+        starting_balance=100_000.0,
+        window_bars=50,
+        session=XAUUSD_WEEKLY,
+    )
+    # Every bar was processed, closure included -- the session changed what
+    # counts as valid data, not what the loop does with it.
+    assert len(result.equity_curve) == len(bars)
+    assert len(provider.calls) == len(bars)
+
+
+def test_a_session_does_not_forgive_a_mid_week_hole() -> None:
+    # Same session, a genuinely missing block inside the trading week.
+    bars = make_uptrend_bars(60)
+    gapped = bars[:30] + make_uptrend_bars(
+        30, start=bars[29].timestamp + H1 * 20, start_price=bars[29].close + 40.0
+    )
+    source = InMemoryHistoricalBarSource(symbol=SYMBOL, timeframe=Timeframe.H1, bars=gapped)
+    provider = AlwaysWaitReasoningProvider()
+    with pytest.raises(BacktestError, match="gap"):
+        run_backtest(
+            data_source=source,
+            symbol=SYMBOL,
+            timeframe=Timeframe.H1,
+            start=gapped[0].timestamp,
+            end=gapped[-1].timestamp,
+            reasoning_provider=provider,
+            risk_policy=build_policy(),
+            paper_policy=ZERO_COST_POLICY,
+            starting_balance=100_000.0,
+            window_bars=50,
+            session=XAUUSD_WEEKLY,
+        )
+    assert provider.calls == []
+
+
+def test_session_changes_nothing_on_a_dataset_that_was_already_valid() -> None:
+    # A contiguous dataset produces a byte-identical result with and without
+    # a session: the parameter is consulted only while classifying data
+    # quality, never inside the loop.
+    bars = make_uptrend_bars(120)
+    source = InMemoryHistoricalBarSource(symbol=SYMBOL, timeframe=Timeframe.H1, bars=bars)
+
+    def run(session: TradingSession | None) -> BacktestResult:
+        return run_backtest(
+            data_source=source,
+            symbol=SYMBOL,
+            timeframe=Timeframe.H1,
+            start=bars[0].timestamp,
+            end=bars[-1].timestamp,
+            reasoning_provider=FixedBuyReasoningProvider(),
+            risk_policy=build_policy(),
+            paper_policy=REAL_COST_POLICY,
+            starting_balance=100_000.0,
+            window_bars=WINDOW_BARS,
+            session=session,
+        )
+
+    assert run(None) == run(XAUUSD_WEEKLY)

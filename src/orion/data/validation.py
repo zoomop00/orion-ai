@@ -14,6 +14,7 @@ from enum import StrEnum
 from pydantic import BaseModel
 
 from orion.data.models import MarketSnapshot, Timeframe
+from orion.data.sessions import TradingSession
 
 TIMEFRAME_INTERVAL: dict[Timeframe, timedelta] = {
     Timeframe.M15: timedelta(minutes=15),
@@ -58,12 +59,26 @@ def validate_snapshot(
     now: datetime,
     max_staleness_bars: float = DEFAULT_MAX_STALENESS_BARS,
     gap_tolerance_bars: float = 1.5,
+    session: TradingSession | None = None,
 ) -> ValidationResult:
     """Classify data-quality issues in `snapshot`.
 
     `is_valid` is True only when zero issues are found — any single finding
     (stale, gapped, out of order, duplicated, or empty) is enough reason for
     the pipeline to refuse to reason over this snapshot.
+
+    `session` (default `None`, reproducing this function's previous behavior
+    exactly) declares a recurring weekly market closure — see `orion.data.
+    sessions`. It narrows the GAP check rather than loosening it: a gap wider
+    than `gap_tolerance_bars` is forgiven *only* when its two boundaries align
+    with the declared close and open, each within one bar interval. A
+    mid-session gap of identical duration, and a boundary-aligned gap that
+    runs past the declared open, both remain GAP findings.
+    `gap_tolerance_bars` itself is never adjusted by a session, here or by any
+    caller — widening it would blind the check to genuinely missing bars at
+    every timeframe, which is the failure a session exists to avoid.
+    Staleness, emptiness, ordering and duplicate detection are untouched by
+    `session`.
     """
     findings: list[ValidationFinding] = []
     bars = snapshot.bars
@@ -115,7 +130,12 @@ def validate_snapshot(
             )
             continue
         gap = bar.timestamp - prev.timestamp
-        if gap > interval * gap_tolerance_bars:
+        # `session is None` short-circuits first, so the no-session path is
+        # byte-identical to what this function did before sessions existed.
+        if gap > interval * gap_tolerance_bars and not (
+            session is not None
+            and session.is_expected_closure(prev.timestamp, bar.timestamp, interval)
+        ):
             findings.append(
                 ValidationFinding(
                     issue=DataQualityIssue.GAP,

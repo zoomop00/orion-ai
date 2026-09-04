@@ -5574,3 +5574,171 @@ nor `orion.paper` (`run_cycle`, `resolve_position`, `CycleOutcome`,
 `ClosedPosition`, `CloseReason` and the journal writer interfaces are all
 exactly as Phase 2 left them), nor `orion.orchestrator` schemas, nor any
 frontend file or dependency manifest.
+
+---
+
+## 2026-09-04 — Mission 6 Phase 2: session-aware gap validation, and the weekend that blocked every real dataset
+
+**`orion.backtest` shipped complete, tested, and unable to run on a single real
+week of gold.** `run_backtest` validates its whole fetched range once, up front,
+through `orion.data.validation.validate_snapshot`, whose `gap_tolerance_bars`
+defaults to `1.5`. XAUUSD closes for the weekend, so every real multi-week
+XAUUSD series contains a ~49-hour hole between two entirely healthy bars —
+wider than the tolerance at every timeframe. Verified against the real validator
+before any code was written: a 120-bar H1 series spanning one weekend produces
+`gap of 2 days, 1:00:00 between bar 119 and bar 120`, and `run_backtest` raises
+`BacktestError` before the first reasoning call. Sixty-seven Mission 6 tests
+passed and none of them caught it, because every fixture was a synthetic
+contiguous ramp. This phase removes that blocker and nothing else.
+
+**This is Mission 6, not Mission 10.** The engineering brief assigns Mission 10
+to the ORION Interface and this log already carries six Mission 10 phase entries
+for it; backtesting is Mission 6 in both documents. The work was originally
+proposed under a "Mission 10" heading and renumbered before implementation, so
+that a reader of this log never has to disambiguate two Mission 10s. The
+continuation is numbered from the 2026-08-24 Mission 6 entry, which is Phase 1
+and is not edited — this log is append-only.
+
+**M6-Q7 (session gaps), resolved: a declared weekly closure, matched at both
+boundaries.** Continuing the M6-Q1…Q5 numbering the original Mission 6 entry
+established. The new `orion.data.sessions.TradingSession` is a frozen, closed
+Pydantic model holding a recurring weekly close and open, each a
+`(calendar.Day, time)` pair in UTC. `calendar.Day` is reused rather than
+defining a parallel weekday enum: it is stdlib, it already agrees with
+`datetime.weekday()`, and a second enum that merely happens to agree today is
+the kind of drift `orion.provenance` exists to prevent. Its one method,
+`is_expected_closure(previous, following, interval)`, returns True only when the
+gap *begins* at the declared close and *ends* at the declared open, each within
+one bar `interval`.
+
+**The check became narrower, not looser — that is the whole design.** Three
+properties, each with its own test:
+
+1. **A mid-session gap of identical duration is still a `GAP`.** The same
+   49-hour hole moved into the middle of the trading week is rejected. Duration
+   alone forgives nothing; only boundary alignment does.
+2. **A boundary-aligned gap that runs past the open is still a `GAP`.** A
+   holiday-extended weekend matches the close and misses the open, and is
+   flagged. Holidays are deliberately not modelled — a holiday calendar is
+   external data that can be wrong or stale, and a wrong one silently
+   suppresses genuinely missing bars, which is the failure this codebase
+   refuses everywhere else. An unexpected closure should surface and be dealt
+   with explicitly.
+3. **A session never suppresses a second, unrelated gap.** A series containing
+   one weekend and one genuine mid-week hole produces exactly one finding, and
+   its `bar_index` names the real one.
+
+Also rejected, each with a test: a gap matching only the open boundary, a gap
+spanning two closures, and a gap beginning after the close on the close day.
+
+**`gap_tolerance_bars` was not raised, and a test now stops it being raised
+later.** Widening it was the obvious alternative and is the wrong one: it is a
+single global figure consulted at every timeframe on both the live and backtest
+paths, so a value loose enough to admit a weekend would blind the check to
+genuinely missing bars everywhere. `tests/data/test_import_hygiene.py`'s
+`test_no_caller_in_src_raises_the_gap_tolerance` AST-parses every
+`validate_snapshot` call site in `src/` and fails if any passes
+`gap_tolerance_bars`; a sibling test pins the `1.5` default itself. A future
+edit that "fixes" a gap finding with a bigger number instead of a declared
+session is exactly what those two tests exist to catch.
+
+**`session=None` is the default, everywhere, and reproduces the previous
+behaviour exactly.** The gap branch short-circuits on `session is not None`
+before consulting anything, so the no-session path is byte-identical to what it
+was. `test_session_none_is_byte_identical_to_omitting_it` compares
+`validate_snapshot(...)` against `validate_snapshot(..., session=None)` across
+gapped, clean and duplicate-timestamped inputs, and the pre-existing
+`test_gapped_data_fails_closed_before_any_reasoning_call` passes unmodified. A
+new engine test, `test_weekend_spanning_dataset_fails_closed_without_a_session`,
+pins that a real weekend dataset *still* fails closed unless a session is
+declared. There is no default session anywhere: `XAUUSD_WEEKLY` is data a caller
+opts into, never a threshold this package applies on anyone's behalf — the same
+posture `RiskPolicy`'s fail-closed defaults take. Staleness, emptiness, ordering
+and duplicate detection are untouched by a session, and a test asserts all four
+still fire with one supplied.
+
+**`run_backtest` gained one keyword and forwards it, unexamined.**
+`session: TradingSession | None = None` is passed straight to the single
+up-front `validate_snapshot` call. The bar loop, `_window_for`'s no-look-ahead
+slice, the branch order, the execution semantics and the determinism guarantees
+are untouched — a session is consulted only while classifying data quality,
+before the first bar is processed, which
+`test_session_changes_nothing_on_a_dataset_that_was_already_valid` proves by
+asserting a byte-identical `BacktestResult` with and without one on a contiguous
+dataset. `tests/backtest/test_import_hygiene.py` was not edited: `orion.data`
+was already an allowed import, so the package acquired no new dependency, and
+that untouched file is the evidence the core was not reopened.
+
+**Known limitation — DST, measured rather than assumed.** A `TradingSession` is
+a fixed UTC boundary, and the real gold week tracks New York time, so the true
+close and open move by an hour across US DST transitions. `XAUUSD_WEEKLY`'s
+22:00 UTC matches US winter time; under summer time the real boundary is 21:00
+UTC. Whether the one-interval tolerance absorbs that hour depends on the
+timeframe and the vendor's bar grid, so it was checked against the shipped
+constant rather than reasoned about: with bars on the UTC interval grid, a
+winter-time weekend is accepted at M15, H1, H4 and D1, and a summer-time weekend
+is accepted at **H4 and D1 but rejected at H1 and M15** — their tolerance is too
+narrow to cover an hour. A summer-time weekend on H1 or M15 data therefore still
+raises a `GAP` finding. That is fail-closed and noisy rather than silent and
+wrong, which is the correct direction to err, so it ships as-is. `zoneinfo` was
+not reached for: making the boundary DST-aware means depending on external
+timezone rules to decide whether real bars are missing, and the right input for
+that decision is real vendor data, which this repository does not have yet.
+
+**`XAUUSD_WEEKLY`'s hours are conventional, not measured.** Friday 22:00 UTC to
+Sunday 22:00 UTC is the standard gold/FX week — New York close to Sydney open —
+quoted in UTC under US winter time. It is not derived from a fetched XAUUSD
+series, because no such series exists in this repository: Phase 3 is what
+acquires one. This is the same honesty `classify_volatility`'s thresholds and
+`RiskPolicy`'s loss limits are already recorded with, and it is why the constant
+is a caller's opt-in rather than a default: a caller whose real data disagrees
+with this boundary should declare their own `TradingSession`, never widen the
+tolerance.
+
+**The live path has the same defect and is deliberately untouched.**
+`orion.orchestrator.analysis` validates its fetched snapshot the same way at
+`DEFAULT_OUTPUT_SIZE = 200`, and 200 H1 bars is roughly 1.7 gold trading weeks,
+so a live `orion analyze XAUUSD` should be raising `AnalysisDataQualityError`
+with a gap finding on H1, H4 and D1 today, and on M15 whenever the window
+straddles a weekend. That is a prediction read off the code, **not an observed
+failure** — no network call was made and no API key was used, so it is recorded
+here as unverified. Fixing live behaviour on the strength of a guess is not
+something this codebase does. The mechanism now exists and the fix is one
+keyword argument; the next step is a single real `orion analyze XAUUSD` run to
+confirm the prediction, after which it becomes its own small phase with its own
+entry.
+
+**Alternatives considered.** Raising `gap_tolerance_bars`, globally or per
+timeframe (rejected — blinds the check to genuinely missing bars on both paths,
+and is the specific thing the new hygiene test now prevents). Skipping
+validation for backtests (rejected — blinds it completely, and the up-front
+`validate_snapshot` call is what makes every per-cycle window trustworthy).
+Modelling holidays (rejected — external data that can be wrong, silently
+suppressing real findings). Deriving the boundary from `zoneinfo` (deferred —
+needs real vendor data to justify, exactly as the volatility thresholds do).
+Inferring the closure from the data itself (rejected outright — a system that
+learns which of its own gaps are acceptable can no longer detect a missing bar).
+
+**Deliberately not in this phase:** historical fetching, datasets or
+fingerprinting; any strategy abstraction; sweeps, walk-forward or Monte Carlo;
+any volatility or calibration change; any CLI or HTTP surface; the live-path fix
+above; and anything touching `orion.paper`, the backtest execution semantics, a
+fingerprint function, a journaled model, or the frontend.
+
+**Files added:** `src/orion/data/sessions.py`,
+`tests/data/{test_sessions.py, test_import_hygiene.py}` (23 tests).
+**Files modified:** `src/orion/data/validation.py` (one parameter, one
+short-circuited condition), `src/orion/backtest/engine.py` (one parameter,
+forwarded), `tests/data/test_validation.py` and `tests/backtest/test_engine.py`
+(11 tests added, none removed or weakened). No `orion.paper` file, no
+`orion.analysts` file, no `orion.monitor` file, no frontend file and no
+dependency manifest was touched, and no dependency was added.
+
+**Verification:** `pytest` 2291 passed (2257 before), `ruff check .`, `ruff
+format --check .` (220 files) and `mypy src --strict` (93 files) all clean.
+`orion.data.sessions` is at 100% line coverage and `orion.backtest` holds at
+98%. Every import-hygiene suite passes unchanged, `tests/backtest/test_import_hygiene.py`
+among them and unedited. Proven rather than claimed: a weekend-spanning H1
+dataset that raises `BacktestError` without a session runs end to end with one,
+processing every bar including the closure, while the same session leaves a
+mid-week hole in an otherwise identical dataset failing closed.

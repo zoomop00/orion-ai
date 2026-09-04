@@ -51,6 +51,7 @@ from orion.backtest.data import HistoricalBarSource
 from orion.backtest.execution import execute_delayed, resolve_stop_take_profit_ohlc
 from orion.backtest.schemas import BacktestCycle, BacktestResult, EquityPoint
 from orion.data.models import MarketSnapshot, OHLCVBar, Timeframe
+from orion.data.sessions import TradingSession
 from orion.data.validation import validate_snapshot
 from orion.decision.engine import decide
 from orion.decision.schemas import ProposedDecision
@@ -111,6 +112,7 @@ def run_backtest(
     starting_balance: float,
     window_bars: int,
     fill_delay_bars: int = 0,
+    session: TradingSession | None = None,
 ) -> BacktestResult:
     """Run one deterministic backtest of the full Evidence -> Reasoning ->
     Decision -> Risk Guardian -> Paper Execution chain over historical
@@ -131,6 +133,18 @@ def run_backtest(
     While a fill is pending, the engine does not evaluate new decision
     cycles; it only marks the account to market, exactly as if an order
     were genuinely in flight and unactionable.
+
+    `session` (default `None`, reproducing this engine's previous behavior
+    exactly) is forwarded, unmodified and unexamined, to the single up-front
+    `validate_snapshot` call below — it declares a recurring weekly market
+    closure so a scheduled closure is not mistaken for missing bars (see
+    `orion.data.sessions`). Without it, no real multi-week XAUUSD dataset can
+    be backtested at all: the weekend hole every such dataset contains is
+    wider than `validate_snapshot`'s gap tolerance. It changes nothing else:
+    the bar loop, the rolling window, the execution semantics and the
+    determinism guarantees below are all identical whether a session is
+    supplied or not, because a session is consulted only while classifying
+    data quality, before the first bar is processed.
 
     Raises `BacktestError` if `start`/`end` are naive, if `end <= start`,
     or if the fetched historical range fails `orion.data.validation.
@@ -167,7 +181,7 @@ def run_backtest(
     # `now`). What this call is actually for is EMPTY/GAP/NON_MONOTONIC/
     # DUPLICATE_TIMESTAMP.
     validation_now = snapshot.latest_bar.timestamp if snapshot.latest_bar is not None else end
-    validation = validate_snapshot(snapshot, now=validation_now)
+    validation = validate_snapshot(snapshot, now=validation_now, session=session)
     if not validation.is_valid:
         findings = "; ".join(f"{f.issue.value}: {f.detail}" for f in validation.findings)
         raise BacktestError(
