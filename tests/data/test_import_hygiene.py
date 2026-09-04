@@ -137,3 +137,101 @@ def test_the_gap_tolerance_default_is_unchanged() -> None:
     from orion.data.validation import validate_snapshot
 
     assert inspect.signature(validate_snapshot).parameters["gap_tolerance_bars"].default == 1.5
+
+
+# ---------------------------------------------------------------- historical
+#
+# `orion.data.historical` is the vendor half of Mission 6 Phase 3. It is
+# *allowed* an HTTP client -- acquiring history is a network call and pretending
+# otherwise would be theatre -- so its wall is drawn elsewhere: it must not
+# reach the replay side, the derived-data side, a database, or a model. The
+# replay side's own hygiene test forbids the reverse direction, and between the
+# two the CSV file stays the only place acquisition and replay meet.
+
+HISTORICAL_DISALLOWED_TOP_LEVEL = {
+    "anthropic",
+    "twelvedata",
+    "ccxt",
+    "MetaTrader5",
+    "oandapyV20",
+    "sqlalchemy",
+    "sqlite3",
+    "random",
+    "pandas",
+    "numpy",
+    "pandas_ta_classic",
+}
+
+HISTORICAL_DISALLOWED_ORION = {
+    "orion.backtest",
+    "orion.datasets",
+    "orion.analysis",
+    "orion.strategy",
+    "orion.experiments",
+    "orion.analysts",
+    "orion.reasoning",
+    "orion.decision",
+    "orion.risk",
+    "orion.paper",
+    "orion.monitor",
+    "orion.memory",
+    "orion.reflection",
+    "orion.orchestrator",
+    "orion.interface",
+    "orion.config",
+}
+
+
+def _historical_source() -> Path:
+    return _src_dir() / "data" / "historical.py"
+
+
+def test_historical_module_exists_to_scan() -> None:
+    assert _historical_source().is_file()
+
+
+def test_historical_has_no_vendor_sdk_persistence_or_analysis_imports() -> None:
+    found = {m.split(".")[0] for m in _imported_modules(_historical_source())}
+    offenders = found & HISTORICAL_DISALLOWED_TOP_LEVEL
+    assert not offenders, f"orion.data.historical imports disallowed modules: {offenders}"
+
+
+def test_historical_never_reaches_the_replay_side() -> None:
+    imported = _imported_modules(_historical_source())
+    offenders = {
+        m
+        for m in imported
+        if any(m == pkg or m.startswith(pkg + ".") for pkg in HISTORICAL_DISALLOWED_ORION)
+    }
+    assert not offenders, f"orion.data.historical imports a disallowed package: {offenders}"
+
+
+def test_historical_does_not_extend_the_live_fetch_contract() -> None:
+    # It may *import* MarketDataProviderError -- the failure is identical in
+    # kind, "a provider could not return real market data" -- but nothing here
+    # may subclass MarketDataProvider or define `fetch_ohlcv`, whose three live
+    # consumers depend on it meaning exactly what it means today. Checked by
+    # introspection rather than substring matching, so the class named
+    # `HistoricalMarketDataProvider` cannot trip it.
+    from orion.data.historical import HistoricalMarketDataProvider, TwelveDataHistoricalProvider
+    from orion.data.provider_base import MarketDataProvider
+
+    for cls in (HistoricalMarketDataProvider, TwelveDataHistoricalProvider):
+        assert MarketDataProvider not in cls.__mro__
+        assert not hasattr(cls, "fetch_ohlcv")
+
+
+def test_only_the_acquisition_side_imports_historical() -> None:
+    # `orion.datasets` imports the ABC, which is the point of it. Nothing on
+    # the live or replay side may: Phase 3 adds a sibling beside the live
+    # provider and wires it into no existing path, so it cannot have changed
+    # any existing behaviour.
+    src = _src_dir()
+    importers = [
+        str(path.relative_to(src))
+        for path in sorted(src.rglob("*.py"))
+        if path != _historical_source()
+        and any(m.startswith("orion.data.historical") for m in _imported_modules(path))
+    ]
+    unexpected = [p for p in importers if not p.replace("\\", "/").startswith("datasets/")]
+    assert not unexpected, f"orion.data.historical is imported outside orion.datasets: {unexpected}"

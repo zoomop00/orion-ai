@@ -5742,3 +5742,270 @@ among them and unedited. Proven rather than claimed: a weekend-spanning H1
 dataset that raises `BacktestError` without a session runs end to end with one,
 processing every bar including the closure, while the same session leaves a
 mid-week hole in an otherwise identical dataset failing closed.
+
+---
+
+## 2026-09-04 — Mission 6 open question M6-Q12: backtest and forward exits price a gap differently
+
+**Recorded, not resolved.** This entry opens a question and deliberately leaves
+it open. Nothing in this repository changes because of it. It exists so the
+issue is on the record before Mission 6 Phase 3 begins, rather than being
+rediscovered later by someone comparing two sets of numbers that were never
+comparable.
+
+**The divergence.** Two functions now detect an intrabar exit, and they agree on
+everything except the price the exit fills at:
+
+- `orion.backtest.execution.resolve_stop_take_profit_ohlc` (Mission 6) always
+  fills at the trigger level itself, modelling a resting order that was sitting
+  at that price.
+- `orion.paper.execution.resolve_stop_take_profit_bars` (Mission 9 Phase 2)
+  fills at the level *unless the bar had already opened through it*, in which
+  case it fills at `bar.open` — its `_trigger_price` worst-of rule.
+
+Everything else about the two was compared directly and matches: the
+`[low, high]` detection rule, the stop-first tie-break (both citing M6-Q2), the
+exclusion of the entry bar, the close arithmetic, and the spread/slippage/fee
+formulas, which are still byte-identical to the private helpers
+`orion.backtest.execution` documents itself as deliberately duplicating.
+
+**Both are individually correct, and Mission 9 Phase 2's entry already says so.**
+A backtest may legitimately model a resting order; a forward paper account that
+did the same would report better results than the market gave it. Neither
+convention is a defect in the module it lives in.
+
+**What makes it a fidelity problem is Mission 6 Phase 2, not either
+convention.** Before Phase 2, `run_backtest` raised `BacktestError` on any
+weekend, so no backtest had ever processed a gapped bar at all and the
+fill-at-the-level convention was never exercised where it mattered. Phase 2
+made weekly-open bars reachable, and gold gaps at every weekly open. From now
+on the backtest books adverse weekend gaps at the level while the forward
+account books them at the open — so **backtests are systematically optimistic
+precisely on the bars Phase 2 unlocked**, against a mission whose stated purpose
+is "try to break the strategy before trusting it" and a live-trading gate that
+weighs backtest evidence against paper evidence.
+
+**When this must be resolved: before Mission 6 Phase 6 or Phase 7 produces a
+number anyone acts on.** Parameter sweeps, walk-forward results and any
+robustness figure computed on gapped history would inherit the optimism.
+Phase 3 (historical acquisition) has no dependency on it — a dataset does not
+care how an exit prices — which is why it is recorded here and deferred rather
+than folded into that phase.
+
+**The shape a resolution should take, when it is taken.** Additive and
+caller-supplied, defaulting to today's behaviour, exactly as Phase 2's
+`session` parameter was: the worst-of rule becomes something a backtest opts
+into, not an amendment to an existing function. That keeps every result
+produced before the change reproducible, and makes adopting it a decision with
+its own entry rather than a silent shift in what a backtest reports.
+
+**Explicitly not decided here:** whether the backtest should adopt the worst-of
+rule at all, whether it should instead become a `PaperExecutionPolicy` or
+engine-level parameter, and whether the two functions should eventually share
+one implementation. Those are the questions; this entry only records that they
+are open and that the answer is owed before Phase 6.
+
+---
+
+## 2026-09-04 — Mission 6 Phase 3: historical acquisition, and a dataset that can name itself
+
+**Phase 2 made a real dataset processable; there was still no way to get one.**
+`orion.backtest.data.CsvHistoricalBarSource` had shipped in Mission 6 able to
+read a CSV of historical bars, and no CSV existed anywhere in the repository,
+no code produced one, and `orion.data.twelvedata_provider.TwelveDataProvider`
+could not be asked for a date range — its `fetch_ohlcv(symbol, timeframe,
+output_size)` answers "the most recent N bars" and nothing else. This phase
+builds the acquisition half and the identity that makes what it produces
+citable. It wires that half into nothing: `orion.datasets` and
+`orion.data.historical` have zero importers anywhere in `src/`, asserted by
+tests in both packages, so Phase 3 cannot have changed any existing behaviour.
+
+**The two halves meet at a file, never in a process.** A vendor fetch writes a
+CSV; `CsvHistoricalBarSource` reads it. `orion.datasets` must not import
+`orion.backtest` and `orion.data.historical` must not either — both asserted by
+AST hygiene tests, and `orion.backtest`'s own hygiene test was not edited,
+which is the evidence its wall was never opened. That boundary is what keeps
+the replay package free of vendors, credentials and HTTP clients, and it is
+also what makes a backtest reproducible: it replays a fixed artifact rather
+than whatever a live endpoint answers today.
+
+**`HistoricalMarketDataProvider` is a sibling of the live contract, not an
+extension of it.** `MarketDataProvider.fetch_ohlcv` now has three live
+consumers (`orion.orchestrator.analysis`, `orion.monitor.iteration`, and the
+CLI through them) and is untouched by this phase — a test asserts nothing in
+`orion.data.historical` subclasses it or defines `fetch_ohlcv`, checked by
+introspection rather than substring matching so the class *named*
+`HistoricalMarketDataProvider` cannot trip it. It reuses
+`MarketDataProviderError` rather than inventing a parallel error, because the
+failure is identical in kind — a provider could not return real market data —
+and only the access pattern differs. It is also deliberately not
+`orion.backtest.data.HistoricalBarSource`, which has the same method shape but
+describes bars *already held*, in memory or on disk, rather than a network
+fetch.
+
+**Identity is a separate type from the manifest, and that is the whole design.**
+
+- `DatasetIdentity` holds exactly what changes a backtest result: symbol,
+  timeframe, the first and last bar timestamps, the bar count, and a hash over
+  every bar's full OHLCV content in order.
+- `DatasetManifest` wraps that identity with provenance: which vendor answered,
+  when it was retrieved, what range was *requested*, and which file holds the
+  bars.
+
+`dataset_fingerprint` takes a `DatasetIdentity`. There is no overload that
+accepts a manifest, so **provenance cannot reach the hash** — that is
+structural, not a rule someone has to remember. The reason it must be:
+two independent downloads of the same true history have to fingerprint
+identically. If `retrieved_at` or the provider name entered the hash,
+re-downloading the same bars would produce a "different" dataset and the
+fingerprint would stop meaning *this data*, which is the one thing it exists to
+mean. A test acquires the same identity under a different vendor name, a
+different retrieval time, a different requested window and a different filename
+and asserts one fingerprint; further tests assert that any OHLCV field, any
+timestamp, the ordering, the bar count, the symbol or the timeframe each change
+it.
+
+Both the bars hash and the fingerprint go through
+`orion.provenance.canonical_hash`, for the reason that module's own docstring
+gives: this codebase keeps exactly one hashing mechanism, and two that merely
+agree today can drift apart tomorrow.
+
+**The identity records the range delivered, never the range requested.** A
+request is an intention; the bars that arrived are the fact, and only the fact
+belongs in an identity — a range asked for and a range received differ on every
+real dataset, because a market closure sits at one end of most of them. The
+requested window is still recorded, as provenance, where it cannot alter what
+the dataset is called.
+
+**Float round-tripping is a correctness requirement here, not a formatting
+preference.** Because identity is computed from bars, a CSV writer using
+`f"{price:.2f}"` would change what a dataset is *called* merely by saving it,
+silently, while looking entirely reasonable. `orion.datasets.csv_store` writes
+`repr()`, which has round-tripped Python floats exactly since 3.1, and the test
+fixtures use prices with no exact two-decimal form specifically so that a future
+tidy-up to a format string fails loudly instead of corrupting every fingerprint
+written after it.
+
+**Truncation fails closed on what can be proven, and the limit of that is
+stated.** `MAX_BARS_PER_REQUEST` (5000, Twelve Data's documented ceiling)
+doubles as the truncation test: a response holding exactly that many bars may
+have been cut off at the ceiling, cannot be shown to cover the range, and is
+refused rather than returned as though it were whole. Bars outside the
+requested range are refused too — a response that does not answer the question
+asked is not filtered down to the part that does. What is **not** detectable
+here is "short" in the sense of fewer bars than a continuously-trading market
+would have: distinguishing a missing bar from a market closure needs the
+`orion.data.sessions.TradingSession` a *consumer* declares, and inventing one
+inside a fetcher would be exactly the guess Phase 2 refused to make. What the
+manifest offers instead is the honest delivered first/last timestamps and bar
+count, so actual coverage is visible to anyone reading it.
+
+**Explicit sub-ranges, never implicit paging.** `fetch_range` issues one
+request per call and refuses a range wider than the ceiling rather than
+stitching several responses together. Stitching is where a gap gets quietly
+introduced — a page boundary that drops a bar produces a dataset that looks
+complete and hashes to a name that claims history it does not hold. Acquiring a
+longer span is done by asking for consecutive sub-ranges, and is the caller's
+visible decision rather than a loop's silent one.
+
+**The CSV reader is duplicated, consciously, and the duplication is tested.**
+`orion.backtest.data`'s parser is `_load_bars_from_csv`, private by the leading
+underscore, and this codebase does not reach across a package's privacy
+boundary — the same reasoning `orion.backtest.execution` already records for
+its duplication of `orion.paper.execution`'s fill-price helpers. More
+decisively, `orion.datasets` may not import `orion.backtest` at all. So
+`csv_store.read_bars_csv` is a second reader, and
+`test_the_written_csv_is_readable_by_the_backtest_source` loads one built file
+through *both* readers and asserts identical bars — which is simultaneously the
+proof that a built dataset is genuinely replayable and the guard that stops the
+two parsers drifting in silence.
+
+**The builder deliberately does not validate.** `orion.data.validation.
+validate_snapshot`'s GAP finding cannot tell a legitimate market closure from
+missing bars without a declared session, so running it at build time would
+either reject every real gold dataset for containing weekends — the exact
+failure Phase 2 exists to remove — or force this module to guess a session on
+the caller's behalf. A build therefore records what the vendor gave, and
+judging that data belongs to replay time, to whoever knows which session
+applies. Nothing is interpolated, back-filled, reordered, deduplicated or
+dropped between the vendor response and the file; a test builds a dataset from
+a genuinely gapped range and asserts the hole survives intact with the bar
+count to match.
+
+**A limitation found while writing the loader, and left visible rather than
+papered over.** A first draft of the mismatch reporter had a symbol/timeframe
+branch; coverage showed it could never execute, because `load_dataset` derives
+the actual identity *using the manifest's own* symbol and timeframe, so those
+two fields cannot disagree. The dead branch was removed and the real limit
+documented: **a CSV holds bars and nothing else** — no symbol, no interval — so
+pairing one instrument's file with another's manifest is undetectable whenever
+the bar contents happen to match. What is verified is that *these bars* are the
+bars this manifest names. Guarding the pairing itself would mean writing the
+symbol into every CSV row, which `CsvHistoricalBarSource` does not read, and
+this phase does not change a shipped format unilaterally.
+
+**Verification is a refusal, not a warning.** `load_dataset` re-parses the
+bars, recomputes the identity from scratch and compares it against the
+manifest's fingerprint, naming which field disagreed — the same posture
+`orion.memory.sqlite_journal.SqliteDecisionJournal.get_evidence` already takes
+toward a stored payload, applied to a file instead of a row. It matters more
+here: the CSV is untracked and re-downloadable, so any given copy may have been
+rebuilt from a different range, edited, half-written by an interrupted build or
+corrupted in transit. A manifest that claims a fingerprint its own identity does
+not produce is rejected on parse, before a single bar is read.
+
+**Where the two files live.** The bars go to a CSV under the already-gitignored
+`/data/`: large, re-downloadable, and no business in version control. The
+manifest is small and goes into git, because it is the part that makes a result
+checkable — anyone can re-acquire the range, rebuild the identity and compare
+fingerprints to prove they hold the history a recorded result cites. Both paths
+are arguments to `build_dataset`; this phase adds no configuration, no default
+directory and no runtime check enforcing the convention, which belongs in a
+decision entry and a README rather than in code that would stop someone
+building a dataset in a temporary directory.
+
+**M6-Q12 is untouched and remains open.** The entry immediately above this one
+records that `orion.backtest.execution.resolve_stop_take_profit_ohlc` fills a
+gapped exit at the trigger level while `orion.paper.execution.
+resolve_stop_take_profit_bars` fills at the bar open, and that the answer is
+owed before Mission 6 Phase 6 or 7 produces a number anyone acts on. Phase 3
+has no dependency on it — a dataset does not care how an exit prices — and
+resolving it inside a data-acquisition phase would bury a results-changing
+decision in an unrelated entry. It stays open.
+
+**Deliberately not in this phase:** any CLI or HTTP surface; the strategy
+abstraction; volatility calibration; the experiments package, parameter sweeps,
+walk-forward or Monte Carlo; the live-path gap fix in
+`orion.orchestrator.analysis`; the M6-Q12 resolution; and anything touching
+`orion.paper`, `orion.monitor`, the backtest execution semantics, a fingerprint
+function, a journaled model, or the frontend. No dependency was added —
+`httpx`, `pydantic` and the standard library's `csv` and `json` were all
+already present.
+
+**Files added:** `src/orion/data/historical.py`;
+`src/orion/datasets/{__init__.py, manifest.py, csv_store.py, builder.py,
+loader.py}`; `tests/data/test_historical.py` (13 tests);
+`tests/datasets/{__init__.py, conftest.py, test_manifest.py,
+test_builder_and_loader.py, test_import_hygiene.py}` (51 tests).
+**Files modified:** `tests/data/test_import_hygiene.py` (5 tests added for the
+new module's own wall; nothing existing removed or weakened). No file under
+`src/orion/backtest/`, no `orion.paper` file, no `orion.monitor` file,
+`src/orion/data/validation.py`, `src/orion/data/sessions.py`,
+`src/orion/data/models.py`, `src/orion/data/provider_base.py`,
+`src/orion/data/twelvedata_provider.py`,
+`src/orion/orchestrator/analysis.py`, `tests/backtest/` or any frontend file
+was touched, and no dependency manifest was changed — each verified by `git
+diff` against the whole set rather than asserted.
+
+**Verification:** `pytest` 2360 passed (2291 before), `ruff check .`, `ruff
+format --check .` (232 files) and `mypy src --strict` (99 files) all clean. The
+new code is at 99% line coverage; the three uncovered lines are an abstract
+method body and two defensive parse guards that mirror the equivalent ones in
+`orion.backtest.data`. Every import-hygiene suite passes unchanged,
+`tests/backtest/test_import_hygiene.py` among them and unedited. Proven rather
+than claimed: a built dataset round-trips through disk to bit-identical bars,
+its fingerprint survives the round trip, a single edited price is refused on
+load with the reason named, an interrupted write is refused, a truncated vendor
+response is refused, and the file a build produces is read back correctly by
+the very `CsvHistoricalBarSource` that has been waiting since Mission 6 for
+something to read.
