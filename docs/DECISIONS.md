@@ -6009,3 +6009,205 @@ load with the reason named, an interrupted write is refused, a truncated vendor
 response is refused, and the file a build produces is read back correctly by
 the very `CsvHistoricalBarSource` that has been waiting since Mission 6 for
 something to read.
+
+---
+
+## 2026-09-04 — Mission 6 Phase 4: the ATR% study, and the weekend bars nobody expected
+
+**The measurement `classify_volatility` has been waiting for since 2026-08-23.**
+That entry recorded `low_atr_pct=0.003` / `high_atr_pct=0.008` as
+order-of-magnitude placeholders and named two gaps: no percentile analysis backs
+the cut points, and the same pair is applied to M15, H1, H4 and D1 although ATR%
+scales with the bar interval. This phase builds the study that closes the first
+gap. It does not choose a threshold, does not touch
+`orion.analysis.structure`, and does not resolve the second gap — that is
+Phase 5, and it must cite a study rather than contain one.
+
+**`orion.calibration` measures; it never classifies.** A hygiene test asserts
+the package cannot import `orion.analysis.structure` at all, and another asserts
+no field name or serialised value in a result contains "low", "medium", "high"
+or "threshold". A study that also recommended an answer would make citing it
+circular.
+
+**The one-pass series is the shipped calculation, proven rather than asserted.**
+`ta.atr`'s `mamode` defaults to `"rma"` — Wilder's smoothing — with `drift=1`,
+and `compute_indicators` passes neither, so those defaults *are* ORION's ATR.
+`atr_percent_series` makes the same call over the whole frame instead of one
+window, and a test asserts its last value equals `compute_indicators(bars).atr /
+close` exactly at windows of 15, 16, 30, 60 and 240 bars.
+
+**`CONVERGED_WARMUP_BARS = 200` was measured, and two tests keep it honest.**
+Wilder smoothing is recursive, so a reading at bar `i` depends on every bar
+supplied — a one-pass series and the live pipeline's rolling window do not
+automatically agree. Comparing them gives a worst relative disagreement of
+9.4e-03 at a 50-bar window, 2.5e-04 at 100 and **1.0e-07 at 200**, the seed's
+influence decaying as `(1 - 1/atr_length)**k`. 200 is also exactly
+`orion.orchestrator.analysis.DEFAULT_OUTPUT_SIZE`, so a sample taken here is one
+the live pipeline could have produced.
+`test_the_converged_warmup_constant_is_earned` re-derives that bound on every
+run, and `test_a_short_warmup_does_not_converge` asserts 50 bars *fails* it — so
+the constant cannot quietly become arbitrary.
+
+**Warm-up honours ORION's guard, not the library's.** `ta.atr` yields a value at
+index `atr_length - 1`, but `compute_indicators` returns `None` until
+`atr_length + 1` bars exist. `warmup_bars < atr_length` is refused, so no reading
+enters a distribution that the live pipeline would have declined to compute.
+
+**The held-out slice is never summarised, structurally.** `calibration_end`
+filters the samples before a single statistic is computed, so no code path in
+this module reads a bar at or after the boundary.
+`test_changing_the_held_out_slice_cannot_change_the_result` replaces every
+post-boundary bar with a different random walk and asserts the measurement is
+byte-identical. The reverse direction is safe by construction: Wilder smoothing
+is strictly backward-looking, so a calibration sample can never depend on a
+held-out bar.
+
+**A percentile the sample cannot support is omitted, not estimated.**
+`minimum_samples_for` encodes a ≥50-tail-observations rule — p10 needs 500
+samples, p5 needs 1,000, p1 needs 5,000 — and an unsupportable percentile simply
+does not appear in the result, while the request stays on the record so the
+omission is visible. The same refusal `orion.backtest.metrics` makes for a
+metric that would be meaningless, applied to a distribution.
+
+**`QuantileMethod` is a one-member closed enum, recorded in the identity.**
+NumPy's `percentile` accepts several methods and they give different answers, so
+leaving interpolation implicit would make a study reproducible only on the
+machine that ran it. Adding a second method changes `study_fingerprint`, which
+is exactly the visibility that change deserves — the reasoning
+`orion.connectors.schemas.Capability` already records for its own single member.
+
+**Reproducibility mirrors Phase 3's identity/manifest split.** `StudyInputs`
+carries everything the numbers depend on and is hashed by
+`orion.provenance.canonical_hash`; `VolatilityDistribution` carries the inputs
+plus the statistics and recomputes its own fingerprint on construction, so a
+result edited to claim an identity its inputs do not produce is rejected rather
+than believed. `STUDY_VERSION` pins the calculation definition.
+
+**One pre-existing test was narrowed, deliberately.**
+`tests/datasets/test_import_hygiene.py`'s
+`test_no_orion_package_imports_datasets_yet` asserted that *nothing* in `src/`
+imported `orion.datasets`, which was true when Phase 3 shipped and stopped being
+true the moment a study consumed a verified dataset. It is now
+`test_only_named_packages_import_datasets`, gated on a named
+`ALLOWED_DATASET_CONSUMERS`, plus a new
+`test_the_allowed_consumers_are_themselves_walled_off` asserting every permitted
+consumer is still forbidden in the reverse direction — so allowing one in cannot
+make the graph cyclic, and adding a future consumer without the matching wall
+fails. A tightening of intent, not a weakening.
+
+---
+
+**REAL DATA, FOR THE FIRST TIME IN THIS REPOSITORY.** Everything above is
+infrastructure. The rest of this entry is what a live Twelve Data credential
+then established, and it is the reason Phase 4 stops here rather than continuing
+into Phase 5.
+
+**The probe succeeded, and the truncation guard fired against a real vendor.** A
+single D1 request for 2005-01-01 → 2026-08-31 returned exactly 5000 bars and was
+refused: *"at or above the 5000-bar request ceiling; the range may be truncated
+and cannot be shown to be complete."* The documented ceiling is therefore real
+and is a hard refusal, not a soft warning — the first live proof of Phase 3's
+fail-closed acquisition. No credential reached the error: the traceback carries
+only ORION's own message, with no URL, no query string and no chained
+`httpx` exception.
+
+**The D1 acquisition succeeded.** Narrowed to 2011-09-01 → 2026-08-31, one
+request delivered **4,053 bars** at 81% of the ceiling, written through Phase 3's
+unmodified `build_dataset`:
+
+    fingerprint  6400823408065b2518524a5b9719544aff97dcf3fa02aac3d83b2e7420f0d9b8
+    delivered    2011-09-02T00:00:00Z -> 2026-08-31T00:00:00Z
+    bars         4053
+
+`load_dataset` then re-derived that fingerprint from the file on disk and it
+matched, so the build → manifest → load → verify chain is proven end to end on
+real data. The CSV (285 KB) stays under the gitignored `/data/`; the manifest
+(606 bytes) is committed, which is the split Phase 3 designed and this is its
+first real exercise.
+
+**Delivered is not requested, confirmed on the first live call.** The request
+began at 2011-09-01 and the earliest delivered bar is 2011-09-02. One day, and
+harmless — but it is exactly why `DatasetIdentity` hashes the delivered
+first/last timestamps rather than the requested window. Had the manifest hashed
+the request, two identical downloads asked for with slightly different start
+dates would have fingerprinted differently. That design choice is now confirmed
+by data rather than argued from principle. Measured bar density is 270/year
+against the 260 planned, so the H1 and M15 request budgets rise slightly.
+
+**THE FINDING: the vendor's XAUUSD D1 weekend shape changed around 2024, and
+`XAUUSD_WEEKLY` is not what is wrong.** Validating the real series produced 733
+gap findings without a session and **52 with `XAUUSD_WEEKLY`** — the session
+forgives 681 `Fri->Mon` three-day gaps, 93% of them, which is exactly the
+weekend it was written for. The 52 survivors are not what Phase 2 anticipated:
+
+    Sat->Mon 2d  x43     <- the vendor emits Saturday bars
+    Thu->Mon 4d  x5      <- Good Friday
+    Wed->Fri / Mon->Wed / Tue->Thu / Mon->Thu  x4   <- Christmas and similar
+
+Only about nine are the holidays Phase 2 deliberately declined to model. The
+other 43 come from weekend bars that **did not exist before 2024**:
+
+    Saturday bars by year   2024: 11   2025: 51   2026: 35   (2011-2023: zero)
+    Sunday bars by year                2025: 19   2026: 35   (2011-2024: zero)
+
+They are also nearly empty. Median true range is ~1.2% of price on weekdays,
+**0.29% on Saturdays and 0.032% on Sundays** — a Sunday bar's range is 38 times
+smaller than a weekday's, which is a handful of reopen ticks bucketed into a day
+rather than a trading session.
+
+**Two consequences, and the second is the serious one.** First, the D1 dataset
+validates as *invalid*, so `study_atr_percent` refuses it — the study's
+fail-closed validation working exactly as designed, having discovered a data
+shape nobody anticipated. Second, and worse: 151 near-zero-range bars (3.7% of
+the dataset) sitting among 1.2%-range bars would drag the low tail down, so p5
+and p10 — precisely the readings a LOW threshold would be drawn from — would be
+measurably biased by vendor artifacts. Including them would produce a
+calibrated-looking number derived from something that is not volatility. The
+contamination is worst where it hurts most: roughly 28% of 2026 bars are weekend
+bars, and 2025-2026 is the held-out validation slice.
+
+**HANDLING IS DEFERRED, DELIBERATELY.** No fix is applied in this entry.
+`orion.data.sessions` is untouched, `orion.data.validation` is untouched,
+`classify_volatility`'s thresholds are untouched, and no calibration logic was
+adjusted to accommodate the finding. Three options exist and none is obviously
+right: restrict D1 to the pre-2024 range where the shape is uniform (no code
+change, but it costs the held-out slice entirely); extend the session model to
+tolerate the new weekend shape (which would be modelling a vendor quirk rather
+than a market); or treat near-zero-range weekend bars as a data-quality question
+in their own right, which reopens a Phase 3 concern on Phase 4 evidence. Choosing
+between them on one timeframe's evidence would be exactly the kind of guess this
+mission exists to replace.
+
+**What is required before that choice: the same investigation at H4, H1 and
+M15.** Whether the 2024 break appears at every interval, and whether its
+contamination scales the way the weekend-window analysis predicts (2.7% of
+windows at M15 rising to ~100% at D1), determines whether the answer is one rule
+or four. That work is not started here, and no further Twelve Data request was
+made after the D1 acquisition.
+
+**Deliberately not in this phase:** any threshold change; any edit to
+`analysis/structure.py`, `data/sessions.py`, `data/validation.py`,
+`orchestrator/analysis.py`, `backtest/`, `paper/`, `monitor/`, the CLI or the
+frontend; H4/H1/M15 acquisition; the strategy abstraction, sweeps, walk-forward
+or Monte Carlo; the live-path gap fix; and M6-Q12, which remains open and still
+owes an answer before Phase 6 or 7 produces a number anyone acts on. No
+dependency was added — NumPy, pandas-ta-classic and pydantic were all already
+present.
+
+**Files added:** `src/orion/calibration/{__init__.py, atr_series.py,
+volatility.py}`; `tests/calibration/{__init__.py, conftest.py,
+test_atr_series.py, test_volatility.py, test_import_hygiene.py}` (57 tests);
+`data_manifests/xauusd-1day-2011-09-01_2026-08-31.json`, the first committed
+dataset manifest. **Files modified:** `tests/datasets/test_import_hygiene.py`
+(narrowed as described, one test added, none removed or weakened). The acquired
+CSV is under `/data/` and is not tracked, by design. No file under
+`src/orion/backtest/`, `src/orion/paper/`, `src/orion/monitor/`,
+`src/orion/analysis/`, `src/orion/orchestrator/`, `src/orion/data/` or the
+frontend was touched, and no dependency manifest was changed.
+
+**Verification:** `pytest` 2418 passed (2360 before), `ruff check .`, `ruff
+format --check .` (240 files) and `mypy src --strict` (102 files) all clean.
+`orion.calibration` is at 99% line coverage; the two uncovered lines are
+defensive guards mirroring the equivalent ones in `orion.backtest.data`. Every
+import-hygiene suite passes, `tests/backtest/test_import_hygiene.py` among them
+and unedited for the fourth consecutive phase.

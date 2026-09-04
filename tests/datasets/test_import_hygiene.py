@@ -137,15 +137,38 @@ def test_datasets_only_reaches_data_and_provenance() -> None:
             assert root in allowed, f"{source_path.name} imports unexpected {module!r}"
 
 
-def test_no_orion_package_imports_datasets_yet() -> None:
-    # `orion.datasets` is a leaf on the acquisition side, exactly as
-    # `orion.backtest` is one on the replay side. Nothing in `src/` depends on
-    # it, so adding it cannot have changed any existing behaviour.
-    src = _package_dir().parent.parent
+#: The only packages permitted to read a dataset. When Phase 3 shipped this was
+#: empty — nothing in `src/` depended on `orion.datasets` at all — and Mission 6
+#: Phase 4 added the first entry: a measurement consumes a verified dataset, so
+#: `orion.calibration` reads this package and this package still reads nothing
+#: of theirs. Widening this set is a deliberate edit, which is the point of
+#: naming it rather than dropping the assertion.
+ALLOWED_DATASET_CONSUMERS = ("calibration",)
+
+
+def test_only_named_packages_import_datasets() -> None:
+    # The architectural direction, not merely a count. `orion.datasets` sits on
+    # the acquisition side and reads nothing above it — `DISALLOWED_ORION_
+    # SUBPACKAGES` above already forbids the reverse edge for every consumer
+    # named here, so allowing one in cannot make the graph cyclic.
+    # Rooted at `src/orion`, so the first path segment is the package name.
+    orion_root = _package_dir().parent
     importers: list[str] = []
-    for source_path in sorted(src.rglob("*.py")):
+    for source_path in sorted(orion_root.rglob("*.py")):
         if source_path.is_relative_to(_package_dir()):
             continue
         if any(m.startswith("orion.datasets") for m in _imported_modules(source_path)):
-            importers.append(str(source_path.relative_to(src)))
-    assert not importers, f"orion.datasets is imported by {importers}"
+            relative = source_path.relative_to(orion_root)
+            if relative.parts[0] not in ALLOWED_DATASET_CONSUMERS:
+                importers.append(str(relative))
+    assert not importers, (
+        f"orion.datasets is imported by {importers}, which is not in {ALLOWED_DATASET_CONSUMERS}"
+    )
+
+
+def test_the_allowed_consumers_are_themselves_walled_off() -> None:
+    # The narrowing above is only safe while every permitted consumer is still
+    # forbidden in the reverse direction. Asserted rather than assumed, so
+    # adding a consumer without adding the matching wall fails here.
+    for consumer in ALLOWED_DATASET_CONSUMERS:
+        assert f"orion.{consumer}" in DISALLOWED_ORION_SUBPACKAGES

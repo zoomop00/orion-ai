@@ -1,0 +1,16 @@
+{
+  "csv_filename": "xauusd-1day-2011-09-01_2026-08-31.csv",
+  "fingerprint": "6400823408065b2518524a5b9719544aff97dcf3fa02aac3d83b2e7420f0d9b8",
+  "identity": {
+    "bar_count": 4053,
+    "bars_hash": "6e445dce3092ed94f85e9887f959cc864f6f357d6e0d6415681817134d5114c1",
+    "first_bar_timestamp": "2011-09-02T00:00:00Z",
+    "last_bar_timestamp": "2026-08-31T00:00:00Z",
+    "symbol": "XAUUSD",
+    "timeframe": "1day"
+  },
+  "provider": "twelvedata",
+  "requested_end": "2026-08-31T00:00:00Z",
+  "requested_start": "2011-09-01T00:00:00Z",
+  "retrieved_at": "2026-09-04T18:06:17.306197Z"
+}
